@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Node
+node_modules/
+frontend/dist/
+
+# Env & secrets — NEVER commit credentials
+.env
+*.key
+*.pem
+
+# Databases
+*.db
+*.sqlite3
+data/
+
+# Logs
+logs/
+*.log
+
+# Backtest outputs
+backend/src/backtest/reports/*
+!backend/src/backtest/reports/.gitkeep
+
+# OS / editors
+.DS_Store
+.idea/
+.vscode/

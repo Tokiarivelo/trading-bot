@@ -1,0 +1,14 @@
+# AI provider selection per task, and refinement policy.
+provider_per_task:
+  pdf_extraction:   { provider: claude, model: claude-sonnet-5 }
+  code_generation:  { provider: claude, model: claude-sonnet-5 }
+  ten_trade_review: { provider: claude, model: claude-haiku-4-5 }
+  # Local alternative for any task:
+  #   { provider: ollama, model: "qwen2.5-coder:14b" }
+
+refinement:
+  mode: suggest               # suggest | auto — keep "suggest" until you trust the loop
+  auto_apply_min_improvement_pct: 10
+  max_auto_refinements_per_day: 1
+
+review_every_n_trades: 10

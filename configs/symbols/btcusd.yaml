@@ -1,0 +1,7 @@
+# BTCUSD — 24/7 market; session windows cover the most liquid hours.
+symbol: BTCUSD
+max_spread_points: 2500      # broker-dependent; calibrate against your broker in Phase 1
+min_rr: 1.5
+sessions:
+  - { start: "08:00", end: "22:00" }
+default_skill: normal/btcusd

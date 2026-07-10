@@ -1,0 +1,21 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(uv run pytest:*)",
+      "Bash(uv run ruff:*)",
+      "Bash(uv sync:*)",
+      "Bash(uv run uvicorn:*)",
+      "Bash(uv run alembic:*)",
+      "Bash(npm run:*)",
+      "Bash(npm install)",
+      "Bash(git status:*)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)"
+    ],
+    "deny": [
+      "Read(.env)",
+      "Read(**/*.key)",
+      "Edit(configs/risk.yaml)"
+    ]
+  }
+}

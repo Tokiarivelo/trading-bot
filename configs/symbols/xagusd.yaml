@@ -1,0 +1,8 @@
+# XAGUSD (silver) — thinner book than gold: wider spread cap, higher RR bar.
+symbol: XAGUSD
+max_spread_points: 45
+min_rr: 1.8
+sessions:
+  - { start: "09:00", end: "12:00" }
+  - { start: "14:30", end: "18:00" }
+default_skill: normal/xagusd

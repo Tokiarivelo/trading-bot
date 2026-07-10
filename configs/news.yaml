@@ -1,0 +1,13 @@
+# Economic calendar configuration (Phase 8).
+calendar:
+  source: forexfactory        # forexfactory | finnhub
+  refresh_minutes: 60
+
+tracked_events:
+  - { name: "Non-Farm Payrolls",    impact: high, skill: nfp }
+  - { name: "CPI",                  impact: high, skill: cpi }
+  - { name: "FOMC Statement",       impact: high, skill: fomc }
+  - { name: "FOMC Press Conference", impact: high, skill: fomc }
+  - { name: "*",                    impact: high, skill: generic_high_impact }
+
+default_window: { before_min: 30, after_min: 60 }

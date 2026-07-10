@@ -1,0 +1,37 @@
+import pytest
+
+from src.shared.config.settings import CONFIGS_DIR, load_yaml_config
+
+
+def test_app_config_loads_and_defaults_to_paper_mode():
+    cfg = load_yaml_config("app")
+    assert cfg["mode"] == "paper", "app must ship in paper mode"
+    assert set(cfg["symbols"]) == {"XAUUSD", "XAGUSD", "BTCUSD"}
+    assert cfg["engine"]["entry_timeframe"] == "M5"
+
+
+def test_risk_config_has_user_owned_caps():
+    cfg = load_yaml_config("risk")
+    for key in (
+        "risk_per_trade_pct",
+        "daily_loss_limit_pct",
+        "max_open_positions",
+        "max_trades_per_day",
+        "consecutive_loss_pause",
+    ):
+        assert key in cfg, f"risk.yaml missing {key}"
+    assert cfg["risk_per_trade_pct"] <= 2.0
+
+
+def test_every_enabled_symbol_has_a_symbol_config():
+    app = load_yaml_config("app")
+    for symbol in app["symbols"]:
+        cfg = load_yaml_config(f"symbols/{symbol.lower()}")
+        assert cfg["symbol"] == symbol
+        assert cfg["max_spread_points"] > 0
+        assert cfg["min_rr"] >= 1.0
+
+
+def test_missing_config_raises():
+    with pytest.raises(FileNotFoundError):
+        load_yaml_config("does-not-exist", CONFIGS_DIR)
