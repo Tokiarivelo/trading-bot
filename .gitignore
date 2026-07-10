@@ -9,12 +9,15 @@ __pycache__/
 
 # Node
 node_modules/
-frontend/dist/
+frontend/.next/
+frontend/out/
+frontend/next-env.d.ts
 
 # Env & secrets — NEVER commit credentials
 .env
 *.key
 *.pem
+*.enc
 
 # Databases
 *.db
@@ -33,3 +36,6 @@ backend/src/backtest/reports/*
 .DS_Store
 .idea/
 .vscode/
+python-3.12.8-amd64.exe
+python-3.12.8-embed-amd64.zip
+*.whl

@@ -1,0 +1,18 @@
+@import "tailwindcss";
+
+/* TradingView-dark design tokens — use these via Tailwind utilities
+   (bg-panel, border-line, text-ok, …), never as raw hex in components. */
+@theme {
+  --color-bg: #131722;
+  --color-panel: #1e222d;
+  --color-line: #2a2e39;
+  --color-ink: #d1d4dc;
+  --color-ink-muted: #5d606b;
+  --color-accent: #2962ff;
+  --color-ok: #26a69a;
+  --color-err: #ef5350;
+}
+
+:root {
+  color-scheme: dark;
+}

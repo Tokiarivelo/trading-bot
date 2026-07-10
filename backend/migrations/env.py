@@ -8,8 +8,8 @@ from sqlalchemy import engine_from_config, pool
 from src.shared.config.settings import Settings
 from src.shared.db.base import Base
 
-# Import module ORM models here as they land, so autogenerate sees them, e.g.:
-# from src.journal.domain import orm as journal_orm  # noqa: F401
+# Import module ORM models here as they land, so autogenerate sees them.
+from src.market_data.adapters import orm as market_data_orm  # noqa: F401
 
 config = context.config
 

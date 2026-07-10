@@ -1,0 +1,51 @@
+"""Raw market data straight from the terminal: candles, ticks, symbol specs."""
+
+from __future__ import annotations
+
+from typing import Annotated
+
+from fastapi import APIRouter, HTTPException, Query
+
+from ..mt5_client import Mt5Error, client
+from ..schemas import VALID_TIMEFRAMES, CandleOut, SymbolInfoOut, TickOut
+
+router = APIRouter()
+
+Symbol = Annotated[str, Query(min_length=3, max_length=32)]
+
+
+def _validate_timeframe(timeframe: str) -> None:
+    if timeframe not in VALID_TIMEFRAMES:
+        raise HTTPException(
+            status_code=422,
+            detail=f"timeframe must be one of {', '.join(VALID_TIMEFRAMES)}",
+        )
+
+
+@router.get("/candles", response_model=list[CandleOut])
+def candles(
+    symbol: Symbol,
+    timeframe: str,
+    count: Annotated[int, Query(ge=1, le=5000)] = 300,
+) -> list[CandleOut]:
+    _validate_timeframe(timeframe)
+    try:
+        return [CandleOut(**c) for c in client.candles(symbol, timeframe, count)]
+    except Mt5Error as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@router.get("/tick", response_model=TickOut)
+def tick(symbol: Symbol) -> TickOut:
+    try:
+        return TickOut(**client.tick(symbol))
+    except Mt5Error as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@router.get("/symbol_info", response_model=SymbolInfoOut)
+def symbol_info(symbol: Symbol) -> SymbolInfoOut:
+    try:
+        return SymbolInfoOut(**client.symbol_info(symbol))
+    except Mt5Error as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc

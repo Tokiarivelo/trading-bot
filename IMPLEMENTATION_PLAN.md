@@ -65,7 +65,7 @@ The official `MetaTrader5` Python package **only runs on Windows**, because it t
 | Language (backend/bot) | **Python 3.12+** | MT5 package, AI SDKs, pandas/numpy ecosystem |
 | MT5 Gateway | `MetaTrader5` pip package + **FastAPI** (runs under Wine/Windows) | Only officially supported bridge |
 | Backend API | **FastAPI** + WebSockets | Async, typed, easy WS streaming to chart |
-| Frontend | **React + TypeScript + Vite** | Modern, fast dev loop |
+| Frontend | **Next.js (App Router) + Tailwind CSS + TypeScript** | Production-grade React framework, utility-first styling, fast dev loop (Turbopack) |
 | Charting | **`lightweight-charts`** (TradingView's own open-source library) | Literally the TradingView look & feel; supports markers, price lines, overlays |
 | Database | **SQLite** (start) → PostgreSQL (later) | Trades, strategy versions, AI analyses, config |
 | AI — cloud | **Claude API** (`claude-sonnet-5` for analysis/codegen, `claude-haiku-4-5` for cheap routine checks) | Best code generation & document analysis |
@@ -75,6 +75,7 @@ The official `MetaTrader5` Python package **only runs on Windows**, because it t
 | News calendar | Forex Factory / investing.com scrape or `finnhub`/`fmp` API | Detect NFP/CPI/FOMC windows |
 | Secrets | OS keyring (`keyring` pkg) + encrypted at rest (`cryptography`/Fernet) | MT5 credentials never in plaintext |
 | Packaging | `docker-compose` for Linux services; gateway documented separately | Reproducible |
+| Dev tooling | `uv` (backend), `pnpm` (frontend), root `Makefile` as command entry point | One command per task, always-latest deps policy |
 
 ---
 
@@ -82,7 +83,7 @@ The official `MetaTrader5` Python package **only runs on Windows**, because it t
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
-│                            FRONTEND (React)                        │
+│                            FRONTEND (Next.js)                        │
 │  Chart (lightweight-charts) · Trade markers · Bot controls ·       │
 │  PDF upload · MT5 login form · Strategy & analysis viewer          │
 └───────────────▲─────────────────────────────▲──────────────────────┘
@@ -255,7 +256,7 @@ trading-bot/
 ├── frontend/
 │   ├── package.json
 │   ├── src/
-│   │   ├── app/                      ← routing, layout, providers
+│   │   ├── app/                      ← Next.js App Router: layout, pages, globals.css
 │   │   ├── features/                 ← one folder per feature (mirrors backend)
 │   │   │   ├── chart/                ← lightweight-charts wrapper, indicators,
 │   │   │   │                            trade markers, timeframe switcher
@@ -430,7 +431,8 @@ Contents to include:
 - Run `pytest backend/tests` and `ruff check` before declaring any task done.
 - Money-touching code paths: prefer explicit over clever; log every decision
   (signal, veto reason, spread, lot calc) at INFO.
-- Frontend: features mirror backend modules; charts via lightweight-charts only.
+- Frontend: Next.js (App Router) + Tailwind CSS; features mirror backend modules;
+  charts via lightweight-charts only; always latest stable packages.
 ```
 
 ### 9.2 `.claude/skills/` (Claude Code dev skills)
@@ -442,6 +444,7 @@ Contents to include:
 | `backtest` | `/backtest <strategy> <symbol> <period>` | Runs the backtest CLI, renders the report, summarizes win rate / PF / max DD |
 | `trade-review` | `/trade-review [n]` | Pulls last n trades from journal, correlates with market snapshots, writes a human-readable review |
 | `news-skill-gen` | `/news-skill-gen <event-name>` | Generates a new YAML news skill (activation window, spread caps, risk multiplier) from a template + historical volatility of that event |
+| `frontend-feature` | `/frontend-feature <description>` | Scaffolds/extends a frontend feature the project way: Next.js App Router + Tailwind, feature folder mirroring a backend module, shared api/ws clients, latest stable packages, `pnpm lint` + `pnpm build` validation |
 
 Each `SKILL.md` should contain: purpose, exact steps, files it may touch, validation commands to run, and what it must never do (e.g., `refine-bot` must never edit `configs/risk.yaml`).
 
@@ -530,20 +533,20 @@ review_every_n_trades: 10
 ## 12. Implementation Checklist (Phases)
 
 ### Phase 0 — Foundations (repo & tooling)
-- [ ] Init git repo, `README.md`, this plan
-- [ ] `CLAUDE.md` + `.claude/settings.json` + skill stubs (§9)
-- [ ] Backend scaffold: FastAPI app, module skeletons, DI container, event bus
-- [ ] Frontend scaffold: Vite + React + TS, layout, api/ws client
-- [ ] SQLite + alembic migrations
-- [ ] `docker-compose.yml` (backend, frontend, db) + gateway install doc (Wine or VPS — decide now, see §2)
-- [ ] CI: ruff + pytest on every commit
+- [x] Init git repo, `README.md`, this plan
+- [x] `CLAUDE.md` + `.claude/settings.json` + skill stubs (§9)
+- [x] Backend scaffold: FastAPI app, module skeletons, DI container, event bus
+- [x] Frontend scaffold: Next.js (App Router) + Tailwind CSS + TS, layout, api/ws client
+- [x] SQLite + alembic migrations
+- [x] `docker-compose.yml` (backend, frontend, db) + gateway install doc (Wine or VPS — decide now, see §2)
+- [x] CI: ruff + pytest on every commit
 
 ### Phase 1 — MT5 Gateway & market data
-- [ ] Gateway: login, candles, tick, symbol_info (spread), health
-- [ ] Backend `market_data` module + `mt5_gateway` adapter
-- [ ] Candle streaming M5/H1/H4/D1 for the 3 symbols; `CandleClosed` events
-- [ ] Historical download job → DB (needed for backtests & AI snapshots)
-- [ ] MT5 login flow end-to-end from the UI (F11), encrypted storage
+- [x] Gateway: login, candles, tick, symbol_info (spread), health
+- [x] Backend `market_data` module + `mt5_gateway` adapter
+- [x] Candle streaming M5/H1/H4/D1 for the 3 symbols; `CandleClosed` events
+- [x] Historical download job → DB (streaming persists closed bars; `POST /market-data/backfill` for bulk)
+- [x] MT5 login flow end-to-end from the UI (F11), encrypted storage
 
 ### Phase 2 — Chart (F2, F7 partial)
 - [ ] lightweight-charts candlestick + volume, dark theme

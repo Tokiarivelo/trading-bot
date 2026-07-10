@@ -1,0 +1,4 @@
+# pnpm settings (pnpm 10+ reads these here, not from package.json).
+# sharp is Next.js's image optimizer; its native build script is trusted.
+allowBuilds:
+  sharp: true

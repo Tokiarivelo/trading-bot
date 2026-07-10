@@ -21,6 +21,20 @@ jobs:
       - run: uv run ruff format --check src tests
       - run: uv run pytest
 
+  gateway:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: gateway
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v4
+        with:
+          python-version: "3.12"
+      - run: uv sync
+      - run: uv run ruff check src tests
+      - run: uv run pytest
+
   frontend:
     runs-on: ubuntu-latest
     defaults:
@@ -28,10 +42,12 @@ jobs:
         working-directory: frontend
     steps:
       - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4 # version comes from packageManager in package.json
       - uses: actions/setup-node@v4
         with:
           node-version: 24
-          cache: npm
-          cache-dependency-path: frontend/package-lock.json
-      - run: npm ci
-      - run: npm run build
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm lint
+      - run: pnpm build

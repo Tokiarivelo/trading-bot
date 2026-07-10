@@ -1,17 +1,29 @@
-"""MT5 Gateway — FastAPI app skeleton (endpoints land in Phase 1).
+"""MT5 Gateway — FastAPI app.
 
 Runs on Windows or under Wine next to a running MT5 terminal:
-    wine python -m uvicorn src.gateway.main:app --port 8787
+    cd gateway
+    wine python run_gateway.py          # see run_gateway.py for sys.path setup
+
+Thin and dumb by design: raw broker facts + explicit commands, no business
+logic. Everything except /health requires the X-Gateway-Secret header
+(GATEWAY_SHARED_SECRET env var).
 """
 
 from __future__ import annotations
 
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
+
+from .mt5_client import client
+from .routes import auth, market_data
+from .schemas import HealthOut
+from .security import verify_secret
 
 app = FastAPI(title="MT5 Gateway")
 
+app.include_router(auth.router, dependencies=[Depends(verify_secret)])
+app.include_router(market_data.router, dependencies=[Depends(verify_secret)])
 
-@app.get("/health")
-def health() -> dict[str, str | bool]:
-    # Phase 1: also report mt5.terminal_info() connection state.
-    return {"status": "ok", "terminal_connected": False}
+
+@app.get("/health", response_model=HealthOut)
+def health() -> HealthOut:
+    return HealthOut(**client.health())

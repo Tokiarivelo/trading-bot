@@ -31,11 +31,34 @@ Read `IMPLEMENTATION_PLAN.md` for the full design. These rules are binding.
   `uv run ruff check src tests` and `uv run pytest`.
 
 ## Frontend
+- Stack: **Next.js (App Router) + Tailwind CSS + TypeScript**. No Vite, no CRA,
+  no CSS-in-JS libraries. Routes/layout live in `frontend/src/app/`.
+- Styling via Tailwind utilities only; design tokens live in the `@theme` block
+  of `frontend/src/app/globals.css` — no raw hex in components, no separate
+  CSS files.
+- Backend REST is proxied under `/api` (rewrites in `next.config.ts`).
+  WebSockets connect to the backend directly (`src/shared/api/ws.ts`) because
+  Next rewrites don't proxy WS.
 - Feature folders under `frontend/src/features/` mirror backend modules.
 - All charting via `lightweight-charts` only.
 - API types come from the backend OpenAPI schema — don't hand-write duplicates.
+- Package manager is **pnpm** (version pinned via `packageManager` in
+  `frontend/package.json`) — never npm or yarn; never commit a
+  `package-lock.json` / `yarn.lock`.
+- Before declaring any frontend task done, run `make lint-frontend` and
+  `make build-frontend` (or from `frontend/`: `pnpm lint` and `pnpm build`).
 
 ## Conventions
 - Python 3.12, `uv` for dependency management, `ruff` for lint+format.
+- Frontend dependency management via `pnpm` only.
+- The root `Makefile` is the canonical entry point for every dev command
+  (setup, dev servers, lint, tests, build, migrations, docker). Add a target
+  there when introducing a new recurring command; `make check` is the
+  before-done gate for the whole repo.
+- **Always use the latest stable package versions** when adding or updating
+  dependencies (`pnpm view <pkg> version` for the frontend; `uv add` resolves
+  latest). Never stay on an older major out of habit; pin below latest only
+  for a real incompatibility, and record why in the commit (e.g. TypeScript is
+  pinned to 6.x until Next.js supports TS 7). `make outdated` shows drift.
 - Config is YAML in `configs/`, loaded through `shared/config`; secrets only via
   `.env` / OS keyring — never hardcoded, never logged.
