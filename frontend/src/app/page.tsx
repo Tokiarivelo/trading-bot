@@ -44,7 +44,10 @@ export default function Home() {
             </button>
           ))}
         </nav>
-        <Link href="/backtest" className="ml-auto text-sm text-ink-muted hover:text-accent">
+        <Link href="/strategies" className="ml-auto text-sm text-ink-muted hover:text-accent">
+          Strategies
+        </Link>
+        <Link href="/backtest" className="text-sm text-ink-muted hover:text-accent">
           Backtests
         </Link>
         <span className="text-sm">
@@ -65,7 +68,13 @@ export default function Home() {
           <AccountPanel />
           <Panel>Bot control (Phase 4)</Panel>
           <Panel>Journal (Phase 3)</Panel>
-          <Panel>AI reports (Phase 6–7)</Panel>
+          <Panel>
+            <Link href="/strategies" className="text-accent hover:underline">
+              Strategies →
+            </Link>{" "}
+            PDF upload, spec review, AI codegen, versions
+          </Panel>
+          <Panel>AI 10-trade review (Phase 7)</Panel>
           <Panel>News (Phase 8)</Panel>
         </aside>
       </main>

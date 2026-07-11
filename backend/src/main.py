@@ -22,6 +22,7 @@ import socketio
 from fastapi import FastAPI
 from pydantic import BaseModel, Field
 
+from src.ai.api.routes import router as ai_router
 from src.backtest.api.routes import router as backtest_router
 from src.broker.api.routes import router as account_router
 from src.broker.api.trading_routes import router as trading_router
@@ -32,6 +33,7 @@ from src.market_data.api.routes import router as market_data_router
 from src.market_data.api.ws import sio
 from src.shared.config.settings import load_yaml_config
 from src.shared.logging.setup import configure_logging
+from src.strategies.api.routes import router as strategies_router
 
 API_DESCRIPTION = """
 REST + WebSocket API for the AI trading bot backend.
@@ -88,6 +90,19 @@ OPENAPI_TAGS = [
         "the same DB the live app does and can take a while, so it stays a CLI-only "
         "operation for now; this API only lists/reads the report files it produces.",
     },
+    {
+        "name": "ai",
+        "description": "PDF -> StrategySpec -> code pipeline (F4). Every step is human-gated: "
+        "upload only produces a review draft, and code generation only ever produces a "
+        "'validated' strategy version — never an active, tradeable one. See the `strategies` "
+        "tag for activation.",
+    },
+    {
+        "name": "strategies",
+        "description": "Strategy version history and activation. Activation registers a "
+        "version live in the engine's `StrategyRegistry`; it never changes "
+        "`configs/app.yaml`'s paper/live mode or any risk cap.",
+    },
 ]
 
 
@@ -117,6 +132,8 @@ app.include_router(trading_router)
 app.include_router(journal_router)
 app.include_router(engine_router)
 app.include_router(backtest_router)
+app.include_router(ai_router)
+app.include_router(strategies_router)
 
 
 class HealthOut(BaseModel):

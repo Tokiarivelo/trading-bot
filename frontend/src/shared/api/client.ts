@@ -11,12 +11,31 @@ export class ApiError extends Error {
   }
 }
 
+async function errorMessage(res: Response): Promise<string> {
+  const text = await res.text();
+  try {
+    const body = JSON.parse(text) as { detail?: unknown };
+    if (typeof body.detail === "string") return body.detail;
+  } catch {
+    // Not JSON (or no `detail` field) — fall through to the raw text below.
+  }
+  return text;
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${BASE}${path}`, {
     headers: { "Content-Type": "application/json" },
     ...init,
   });
-  if (!res.ok) throw new ApiError(res.status, await res.text());
+  if (!res.ok) throw new ApiError(res.status, await errorMessage(res));
+  return res.json() as Promise<T>;
+}
+
+async function requestForm<T>(path: string, method: string, form: FormData): Promise<T> {
+  // No Content-Type header here on purpose — the browser sets the multipart
+  // boundary itself when the body is a FormData.
+  const res = await fetch(`${BASE}${path}`, { method, body: form });
+  if (!res.ok) throw new ApiError(res.status, await errorMessage(res));
   return res.json() as Promise<T>;
 }
 
@@ -24,6 +43,9 @@ export const api = {
   get: <T>(path: string) => request<T>(path),
   post: <T>(path: string, body?: unknown) =>
     request<T>(path, { method: "POST", body: body ? JSON.stringify(body) : undefined }),
+  patch: <T>(path: string, body: unknown) =>
+    request<T>(path, { method: "PATCH", body: JSON.stringify(body) }),
+  postForm: <T>(path: string, form: FormData) => requestForm<T>(path, "POST", form),
 };
 
 export interface AppConfig {
@@ -163,3 +185,91 @@ export interface BacktestReportDetail extends BacktestReportSummary {
 export const getBacktestReports = () => api.get<BacktestReportSummary[]>("/backtest/reports");
 export const getBacktestReport = (id: string) =>
   api.get<BacktestReportDetail>(`/backtest/reports/${encodeURIComponent(id)}`);
+
+// ── AI: PDF -> StrategySpec pipeline (Phase 6, F4) ──────────────────────────
+
+export interface ExtractedStrategySpec {
+  name: string;
+  symbols: string[];
+  entry_timeframe: string;
+  confirmation_timeframes: string[];
+  indicators: string[];
+  entry_rules: string;
+  exit_rules: string;
+  risk_notes: string;
+  params: Record<string, unknown>;
+}
+
+export type DraftStatus = "pending_review" | "approved" | "rejected" | "code_generated";
+
+export interface StrategyDraft {
+  id: string;
+  source_filename: string;
+  created_at: number; // epoch seconds UTC
+  status: DraftStatus;
+  extracted_spec: ExtractedStrategySpec;
+  edited_spec: ExtractedStrategySpec | null;
+  effective_spec: ExtractedStrategySpec;
+}
+
+export interface GeneratedCode {
+  draft_id: string;
+  code: string;
+  is_valid: boolean;
+  sandbox_errors: string[];
+  version_id: string | null;
+  backtest_report_id: string | null;
+}
+
+export const uploadStrategyPdf = (file: File) => {
+  const form = new FormData();
+  form.append("file", file);
+  return api.postForm<StrategyDraft>("/ai/pdf-strategy/upload", form);
+};
+
+export const getStrategyDrafts = () => api.get<StrategyDraft[]>("/ai/pdf-strategy/drafts");
+export const getStrategyDraft = (id: string) =>
+  api.get<StrategyDraft>(`/ai/pdf-strategy/drafts/${encodeURIComponent(id)}`);
+export const updateStrategyDraftSpec = (id: string, editedSpec: ExtractedStrategySpec) =>
+  api.patch<StrategyDraft>(`/ai/pdf-strategy/drafts/${encodeURIComponent(id)}`, {
+    edited_spec: editedSpec,
+  });
+export const approveStrategyDraft = (id: string) =>
+  api.post<StrategyDraft>(`/ai/pdf-strategy/drafts/${encodeURIComponent(id)}/approve`);
+export const rejectStrategyDraft = (id: string) =>
+  api.post<StrategyDraft>(`/ai/pdf-strategy/drafts/${encodeURIComponent(id)}/reject`);
+export const generateStrategyCode = (id: string) =>
+  api.post<GeneratedCode>(`/ai/pdf-strategy/drafts/${encodeURIComponent(id)}/generate-code`);
+
+// ── Strategy versions & activation (Phase 6, §6.5) ──────────────────────────
+
+export type StrategyVersionStatus = "validated" | "active" | "archived";
+export type StrategySource = "ai_generated" | "manual";
+
+export interface StrategyVersionSummary {
+  id: string;
+  name: string;
+  version: number;
+  file_path: string;
+  code_hash: string;
+  source: StrategySource;
+  status: StrategyVersionStatus;
+  created_at: number; // epoch seconds UTC
+  parent_version_id: string | null;
+  draft_id: string | null;
+  spec: ExtractedStrategySpec | null;
+  backtest_report_id: string | null;
+}
+
+export interface StrategyVersionDetail extends StrategyVersionSummary {
+  code: string;
+}
+
+export const getStrategyVersions = (name?: string) =>
+  api.get<StrategyVersionSummary[]>(
+    `/strategies/versions${name ? `?name=${encodeURIComponent(name)}` : ""}`,
+  );
+export const getStrategyVersion = (id: string) =>
+  api.get<StrategyVersionDetail>(`/strategies/versions/${encodeURIComponent(id)}`);
+export const activateStrategyVersion = (id: string) =>
+  api.post<StrategyVersionSummary>(`/strategies/versions/${encodeURIComponent(id)}/activate`);

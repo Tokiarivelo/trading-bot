@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from src.ai.ports.llm import ProviderSpec
 from src.broker.domain.symbol_config import SymbolTradingConfig
 from src.engine.domain.models import RiskCaps
 from src.shared.config.settings import load_yaml_config
@@ -36,3 +37,11 @@ def load_risk_caps(configs_dir: Path) -> RiskCaps:
         max_trades_per_day=data["max_trades_per_day"],
         consecutive_loss_pause=data["consecutive_loss_pause"],
     )
+
+
+def load_llm_provider_config(configs_dir: Path) -> dict[str, ProviderSpec]:
+    data = load_yaml_config("ai", configs_dir).get("provider_per_task", {})
+    return {
+        task: ProviderSpec(provider=entry["provider"], model=entry["model"])
+        for task, entry in data.items()
+    }

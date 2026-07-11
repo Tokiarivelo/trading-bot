@@ -9,8 +9,10 @@ from src.shared.config.settings import Settings
 from src.shared.db.base import Base
 
 # Import module ORM models here as they land, so autogenerate sees them.
+from src.ai.adapters import orm as ai_orm  # noqa: F401
 from src.journal.adapters import orm as journal_orm  # noqa: F401
 from src.market_data.adapters import orm as market_data_orm  # noqa: F401
+from src.strategies.adapters import orm as strategies_orm  # noqa: F401
 
 config = context.config
 

@@ -13,6 +13,9 @@ from pathlib import Path
 import httpx
 import yaml
 
+from src.ai.adapters.repository import DraftRepository
+from src.ai.application.llm_router import LLMRouter
+from src.ai.application.pdf_to_strategy import PdfToStrategyService
 from src.broker.adapters.credential_store import FernetCredentialStore
 from src.broker.adapters.mt5_gateway import GatewayAccount, GatewayBroker
 from src.broker.adapters.paper import PaperBroker
@@ -32,17 +35,24 @@ from src.market_data.api.ws import WsBroadcaster
 from src.market_data.application.candle_stream import CandleStreamService
 from src.market_data.application.history import CandleHistoryService
 from src.market_data.domain.models import Timeframe
-from src.shared.config.loaders import load_risk_caps, load_symbol_trading_config
+from src.shared.config.loaders import (
+    load_llm_provider_config,
+    load_risk_caps,
+    load_symbol_trading_config,
+)
 from src.shared.config.settings import Settings, load_yaml_config
 from src.shared.db.base import make_session_factory
 from src.shared.events.bus import EventBus
 from src.shared.events.definitions import CandleClosed, PositionClosed, PositionOpened
 from src.skills.application.skill_selector import SkillSelector
 from src.skills.domain.models import NormalSkill, SessionWindow
+from src.strategies.adapters.repository import StrategyVersionRepository
+from src.strategies.application.versioning import StrategyVersionService
 from src.strategies.generated.breakout_v1 import BreakoutV1
 from src.strategies.registry import StrategyRegistry
 
 _SKILLS_DIR = Path(__file__).resolve().parent / "skills" / "normal"
+_STRATEGIES_GENERATED_DIR = Path(__file__).resolve().parent / "strategies" / "generated"
 
 
 @dataclass
@@ -60,9 +70,9 @@ class Container:
     order_service: OrderService
     trade_journal: TradeJournalService
     trade_engine: TradeEngine
+    strategy_versions: StrategyVersionService
+    pdf_to_strategy: PdfToStrategyService
 
-    # Later phases add wired module services here, e.g.:
-    #   ai: AiService                    (Phase 6)
     _closers: list = field(default_factory=list)
 
     async def aclose(self) -> None:
@@ -138,6 +148,29 @@ def build_container(settings: Settings | None = None) -> Container:
     strategy_registry = StrategyRegistry()
     strategy_registry.register(BreakoutV1())
 
+    strategy_version_repository = StrategyVersionRepository(session_factory)
+    strategy_versions = StrategyVersionService(
+        repository=strategy_version_repository,
+        registry=strategy_registry,
+        generated_dir=_STRATEGIES_GENERATED_DIR,
+    )
+    # Restores whichever AI-generated versions were active before a restart;
+    # runs after the baseline registration above so a same-named AI version
+    # (unlikely, but possible) wins, matching what the DB says is live.
+    strategy_versions.load_active_into_registry()
+
+    llm_router = LLMRouter(
+        load_llm_provider_config(settings.configs_dir),
+        anthropic_api_key=settings.anthropic_api_key,
+        ollama_url=settings.ollama_url,
+    )
+    draft_repository = DraftRepository(session_factory)
+    pdf_to_strategy = PdfToStrategyService(
+        draft_repository=draft_repository,
+        strategy_versions=strategy_versions,
+        llm_router=llm_router,
+    )
+
     skill_selector = SkillSelector(
         skills={symbol: _load_normal_skill(symbol) for symbol in symbols}, timezone=timezone
     )
@@ -171,6 +204,8 @@ def build_container(settings: Settings | None = None) -> Container:
         order_service=order_service,
         trade_journal=trade_journal,
         trade_engine=trade_engine,
+        strategy_versions=strategy_versions,
+        pdf_to_strategy=pdf_to_strategy,
     )
 
 

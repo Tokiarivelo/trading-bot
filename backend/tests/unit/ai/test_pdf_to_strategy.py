@@ -1,0 +1,194 @@
+"""PDF -> StrategySpec -> code pipeline (§8.1): human review is never
+skippable — edits reset review, approval gates code generation, and
+generated code always goes through the sandbox before anything is written
+to `strategies/generated/`."""
+
+from __future__ import annotations
+
+import json
+
+import fitz
+import pytest
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+
+from src.ai.adapters.repository import DraftRepository
+from src.ai.application.pdf_to_strategy import InvalidDraftStateError, PdfToStrategyService
+from src.ai.domain.models import DraftStatus, ExtractedStrategySpec
+from src.market_data.adapters import orm as market_data_orm  # noqa: F401 — registers candles table
+from src.shared.db.base import Base
+from src.strategies.adapters.repository import StrategyVersionRepository
+from src.strategies.application.versioning import StrategyVersionService
+from src.strategies.domain.versioning import VersionStatus
+from src.strategies.registry import StrategyRegistry
+
+
+def _code_for(name: str) -> str:
+    class_name = "".join(w.capitalize() for w in name.split("_"))
+    return f"""
+from src.strategies.domain.models import Direction, MarketContext, Signal, StrategySpec
+
+
+class {class_name}:
+    def __init__(self):
+        self.spec = StrategySpec(
+            name="{name}", version=1, symbols=("XAUUSD",), entry_timeframe="M5",
+            confirmation_timeframes=("H1",), params={{}},
+        )
+
+    def evaluate(self, ctx: MarketContext):
+        return None
+"""
+
+
+def _fake_pdf_bytes() -> bytes:
+    doc = fitz.open()
+    page = doc.new_page()
+    page.insert_text((72, 72), "Buy the M5 EMA200 pullback in an uptrend.")
+    data = doc.tobytes()
+    doc.close()
+    return data
+
+
+EXTRACTED_SPEC_JSON = json.dumps(
+    {
+        "name": "gold_ema_pullback",
+        "symbols": ["XAUUSD"],
+        "entry_timeframe": "M5",
+        "confirmation_timeframes": ["H1"],
+        "indicators": ["EMA200"],
+        "entry_rules": "Buy when price pulls back to EMA200 in an uptrend.",
+        "exit_rules": "SL below recent swing low, TP at 2R.",
+        "risk_notes": "Risk 0.5% per trade.",
+        "params": {"ema_period": 200},
+    }
+)
+
+
+class FakeExtractionLLM:
+    async def complete(self, message, *, max_tokens=4096):
+        return EXTRACTED_SPEC_JSON
+
+
+class FakeCodeGenLLM:
+    def __init__(self, code: str) -> None:
+        self.code = code
+
+    async def complete(self, message, *, max_tokens=4096):
+        return f"```python\n{self.code}\n```"  # exercise fence-stripping too
+
+
+class InvalidCodeGenLLM:
+    async def complete(self, message, *, max_tokens=4096):
+        return "import os\nx = 1\n"
+
+
+class FakeRouter:
+    def __init__(self, extraction_llm, codegen_llm) -> None:
+        self._map = {"pdf_extraction": extraction_llm, "code_generation": codegen_llm}
+
+    def for_task(self, task: str):
+        return self._map[task]
+
+
+def _make_service(tmp_path, codegen_llm):
+    engine = create_engine(f"sqlite:///{tmp_path}/test.db")
+    Base.metadata.create_all(engine)
+    session_factory = sessionmaker(bind=engine, expire_on_commit=False)
+    generated_dir = tmp_path / "generated"
+    generated_dir.mkdir()
+    strategy_versions = StrategyVersionService(
+        StrategyVersionRepository(session_factory), StrategyRegistry(), generated_dir
+    )
+    draft_repository = DraftRepository(session_factory)
+    router = FakeRouter(FakeExtractionLLM(), codegen_llm)
+
+    candles_engine = create_engine(f"sqlite:///{tmp_path}/candles.db")
+    Base.metadata.create_all(candles_engine)  # empty candles table -> NoHistoryError, handled
+
+    return PdfToStrategyService(
+        draft_repository,
+        strategy_versions,
+        router,
+        backtest_database_url=f"sqlite:///{tmp_path}/candles.db",
+    )
+
+
+@pytest.fixture
+def service(tmp_path):
+    return _make_service(tmp_path, FakeCodeGenLLM(_code_for("gold_ema_pullback")))
+
+
+async def test_create_draft_from_pdf_extracts_spec(service):
+    draft = await service.create_draft_from_pdf("method.pdf", _fake_pdf_bytes())
+    assert draft.status == DraftStatus.PENDING_REVIEW
+    assert draft.extracted_spec.name == "gold_ema_pullback"
+    assert draft.edited_spec is None
+    assert draft.effective_spec == draft.extracted_spec
+
+
+async def test_update_draft_spec_keeps_original_and_resets_review(service):
+    draft = await service.create_draft_from_pdf("method.pdf", _fake_pdf_bytes())
+    edited = ExtractedStrategySpec.from_dict({**draft.extracted_spec.to_dict(), "name": "renamed"})
+
+    updated = await service.update_draft_spec(draft.id, edited)
+    assert updated.status == DraftStatus.PENDING_REVIEW
+    assert updated.edited_spec.name == "renamed"
+    assert updated.extracted_spec.name == "gold_ema_pullback"  # untouched
+    assert updated.effective_spec.name == "renamed"
+
+
+async def test_approve_requires_pending_review(service):
+    draft = await service.create_draft_from_pdf("method.pdf", _fake_pdf_bytes())
+    await service.approve_draft(draft.id)
+    with pytest.raises(InvalidDraftStateError):
+        await service.approve_draft(draft.id)
+
+
+async def test_generate_code_requires_approval(service):
+    draft = await service.create_draft_from_pdf("method.pdf", _fake_pdf_bytes())
+    with pytest.raises(InvalidDraftStateError):
+        await service.generate_code(draft.id)
+
+
+async def test_generate_code_success_creates_validated_version(service):
+    draft = await service.create_draft_from_pdf("method.pdf", _fake_pdf_bytes())
+    await service.approve_draft(draft.id)
+
+    result = await service.generate_code(draft.id)
+
+    assert result.is_valid
+    assert result.sandbox_errors == ()
+    assert result.version_id is not None
+    # No candle history in the isolated test DB -> auto-backtest cleanly skips.
+    assert result.backtest_report_id is None
+
+    updated_draft = await service.get_draft(draft.id)
+    assert updated_draft.status == DraftStatus.CODE_GENERATED
+
+    version = service._strategy_versions.get_version(result.version_id)
+    assert version.status == VersionStatus.VALIDATED
+    assert version.source.value == "ai_generated"
+    assert version.draft_id == draft.id
+
+
+async def test_generate_code_rejects_invalid_code_without_crashing(tmp_path):
+    service = _make_service(tmp_path, InvalidCodeGenLLM())
+    draft = await service.create_draft_from_pdf("method.pdf", _fake_pdf_bytes())
+    await service.approve_draft(draft.id)
+
+    result = await service.generate_code(draft.id)
+
+    assert not result.is_valid
+    assert result.version_id is None
+    assert any("os" in e for e in result.sandbox_errors)
+
+    # Draft stays approved (not code_generated) so the user can retry.
+    updated_draft = await service.get_draft(draft.id)
+    assert updated_draft.status == DraftStatus.APPROVED
+
+
+async def test_reject_draft(service):
+    draft = await service.create_draft_from_pdf("method.pdf", _fake_pdf_bytes())
+    rejected = await service.reject_draft(draft.id)
+    assert rejected.status == DraftStatus.REJECTED

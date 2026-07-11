@@ -582,11 +582,11 @@ review_every_n_trades: 10
 - [x] UI report page
 
 ### Phase 6 — AI: PDF → Strategy (F4)
-- [ ] `LLMPort` + Claude adapter + Ollama adapter; provider config
-- [ ] PDF upload + extraction + `extract_method_from_pdf` prompt → StrategySpec
-- [ ] Spec review/edit UI
-- [ ] `generate_strategy_code` prompt → sandbox validation → auto-backtest
-- [ ] Strategy versioning + activation flow (paper first)
+- [x] `LLMPort` + Claude adapter + Ollama adapter; provider config
+- [x] PDF upload + extraction + `extract_method_from_pdf` prompt → StrategySpec
+- [x] Spec review/edit UI
+- [x] `generate_strategy_code` prompt → sandbox validation → auto-backtest
+- [x] Strategy versioning + activation flow (paper first)
 
 ### Phase 7 — AI: 10-trade refinement loop (F5)
 - [ ] `TenTradesCompleted` event from journal
