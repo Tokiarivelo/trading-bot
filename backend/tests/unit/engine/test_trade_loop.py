@@ -5,7 +5,13 @@ from src.engine.application.risk_manager import RiskManager
 from src.engine.application.trade_loop import TradeEngine
 from src.engine.domain.models import RiskCaps
 from src.market_data.domain.models import Candle, SymbolInfo, Timeframe
-from src.shared.events.definitions import CandleClosed, NewsWindowEntered, PositionClosed
+from src.shared.events.bus import EventBus
+from src.shared.events.definitions import (
+    CandleClosed,
+    CircuitBreakerTripped,
+    NewsWindowEntered,
+    PositionClosed,
+)
 from src.skills.ports.skill_selector import SkillDecision
 from src.strategies.domain.models import Direction, MarketContext, Signal, StrategySpec
 
@@ -219,6 +225,7 @@ def make_engine(
     enabled=True,
     risk_manager=None,
     context_bars=5,
+    event_bus=None,
 ):
     market_data = market_data or FakeMarketData(bar_count=context_bars)
     order_service = order_service or FakeOrderService()
@@ -228,6 +235,7 @@ def make_engine(
     strategy = strategy if strategy is not None else FakeStrategy(BUY_SIGNAL)
     strategy_source = FakeStrategySource({"fake": strategy})
     risk_manager = risk_manager or RiskManager(caps=CAPS, timezone="UTC")
+    event_bus = event_bus if event_bus is not None else EventBus()
 
     engine = TradeEngine(
         market_data=market_data,
@@ -239,6 +247,7 @@ def make_engine(
         strategy_source=strategy_source,
         entry_timeframe="M5",
         confirmation_timeframes=("H1", "H4"),
+        event_bus=event_bus,
         enabled=enabled,
         context_bars=context_bars,
     )
@@ -401,6 +410,44 @@ async def test_news_window_entered_flattens_positions_when_close_all():
 
     assert order_service.closed == [7]
     assert not risk_manager.paused  # unlike kill_switch, this never pauses the engine
+
+
+def _collector():
+    published: list[CircuitBreakerTripped] = []
+
+    async def handler(event: CircuitBreakerTripped) -> None:
+        published.append(event)
+
+    return published, handler
+
+
+async def test_kill_switch_publishes_circuit_breaker_tripped_once():
+    event_bus = EventBus()
+    published, handler = _collector()
+    event_bus.subscribe(CircuitBreakerTripped, handler)
+    engine, *_ = make_engine(event_bus=event_bus)
+
+    await engine.kill_switch()
+
+    assert len(published) == 1
+    assert published[0].reason == "manual kill switch"
+
+
+async def test_consecutive_loss_pause_publishes_circuit_breaker_tripped_once():
+    event_bus = EventBus()
+    published, handler = _collector()
+    event_bus.subscribe(CircuitBreakerTripped, handler)
+    risk_manager = RiskManager(caps=CAPS, timezone="UTC")
+    engine, *_ = make_engine(risk_manager=risk_manager, event_bus=event_bus)
+
+    for _ in range(CAPS.consecutive_loss_pause):
+        await engine.on_position_closed(
+            PositionClosed(symbol="XAUUSD", position_id="1", close_price=2400.0, profit=-10.0)
+        )
+
+    assert risk_manager.paused
+    assert len(published) == 1
+    assert "consecutive losses" in published[0].reason
 
 
 async def test_news_window_entered_does_nothing_when_close_all_false():

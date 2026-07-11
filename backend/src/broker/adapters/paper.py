@@ -8,7 +8,14 @@ import logging
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 
-from src.broker.domain.trading import ExecutionResult, OrderRejected, OrderRequest, Position, Side
+from src.broker.domain.trading import (
+    ClosedPositionInfo,
+    ExecutionResult,
+    OrderRejected,
+    OrderRequest,
+    Position,
+    Side,
+)
 from src.market_data.ports.market_data import MarketDataPort
 
 logger = logging.getLogger(__name__)
@@ -173,3 +180,10 @@ class PaperBroker:
                 )
             )
         return positions
+
+    async def get_close_info(self, ticket: int) -> ClosedPositionInfo | None:
+        # Paper positions only ever close when our own code calls
+        # close_position()/close_at_price() — there's no simulated broker
+        # closing them behind our back, so reconciliation never needs this
+        # in paper mode (live GatewayBroker is the only adapter it matters for).
+        return None

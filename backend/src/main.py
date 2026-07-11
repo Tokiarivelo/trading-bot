@@ -19,7 +19,7 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 
 import socketio
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from pydantic import BaseModel, Field
 
 from src.ai.api.routes import router as ai_router
@@ -31,8 +31,10 @@ from src.container import build_container
 from src.engine.api.routes import router as engine_router
 from src.journal.api.routes import router as journal_router
 from src.market_data.api.routes import router as market_data_router
-from src.market_data.api.ws import bind_candle_stream, bind_live_candle, sio
+from src.market_data.api.ws import bind_auth, bind_candle_stream, bind_live_candle, sio
 from src.news.api.routes import router as news_router
+from src.shared.auth.api.routes import router as auth_router
+from src.shared.auth.dependencies import require_session
 from src.shared.config.settings import load_yaml_config
 from src.shared.logging.setup import configure_logging
 from src.strategies.api.routes import router as strategies_router
@@ -54,7 +56,15 @@ description and `src/market_data/api/ws.py` for the `subscribe` /
 OPENAPI_TAGS = [
     {
         "name": "meta",
-        "description": "Liveness and runtime configuration — no auth, no gateway dependency.",
+        "description": "Liveness check — no auth, no gateway dependency. Runtime configuration "
+        "(`/config/app`) requires a session like every other route below.",
+    },
+    {
+        "name": "auth",
+        "description": "Login/logout for the shared app password (§11) — the bot can place "
+        "live trades, so every route except this one and `/health` requires the session "
+        "token `POST /auth/login` issues. When `TB_APP_PASSWORD` is unset, no session is "
+        "required anywhere (bare local dev).",
     },
     {
         "name": "account",
@@ -124,12 +134,17 @@ async def lifespan(app: FastAPI):
     app.state.container = container
     bind_candle_stream(container.candle_stream)
     bind_live_candle(container.live_candle)
+    bind_auth(container.session_issuer, lambda: container.settings.app_password)
     # Reconnect with stored credentials if the gateway is already up, then
     # start the candle streams — they idle harmlessly until login succeeds.
     await container.account.reconnect_from_stored()
+    # Catch any broker-side close (SL/TP fill) that happened while the
+    # backend was down — see broker/application/reconciliation.py.
+    await container.reconciliation.reconcile_all()
     container.candle_stream.start()
     container.live_candle.start()
     container.news_window_service.start()
+    container.health_monitor.start()
     yield
     await container.aclose()
 
@@ -141,16 +156,19 @@ app = FastAPI(
     openapi_tags=OPENAPI_TAGS,
     lifespan=lifespan,
 )
-app.include_router(account_router)
-app.include_router(market_data_router)
-app.include_router(trading_router)
-app.include_router(journal_router)
-app.include_router(engine_router)
-app.include_router(backtest_router)
-app.include_router(ai_router)
-app.include_router(ai_refinement_router)
-app.include_router(strategies_router)
-app.include_router(news_router)
+_SESSION_REQUIRED = [Depends(require_session)]
+
+app.include_router(auth_router)
+app.include_router(account_router, dependencies=_SESSION_REQUIRED)
+app.include_router(market_data_router, dependencies=_SESSION_REQUIRED)
+app.include_router(trading_router, dependencies=_SESSION_REQUIRED)
+app.include_router(journal_router, dependencies=_SESSION_REQUIRED)
+app.include_router(engine_router, dependencies=_SESSION_REQUIRED)
+app.include_router(backtest_router, dependencies=_SESSION_REQUIRED)
+app.include_router(ai_router, dependencies=_SESSION_REQUIRED)
+app.include_router(ai_refinement_router, dependencies=_SESSION_REQUIRED)
+app.include_router(strategies_router, dependencies=_SESSION_REQUIRED)
+app.include_router(news_router, dependencies=_SESSION_REQUIRED)
 
 
 class HealthOut(BaseModel):
@@ -194,6 +212,8 @@ async def health() -> HealthOut:
     summary="Get runtime app configuration",
     description="Current runtime mode/symbols/engine config from `configs/app.yaml` — the UI "
     "shows this prominently so paper vs. live mode is never ambiguous.",
+    dependencies=_SESSION_REQUIRED,
+    responses={401: {"description": "Missing or invalid session (see the `auth` tag)."}},
 )
 async def app_config() -> AppConfigOut:
     return AppConfigOut(**load_yaml_config("app"))

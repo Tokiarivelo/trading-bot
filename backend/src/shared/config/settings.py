@@ -33,6 +33,17 @@ class Settings(BaseSettings):
     finnhub_api_key: str = ""
     configs_dir: Path = CONFIGS_DIR
 
+    # App auth (§11) — every route except /health and /auth/* requires a
+    # session when this is set; unset means "bare local dev", no login.
+    app_password: str = ""
+
+    # Alerting (§12 Phase 9) — secrets only; non-secret settings (which
+    # channels are on, per-event-type flags) live in configs/alerting.yaml.
+    telegram_bot_token: str = ""
+    telegram_chat_id: str = ""
+    smtp_username: str = ""
+    smtp_password: str = ""
+
 
 def load_yaml_config(name: str, configs_dir: Path = CONFIGS_DIR) -> dict[str, Any]:
     """Load `configs/<name>.yaml` (e.g. "app", "risk", "symbols/xauusd")."""

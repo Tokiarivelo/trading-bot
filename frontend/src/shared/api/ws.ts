@@ -17,6 +17,7 @@
  */
 
 import { io, type Socket } from "socket.io-client";
+import { getToken } from "@/shared/api/client";
 
 const WS_BASE = process.env.NEXT_PUBLIC_WS_URL ?? "http://127.0.0.1:8000";
 
@@ -31,12 +32,26 @@ function roomKey(room: { symbol: string; timeframe: string }): string {
 
 function getSocket(): Socket {
   if (!socket) {
-    socket = io(WS_BASE, { autoConnect: true, reconnection: true });
+    // Sent as the Socket.IO handshake `auth` payload — the server checks it
+    // the same way REST routes check `Authorization: Bearer` (§11), since
+    // this connection goes straight to the backend and never passes through
+    // the Next.js /api rewrite that attaches the header for REST calls.
+    socket = io(WS_BASE, { autoConnect: true, reconnection: true, auth: { token: getToken() } });
     socket.on("connect", () => {
       for (const room of activeRooms.values()) socket?.emit("subscribe", room);
     });
   }
   return socket;
+}
+
+/** Call after login (or logout) so the next connect/reconnect carries the
+ * current token — the socket normally stays open for the app's lifetime, so
+ * a fresh login needs to push its new token in rather than wait for a
+ * reconnect that may never happen. */
+export function refreshWsAuth(): void {
+  if (!socket) return;
+  socket.auth = { token: getToken() };
+  if (socket.connected) socket.disconnect().connect();
 }
 
 export type WsHandler = (message: unknown) => void;

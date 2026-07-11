@@ -121,3 +121,49 @@ class PositionOut(BaseModel):
     open_time: int
     profit: float
     comment: str = ""
+
+
+VALID_ORDER_TYPES = ("limit", "stop")
+
+
+class PendingOrderRequest(BaseModel):
+    symbol: str
+    side: str  # "buy" | "sell"
+    order_type: str  # "limit" | "stop"
+    volume: float
+    price: float  # trigger price
+    sl: float | None = None
+    tp: float | None = None
+    comment: str = ""
+
+
+class PendingOrderOut(BaseModel):
+    ticket: int
+    symbol: str
+    side: str
+    order_type: str
+    volume: float
+    price: float
+    sl: float | None
+    tp: float | None
+    placed_time: int  # epoch seconds UTC
+    comment: str = ""
+
+
+class ModifyPendingOrderRequest(BaseModel):
+    price: float | None = None
+    sl: float | None = None
+    tp: float | None = None
+
+
+class PositionCloseInfoOut(BaseModel):
+    """How a position that's no longer open actually closed — from MT5's
+    deal history, not the (transient) open-positions list. Used to detect
+    and reconcile broker-side SL/TP fills the backend didn't initiate."""
+
+    ticket: int
+    symbol: str
+    side: str
+    close_price: float
+    close_time: int  # epoch seconds UTC
+    profit: float

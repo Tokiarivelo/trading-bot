@@ -21,15 +21,18 @@ close.
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 import socketio
 
 from src.market_data.domain.models import Timeframe
+from src.shared.auth.dependencies import SESSION_TTL_SECONDS
 
 if TYPE_CHECKING:
     from src.market_data.application.candle_stream import CandleStreamService
     from src.market_data.application.live_candle import LiveCandleService
+    from src.shared.auth.session import SessionTokenIssuer
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +40,8 @@ sio = socketio.AsyncServer(async_mode="asgi", cors_allowed_origins="*")
 
 _candle_stream: CandleStreamService | None = None
 _live_candle: LiveCandleService | None = None
+_session_issuer: SessionTokenIssuer | None = None
+_password_getter: Callable[[], str] | None = None
 # Rooms each connected client currently has open — needed to unwatch the
 # right symbols/rooms on disconnect, since Socket.IO leaves rooms
 # automatically but doesn't tell us what to release on our side.
@@ -60,13 +65,32 @@ def bind_live_candle(live_candle: LiveCandleService) -> None:
     _live_candle = live_candle
 
 
+def bind_auth(session_issuer: SessionTokenIssuer, password_getter: Callable[[], str]) -> None:
+    """Wire session verification so `connect` can require the same app
+    password as every REST route (§11). Called once from `src.main`'s
+    lifespan, after the container is built."""
+    global _session_issuer, _password_getter
+    _session_issuer = session_issuer
+    _password_getter = password_getter
+
+
 def _room(symbol: str, timeframe: str) -> str:
     return f"{symbol}:{timeframe}"
 
 
 @sio.event
-async def connect(sid: str, _environ: dict[str, Any]) -> None:
-    """Built-in Socket.IO lifecycle event — fires on every new client connection."""
+async def connect(sid: str, _environ: dict[str, Any], auth: dict[str, Any] | None = None) -> None:
+    """Built-in Socket.IO lifecycle event — fires on every new client
+    connection. `auth` is whatever the client passed as its handshake `auth`
+    payload (see `frontend/src/shared/api/ws.ts`); required to be a valid
+    session token when an app password is configured (§11), same guard as
+    every REST route (`shared/auth/dependencies.py: require_session`)."""
+    password = _password_getter() if _password_getter else ""
+    if password:
+        token = (auth or {}).get("token", "")
+        if _session_issuer is None or not _session_issuer.verify(token, SESSION_TTL_SECONDS):
+            logger.warning("ws client rejected: missing/invalid session sid=%s", sid)
+            raise ConnectionRefusedError("authentication required")
     logger.info("ws client connected sid=%s", sid)
 
 

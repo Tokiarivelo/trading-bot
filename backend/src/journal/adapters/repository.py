@@ -49,6 +49,16 @@ class JournalRepository:
             rows = session.scalars(query).all()
         return [_to_domain(row) for row in rows]
 
+    def get_open(self, symbol: str | None = None) -> list[TradeRecord]:
+        """Trades journaled as opened but never journaled as closed —
+        candidates for reconciliation on startup/reconnect (Phase 9)."""
+        query = select(TradeRow).where(TradeRow.close_time.is_(None))
+        if symbol is not None:
+            query = query.where(TradeRow.symbol == symbol)
+        with self._session_factory() as session:
+            rows = session.scalars(query).all()
+        return [_to_domain(row) for row in rows]
+
     def get_last_n_closed(self, symbol: str, count: int) -> list[TradeRecord]:
         query = (
             select(TradeRow)

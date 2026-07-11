@@ -11,6 +11,7 @@ from ..schemas import (
     ModifyRequest,
     OrderRequest,
     OrderResultOut,
+    PositionCloseInfoOut,
     PositionOut,
 )
 
@@ -52,3 +53,14 @@ def close_position(ticket: int, body: CloseRequest | None = None) -> OrderResult
         return OrderResultOut(**client.position_close(ticket, body.volume if body else None))
     except Mt5Error as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@router.get("/positions/{ticket}/history", response_model=PositionCloseInfoOut)
+def position_history(ticket: int) -> PositionCloseInfoOut:
+    try:
+        info = client.position_close_info(ticket)
+    except Mt5Error as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    if info is None:
+        raise HTTPException(status_code=404, detail=f"no close history for ticket {ticket}")
+    return PositionCloseInfoOut(**info)

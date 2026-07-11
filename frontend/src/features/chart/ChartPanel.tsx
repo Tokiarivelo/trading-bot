@@ -273,6 +273,11 @@ export function ChartPanel({ symbol }: { symbol: string }) {
         hasMoreHistoryRef.current = candles.length >= CANDLE_COUNT;
         render();
         historyLoadedRef.current = true;
+        // A symbol/timeframe switch loads a fresh price/time range, but
+        // lightweight-charts keeps whatever pan/zoom position was active for
+        // the previous data — without this the user lands on an arbitrary
+        // (often empty) part of the new chart instead of the current price.
+        chart?.timeScale().scrollToRealTime();
       })
       .catch(() => {
         if (!cancelled) setError("failed to load candles");

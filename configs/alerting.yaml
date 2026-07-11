@@ -1,0 +1,20 @@
+# Notification channels (Phase 9). Non-secret settings only — bot token,
+# chat id, and SMTP credentials come from .env (TB_TELEGRAM_BOT_TOKEN,
+# TB_TELEGRAM_CHAT_ID, TB_SMTP_USERNAME, TB_SMTP_PASSWORD). A channel with
+# enabled: true but no secret in .env is silently skipped (see container.py).
+telegram:
+  enabled: false
+
+email:
+  enabled: false
+  smtp_host: smtp.gmail.com
+  smtp_port: 587
+  from_address: ""
+  to_address: ""
+
+# Which trading events trigger a notification, independent of channel.
+events:
+  fills: true              # position opened / closed
+  circuit_breaker: true    # engine paused (consecutive losses, daily loss limit, kill switch)
+  refinements: true        # 10-trade AI review completed
+  gateway_disconnect: true # MT5 gateway/terminal connectivity changes

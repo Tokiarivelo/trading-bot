@@ -1,6 +1,7 @@
 /** Thin fetch wrapper for the backend REST API (proxied via /api, see next.config.ts). */
 
 const BASE = "/api";
+const TOKEN_KEY = "tb.session";
 
 export class ApiError extends Error {
   status: number;
@@ -9,6 +10,33 @@ export class ApiError extends Error {
     super(message);
     this.status = status;
   }
+}
+
+// ── Session token (§11) ─────────────────────────────────────────────────────
+// Token-based (not cookie-based) so the same token works whether a request
+// goes through the Next.js /api rewrite or hits the backend directly (Socket.IO
+// — see ws.ts), with no cross-origin cookie handling to worry about.
+
+export function getToken(): string | null {
+  if (typeof window === "undefined") return null;
+  return localStorage.getItem(TOKEN_KEY);
+}
+
+export function setToken(token: string): void {
+  localStorage.setItem(TOKEN_KEY, token);
+}
+
+export function clearToken(): void {
+  localStorage.removeItem(TOKEN_KEY);
+}
+
+/** Dispatched on any 401 from a non-/auth/ request, so the UI can re-lock
+ * after a session expires mid-use. See features/auth/LoginGate.tsx. */
+export const UNAUTHORIZED_EVENT = "tb:unauthorized";
+
+function authHeaders(): Record<string, string> {
+  const token = getToken();
+  return token ? { Authorization: `Bearer ${token}` } : {};
 }
 
 async function errorMessage(res: Response): Promise<string> {
@@ -22,20 +50,34 @@ async function errorMessage(res: Response): Promise<string> {
   return text;
 }
 
+function handleUnauthorized(path: string, status: number): void {
+  if (status !== 401 || path.startsWith("/auth/")) return;
+  clearToken();
+  if (typeof window !== "undefined") {
+    window.dispatchEvent(new CustomEvent(UNAUTHORIZED_EVENT));
+  }
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${BASE}${path}`, {
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...authHeaders() },
     ...init,
   });
-  if (!res.ok) throw new ApiError(res.status, await errorMessage(res));
+  if (!res.ok) {
+    handleUnauthorized(path, res.status);
+    throw new ApiError(res.status, await errorMessage(res));
+  }
   return res.json() as Promise<T>;
 }
 
 async function requestForm<T>(path: string, method: string, form: FormData): Promise<T> {
   // No Content-Type header here on purpose — the browser sets the multipart
   // boundary itself when the body is a FormData.
-  const res = await fetch(`${BASE}${path}`, { method, body: form });
-  if (!res.ok) throw new ApiError(res.status, await errorMessage(res));
+  const res = await fetch(`${BASE}${path}`, { method, body: form, headers: authHeaders() });
+  if (!res.ok) {
+    handleUnauthorized(path, res.status);
+    throw new ApiError(res.status, await errorMessage(res));
+  }
   return res.json() as Promise<T>;
 }
 
@@ -46,6 +88,29 @@ export const api = {
   patch: <T>(path: string, body: unknown) =>
     request<T>(path, { method: "PATCH", body: JSON.stringify(body) }),
   postForm: <T>(path: string, form: FormData) => requestForm<T>(path, "POST", form),
+};
+
+// ── Auth (§11) ───────────────────────────────────────────────────────────────
+
+export interface AuthStatus {
+  auth_required: boolean;
+}
+
+export const getAuthStatus = () => api.get<AuthStatus>("/auth/status");
+export const login = async (password: string) => {
+  const res = await api.post<{ token: string; expires_in_seconds: number }>("/auth/login", {
+    password,
+  });
+  setToken(res.token);
+  return res;
+};
+export const logout = async () => {
+  clearToken();
+  try {
+    await api.post("/auth/logout");
+  } catch {
+    // Logout is best-effort client-side (token already cleared above).
+  }
 };
 
 export interface AppConfig {
@@ -378,3 +443,18 @@ export interface NewsWindow {
 export const getUpcomingNews = (daysAhead = 7) =>
   api.get<NewsEvent[]>(`/news/upcoming?days_ahead=${daysAhead}`);
 export const getActiveNewsWindows = () => api.get<NewsWindow[]>("/news/active-windows");
+
+// ── Engine: status + kill switch (Phase 9, §11) ─────────────────────────────
+
+export interface EngineStatus {
+  enabled: boolean;
+  paused: boolean;
+  pause_reason: string;
+  consecutive_losses: number;
+  trades_today: number;
+  daily_pnl: number;
+}
+
+export const getEngineStatus = () => api.get<EngineStatus>("/engine/status");
+export const killSwitch = () => api.post<EngineStatus>("/engine/kill");
+export const resumeEngine = () => api.post<EngineStatus>("/engine/resume");

@@ -529,11 +529,11 @@ review_every_n_trades: 10
 
 ## 11. Security
 
-- [ ] Credentials encrypted at rest (Fernet + OS keyring); memory-only in gateway.
-- [ ] Backend↔gateway on localhost or private network / WireGuard if VPS; shared-secret auth header.
-- [ ] Generated strategy code: import whitelist, AST scan for forbidden nodes (`exec`, `open`, `socket`, dunder access), resource/time limits on `evaluate()`.
-- [ ] Frontend auth (even single-user: a local password) since it can start a live bot.
-- [ ] Kill switch: one endpoint + UI button → close all positions, disable engine.
+- [x] Credentials encrypted at rest (Fernet + OS keyring); memory-only in gateway.
+- [x] Backend↔gateway on localhost or private network / WireGuard if VPS; shared-secret auth header.
+- [x] Generated strategy code: import whitelist, AST scan for forbidden nodes (`exec`, `open`, `socket`, dunder access), resource/time limits on `evaluate()`.
+- [x] Frontend auth (even single-user: a local password) since it can start a live bot.
+- [x] Kill switch: one endpoint + UI button → close all positions, disable engine.
 
 ---
 
@@ -603,9 +603,9 @@ review_every_n_trades: 10
 - [x] News windows shaded on chart; upcoming-events panel
 
 ### Phase 9 — Hardening & go-live
-- [ ] Security checklist (§11) fully done
-- [ ] Reconnect/resume logic (gateway drop, terminal restart, backend restart with open positions)
-- [ ] Alerting (Telegram/email) for fills, circuit breakers, refinements
+- [x] Security checklist (§11) fully done
+- [x] Reconnect/resume logic (gateway drop, terminal restart, backend restart with open positions)
+- [x] Alerting (Telegram/email) for fills, circuit breakers, refinements
 - [ ] 30 days profitable+stable paper trading → smallest live size → scale slowly
 
 ---

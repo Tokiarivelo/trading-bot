@@ -107,3 +107,6 @@ class TradeJournalService:
 
     async def get_last_n(self, symbol: str, count: int) -> list[TradeRecord]:
         return await asyncio.to_thread(self._repository.get_last_n, symbol, count)
+
+    async def get_open_trades(self, symbol: str | None = None) -> list[TradeRecord]:
+        return await asyncio.to_thread(self._repository.get_open, symbol)

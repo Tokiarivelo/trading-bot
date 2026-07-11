@@ -18,11 +18,19 @@ from src.ai.adapters.repository import DraftRepository
 from src.ai.application.llm_router import LLMRouter
 from src.ai.application.pdf_to_strategy import PdfToStrategyService
 from src.ai.application.refinement_loop import RefinementLoopService
+from src.alerting.adapters.composite import CompositeAlertAdapter
+from src.alerting.adapters.email import EmailAlertAdapter
+from src.alerting.adapters.noop import NoopAlertAdapter
+from src.alerting.adapters.telegram import TelegramAlertAdapter
+from src.alerting.application.alert_service import AlertService
+from src.alerting.ports.alert import AlertPort
 from src.broker.adapters.credential_store import FernetCredentialStore
 from src.broker.adapters.mt5_gateway import GatewayAccount, GatewayBroker
 from src.broker.adapters.paper import PaperBroker
 from src.broker.application.account_service import AccountService
+from src.broker.application.health_monitor import GatewayHealthMonitor
 from src.broker.application.order_service import OrderService
+from src.broker.application.reconciliation import ReconciliationService
 from src.broker.application.spread_gate import SpreadGate
 from src.broker.ports.trading import BrokerPort
 from src.engine.application.position_manager import PositionManager
@@ -43,7 +51,9 @@ from src.news.adapters.forexfactory import ForexFactoryCalendar
 from src.news.application.news_window_service import NewsWindowService
 from src.news.domain.models import WindowSpec
 from src.news.ports.calendar import NewsCalendarPort
+from src.shared.auth.session import SessionTokenIssuer
 from src.shared.config.loaders import (
+    load_alerting_config,
     load_llm_provider_config,
     load_news_config,
     load_refinement_config,
@@ -55,9 +65,12 @@ from src.shared.db.base import make_session_factory
 from src.shared.events.bus import EventBus
 from src.shared.events.definitions import (
     CandleClosed,
+    CircuitBreakerTripped,
+    GatewayHealthChanged,
     NewsWindowEntered,
     PositionClosed,
     PositionOpened,
+    RefinementCompleted,
     TenTradesCompleted,
 )
 from src.skills.application.news_skill_selector import NewsSkillSelector
@@ -86,6 +99,7 @@ _STRATEGIES_GENERATED_DIR = Path(__file__).resolve().parent / "strategies" / "ge
 class Container:
     settings: Settings
     event_bus: EventBus
+    session_issuer: SessionTokenIssuer
     symbols: list[str]
     gateway_client: httpx.AsyncClient
     market_data: GatewayMarketData
@@ -96,6 +110,8 @@ class Container:
     account: AccountService
     broker: BrokerPort
     order_service: OrderService
+    reconciliation: ReconciliationService
+    health_monitor: GatewayHealthMonitor
     trade_journal: TradeJournalService
     trade_engine: TradeEngine
     strategy_registry: StrategyRegistry
@@ -107,18 +123,23 @@ class Container:
     news_window_service: NewsWindowService
 
     _closers: list = field(default_factory=list)
+    alert_telegram_client: httpx.AsyncClient | None = None
 
     async def aclose(self) -> None:
         await self.candle_stream.stop()
         await self.live_candle.stop()
         await self.news_window_service.stop()
+        await self.health_monitor.stop()
         await self.gateway_client.aclose()
         await self.news_client.aclose()
+        if self.alert_telegram_client is not None:
+            await self.alert_telegram_client.aclose()
 
 
 def build_container(settings: Settings | None = None) -> Container:
     settings = settings or Settings()
     event_bus = EventBus()
+    session_issuer = SessionTokenIssuer()
     app_config = load_yaml_config("app", settings.configs_dir)
     symbols = list(app_config["symbols"])
     mode = app_config.get("mode", "paper")
@@ -178,11 +199,53 @@ def build_container(settings: Settings | None = None) -> Container:
     event_bus.subscribe(PositionOpened, trade_journal.on_position_opened)
     event_bus.subscribe(PositionClosed, trade_journal.on_position_closed)
 
+    alerting_config = load_alerting_config(settings.configs_dir)
+    alert_adapters: list[AlertPort] = []
+    alert_telegram_client: httpx.AsyncClient | None = None
+    if alerting_config.telegram_enabled and settings.telegram_bot_token:
+        alert_telegram_client = httpx.AsyncClient(
+            base_url="https://api.telegram.org", timeout=10.0
+        )
+        alert_adapters.append(
+            TelegramAlertAdapter(
+                alert_telegram_client, settings.telegram_bot_token, settings.telegram_chat_id
+            )
+        )
+    if alerting_config.email_enabled and alerting_config.smtp_host:
+        alert_adapters.append(
+            EmailAlertAdapter(
+                smtp_host=alerting_config.smtp_host,
+                smtp_port=alerting_config.smtp_port,
+                username=settings.smtp_username,
+                password=settings.smtp_password,
+                from_address=alerting_config.from_address,
+                to_address=alerting_config.to_address,
+            )
+        )
+    alert_port: AlertPort = (
+        CompositeAlertAdapter(alert_adapters) if alert_adapters else NoopAlertAdapter()
+    )
+    alert_service = AlertService(port=alert_port, config=alerting_config)
+    event_bus.subscribe(PositionOpened, alert_service.on_position_opened)
+    event_bus.subscribe(PositionClosed, alert_service.on_position_closed)
+    event_bus.subscribe(CircuitBreakerTripped, alert_service.on_circuit_breaker_tripped)
+    event_bus.subscribe(RefinementCompleted, alert_service.on_refinement_completed)
+    event_bus.subscribe(GatewayHealthChanged, alert_service.on_gateway_health_changed)
+
     timezone = app_config.get("timezone", "UTC")
     engine_config = app_config.get("engine", {})
     risk_caps = load_risk_caps(settings.configs_dir)
     risk_manager = RiskManager(caps=risk_caps, timezone=timezone)
-    position_manager = PositionManager(order_service=order_service, market_data=market_data)
+
+    reconciliation = ReconciliationService(
+        broker=broker, journal=trade_journal, event_bus=event_bus
+    )
+    health_monitor = GatewayHealthMonitor(
+        account=account, reconciliation=reconciliation, event_bus=event_bus
+    )
+    position_manager = PositionManager(
+        order_service=order_service, market_data=market_data, reconciliation=reconciliation
+    )
 
     strategy_registry = StrategyRegistry()
     strategy_registry.register(BreakoutV1())
@@ -261,6 +324,7 @@ def build_container(settings: Settings | None = None) -> Container:
         llm_router=llm_router,
         refinement_config=load_refinement_config(settings.configs_dir),
         timezone=timezone,
+        event_bus=event_bus,
     )
     event_bus.subscribe(TenTradesCompleted, refinement_loop.on_ten_trades_completed)
 
@@ -274,6 +338,7 @@ def build_container(settings: Settings | None = None) -> Container:
         strategy_source=strategy_registry,
         entry_timeframe=engine_config.get("entry_timeframe", "M5"),
         confirmation_timeframes=tuple(engine_config.get("confirmation_timeframes", ["H1", "H4"])),
+        event_bus=event_bus,
         enabled=engine_config.get("enabled", True),
     )
     event_bus.subscribe(CandleClosed, trade_engine.on_candle_closed)
@@ -283,6 +348,7 @@ def build_container(settings: Settings | None = None) -> Container:
     return Container(
         settings=settings,
         event_bus=event_bus,
+        session_issuer=session_issuer,
         symbols=symbols,
         gateway_client=gateway_client,
         market_data=market_data,
@@ -293,6 +359,8 @@ def build_container(settings: Settings | None = None) -> Container:
         account=account,
         broker=broker,
         order_service=order_service,
+        reconciliation=reconciliation,
+        health_monitor=health_monitor,
         trade_journal=trade_journal,
         trade_engine=trade_engine,
         strategy_registry=strategy_registry,
@@ -302,6 +370,7 @@ def build_container(settings: Settings | None = None) -> Container:
         refinement_loop=refinement_loop,
         news_client=news_client,
         news_window_service=news_window_service,
+        alert_telegram_client=alert_telegram_client,
     )
 
 

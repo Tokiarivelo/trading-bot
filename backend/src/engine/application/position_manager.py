@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 
 from src.broker.application.order_service import OrderService
+from src.broker.application.reconciliation import ReconciliationService
 from src.broker.domain.trading import Position, Side
 from src.market_data.ports.market_data import MarketDataPort
 
@@ -24,18 +25,26 @@ class PositionManager:
         self,
         order_service: OrderService,
         market_data: MarketDataPort,
+        reconciliation: ReconciliationService | None = None,
         time_stop_candles: int = DEFAULT_TIME_STOP_CANDLES,
     ) -> None:
         self._order_service = order_service
         self._market_data = market_data
+        self._reconciliation = reconciliation
         self._time_stop_candles = time_stop_candles
         self._candles_since_open: dict[int, int] = {}
 
     async def on_candle_closed(self, symbol: str) -> None:
         positions = await self._order_service.get_positions(symbol)
         open_tickets = {p.ticket for p in positions}
-        for ticket in [t for t in self._candles_since_open if t not in open_tickets]:
+        vanished = [t for t in self._candles_since_open if t not in open_tickets]
+        for ticket in vanished:
             del self._candles_since_open[ticket]
+        # A ticket we were tracking that's no longer in the broker's open
+        # list closed server-side (SL/TP fill) — nothing else in the system
+        # would ever find out otherwise (§12 Phase 9).
+        if vanished and self._reconciliation is not None:
+            await self._reconciliation.reconcile_vanished(symbol, set(vanished))
 
         for position in positions:
             self._candles_since_open[position.ticket] = (

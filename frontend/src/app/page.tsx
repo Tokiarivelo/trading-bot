@@ -5,6 +5,7 @@ import { useEffect, useState } from "react";
 import { AccountPanel } from "@/features/account/AccountPanel";
 import { ChartPanel } from "@/features/chart/ChartPanel";
 import { SymbolPicker } from "@/features/chart/SymbolPicker";
+import { EngineControlPanel } from "@/features/engine/EngineControlPanel";
 import { ActiveNewsWindowsSummary } from "@/features/news/ActiveNewsWindowsSummary";
 import { getAppConfig, getHealth, type AppConfig } from "@/shared/api/client";
 
@@ -148,7 +149,9 @@ export default function Home() {
         <ChartPanel symbol={symbol} />
         <aside className="flex w-[300px] flex-col gap-2 overflow-y-auto border-l border-line p-2">
           <AccountPanel />
-          <Panel>Bot control (Phase 4)</Panel>
+          <Panel>
+            <EngineControlPanel />
+          </Panel>
           <Panel>Journal (Phase 3)</Panel>
           <Panel>
             <Link href="/strategies" className="text-accent hover:underline">

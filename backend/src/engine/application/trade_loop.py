@@ -23,7 +23,13 @@ from src.engine.domain.models import EngineStatus
 from src.engine.ports.strategy_source import StrategySourcePort
 from src.market_data.domain.models import MarketDataUnavailable, Timeframe
 from src.market_data.ports.market_data import MarketDataPort
-from src.shared.events.definitions import CandleClosed, NewsWindowEntered, PositionClosed
+from src.shared.events.bus import EventBus
+from src.shared.events.definitions import (
+    CandleClosed,
+    CircuitBreakerTripped,
+    NewsWindowEntered,
+    PositionClosed,
+)
 from src.skills.ports.skill_selector import SkillSelectorPort
 
 logger = logging.getLogger(__name__)
@@ -44,6 +50,7 @@ class TradeEngine:
         strategy_source: StrategySourcePort,
         entry_timeframe: str,
         confirmation_timeframes: tuple[str, ...],
+        event_bus: EventBus | None = None,
         enabled: bool = True,
         context_bars: int = DEFAULT_CONTEXT_BARS,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
@@ -57,6 +64,7 @@ class TradeEngine:
         self._strategy_source = strategy_source
         self._entry_timeframe = entry_timeframe
         self._confirmation_timeframes = confirmation_timeframes
+        self._event_bus = event_bus
         self._enabled = enabled
         self._context_bars = context_bars
         self._clock = clock
@@ -74,16 +82,27 @@ class TradeEngine:
 
     async def on_position_closed(self, event: PositionClosed) -> None:
         balance = await self._current_balance()
+        was_paused = self._risk_manager.paused
         self._risk_manager.record_trade_closed(event.profit, balance=balance, now=self._clock())
+        if not was_paused and self._risk_manager.paused:
+            await self._publish_pause_alert()
 
     async def kill_switch(self) -> None:
         """Close every open position and pause the engine (F kill switch)."""
         self._risk_manager.kill()
+        await self._publish_pause_alert()
         for position in await self._order_service.get_positions():
             try:
                 await self._order_service.close_position(position.ticket)
             except OrderRejected:
                 logger.exception("kill switch: failed to close ticket=%d", position.ticket)
+
+    async def _publish_pause_alert(self) -> None:
+        if self._event_bus is None:
+            return
+        await self._event_bus.publish(
+            CircuitBreakerTripped(reason=self._risk_manager.status.pause_reason)
+        )
 
     async def on_news_window_entered(self, event: NewsWindowEntered) -> None:
         """Pre-news flatten (§6.6, §8): closes open positions in the news

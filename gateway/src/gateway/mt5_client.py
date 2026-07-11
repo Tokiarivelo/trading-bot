@@ -283,6 +283,156 @@ class Mt5Client:
             "profit": profit,
         }
 
+    def position_close_info(self, ticket: int) -> dict[str, Any] | None:
+        """How `ticket` actually closed, from MT5's deal history — used to
+        detect and reconcile broker-side SL/TP fills the backend never
+        initiated (Phase 9). `None` if MT5 has no deal history for it
+        (unknown ticket, or history purged)."""
+        self._require_connection()
+        deals = mt5.history_deals_get(position=ticket)
+        if not deals:
+            return None
+        exit_deals = [d for d in deals if d.entry == mt5.DEAL_ENTRY_OUT]
+        if not exit_deals:
+            return None
+        last_exit = max(exit_deals, key=lambda d: d.time)
+        entry_deals = [d for d in deals if d.entry == mt5.DEAL_ENTRY_IN]
+        if entry_deals:
+            side = "buy" if entry_deals[0].type == mt5.DEAL_TYPE_BUY else "sell"
+        else:
+            # No entry deal in this history window (rare) — infer from the
+            # exit fill instead: a BUY exit closed a short, a SELL exit
+            # closed a long.
+            side = "sell" if last_exit.type == mt5.DEAL_TYPE_BUY else "buy"
+        return {
+            "ticket": ticket,
+            "symbol": last_exit.symbol,
+            "side": side,
+            "close_price": float(last_exit.price),
+            "close_time": int(last_exit.time),
+            "profit": float(sum(d.profit for d in deals)),
+        }
+
+    def place_pending_order(
+        self,
+        symbol: str,
+        side: str,
+        order_type: str,
+        volume: float,
+        price: float,
+        sl: float | None,
+        tp: float | None,
+        comment: str,
+    ) -> dict[str, Any]:
+        self._require_connection()
+        self._select(symbol)
+        mt5_type = {
+            ("buy", "limit"): mt5.ORDER_TYPE_BUY_LIMIT,
+            ("sell", "limit"): mt5.ORDER_TYPE_SELL_LIMIT,
+            ("buy", "stop"): mt5.ORDER_TYPE_BUY_STOP,
+            ("sell", "stop"): mt5.ORDER_TYPE_SELL_STOP,
+        }[(side, order_type)]
+        request = {
+            "action": mt5.TRADE_ACTION_PENDING,
+            "symbol": symbol,
+            "volume": volume,
+            "type": mt5_type,
+            "price": price,
+            "sl": sl or 0.0,
+            "tp": tp or 0.0,
+            "comment": comment,
+            "type_time": mt5.ORDER_TIME_GTC,
+            "type_filling": mt5.ORDER_FILLING_IOC,
+        }
+        result = mt5.order_send(request)
+        if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
+            code = result.retcode if result is not None else None
+            raise Mt5Error(
+                f"place_pending_order({symbol},{side},{order_type}) rejected: "
+                f"retcode={code} {_last_error()}"
+            )
+        return {
+            "ticket": int(result.order),
+            "symbol": symbol,
+            "side": side,
+            "order_type": order_type,
+            "volume": volume,
+            "price": price,
+            "sl": sl,
+            "tp": tp,
+            "placed_time": int(datetime.now(UTC).timestamp()),
+            "comment": comment,
+        }
+
+    def modify_pending_order(
+        self, ticket: int, price: float | None, sl: float | None, tp: float | None
+    ) -> None:
+        self._require_connection()
+        order = self._get_pending_order(ticket)
+        request = {
+            "action": mt5.TRADE_ACTION_MODIFY,
+            "order": ticket,
+            "symbol": order.symbol,
+            "price": price if price is not None else order.price_open,
+            "sl": sl if sl is not None else order.sl,
+            "tp": tp if tp is not None else order.tp,
+            "type": order.type,
+            "type_time": mt5.ORDER_TIME_GTC,
+            "type_filling": mt5.ORDER_FILLING_IOC,
+        }
+        result = mt5.order_send(request)
+        if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
+            code = result.retcode if result is not None else None
+            raise Mt5Error(f"modify_pending_order({ticket}) rejected: retcode={code} {_last_error()}")
+
+    def cancel_pending_order(self, ticket: int) -> None:
+        self._require_connection()
+        request = {"action": mt5.TRADE_ACTION_REMOVE, "order": ticket}
+        result = mt5.order_send(request)
+        if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
+            code = result.retcode if result is not None else None
+            raise Mt5Error(f"cancel_pending_order({ticket}) rejected: retcode={code} {_last_error()}")
+
+    def pending_orders(self, symbol: str | None = None) -> list[dict[str, Any]]:
+        self._require_connection()
+        rows = mt5.orders_get(symbol=symbol) if symbol else mt5.orders_get()
+        if rows is None:
+            return []
+        return [self._pending_order_dict(r) for r in rows]
+
+    _PENDING_TYPE_NAMES = {
+        "ORDER_TYPE_BUY_LIMIT": ("buy", "limit"),
+        "ORDER_TYPE_SELL_LIMIT": ("sell", "limit"),
+        "ORDER_TYPE_BUY_STOP": ("buy", "stop"),
+        "ORDER_TYPE_SELL_STOP": ("sell", "stop"),
+    }
+
+    @classmethod
+    def _pending_order_dict(cls, o: Any) -> dict[str, Any]:
+        side, order_type = next(
+            (side, otype)
+            for name, (side, otype) in cls._PENDING_TYPE_NAMES.items()
+            if o.type == getattr(mt5, name)
+        )
+        return {
+            "ticket": int(o.ticket),
+            "symbol": o.symbol,
+            "side": side,
+            "order_type": order_type,
+            "volume": float(o.volume_current),
+            "price": float(o.price_open),
+            "sl": float(o.sl) if o.sl else None,
+            "tp": float(o.tp) if o.tp else None,
+            "placed_time": int(o.time_setup),
+            "comment": o.comment,
+        }
+
+    def _get_pending_order(self, ticket: int) -> Any:
+        rows = mt5.orders_get(ticket=ticket)
+        if not rows:
+            raise Mt5Error(f"no pending order with ticket {ticket}")
+        return rows[0]
+
     def _get_position(self, ticket: int) -> Any:
         rows = mt5.positions_get(ticket=ticket)
         if not rows:

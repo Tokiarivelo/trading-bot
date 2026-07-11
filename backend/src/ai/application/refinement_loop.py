@@ -38,7 +38,8 @@ from src.backtest.domain.models import BacktestReport
 from src.backtest.reports.writer import write_report
 from src.journal.adapters.repository import JournalRepository
 from src.journal.domain.models import CandleSnapshot, TradeRecord
-from src.shared.events.definitions import TenTradesCompleted
+from src.shared.events.bus import EventBus
+from src.shared.events.definitions import RefinementCompleted, TenTradesCompleted
 from src.skills.ports.skill_selector import SkillSelectorPort
 from src.strategies.application.versioning import StrategyValidationError, StrategyVersionService
 from src.strategies.domain.versioning import CodeSource, VersionStatus
@@ -66,6 +67,7 @@ class RefinementLoopService:
         timezone: str = "UTC",
         backtest_period: str | None = None,
         backtest_database_url: str | None = None,
+        event_bus: EventBus | None = None,
     ) -> None:
         self._reports = report_repository
         self._proposals = proposal_repository
@@ -75,6 +77,7 @@ class RefinementLoopService:
         self._skill_selector = skill_selector
         self._llm_router = llm_router
         self._config = refinement_config
+        self._event_bus = event_bus
         self._tz = ZoneInfo(timezone)
         self._backtest_period = backtest_period or default_backtest_period()
         # None means "use run_backtest's own default (the live app's DB)" —
@@ -158,6 +161,7 @@ class RefinementLoopService:
         )
 
         if report.verdict != ReportVerdict.REFINEMENT_PROPOSED:
+            await self._publish_completed(event.symbol, report.verdict.value, None)
             return
 
         proposal = await self._propose_refinement(
@@ -179,6 +183,16 @@ class RefinementLoopService:
             report.id,
             proposal.status,
             proposal.applied_mode,
+        )
+        await self._publish_completed(event.symbol, report.verdict.value, proposal.id)
+
+    async def _publish_completed(
+        self, symbol: str, verdict: str, proposal_id: str | None
+    ) -> None:
+        if self._event_bus is None:
+            return
+        await self._event_bus.publish(
+            RefinementCompleted(symbol=symbol, verdict=verdict, proposal_id=proposal_id)
         )
 
     async def _propose_refinement(

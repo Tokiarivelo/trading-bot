@@ -65,3 +65,31 @@ class NewsWindowEntered(Event):
 class NewsWindowExited(Event):
     event_name: str
     symbols: tuple[str, ...]
+
+
+@dataclass(frozen=True, kw_only=True)
+class CircuitBreakerTripped(Event):
+    """Emitted when the engine pauses — either a risk-manager circuit breaker
+    (consecutive losses, daily loss limit) or the manual kill switch (§11).
+    Alerting subscribes to this; nothing else does."""
+
+    reason: str
+
+
+@dataclass(frozen=True, kw_only=True)
+class RefinementCompleted(Event):
+    """Emitted after the 10-trade AI review loop finishes (§8.2), regardless
+    of whether it proposed a refinement. Alerting subscribes to this."""
+
+    symbol: str
+    verdict: str
+    proposal_id: str | None = None
+
+
+@dataclass(frozen=True, kw_only=True)
+class GatewayHealthChanged(Event):
+    """Emitted by `GatewayHealthMonitor` on a gateway-up/terminal-connected
+    state transition (Phase 9 reconnect/resume). Alerting subscribes to this."""
+
+    gateway_up: bool
+    terminal_connected: bool

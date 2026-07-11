@@ -8,6 +8,7 @@ from pathlib import Path
 
 from src.ai.domain.models import RefinementConfig
 from src.ai.ports.llm import ProviderSpec
+from src.alerting.domain.models import AlertEventFlags, AlertingConfig
 from src.broker.domain.symbol_config import SymbolTradingConfig
 from src.engine.domain.models import RiskCaps
 from src.news.domain.models import ImpactLevel, NewsConfig, TrackedEvent
@@ -73,4 +74,25 @@ def load_news_config(configs_dir: Path) -> NewsConfig:
         ),
         default_before_min=default_window.get("before_min", 30),
         default_after_min=default_window.get("after_min", 60),
+    )
+
+
+def load_alerting_config(configs_dir: Path) -> AlertingConfig:
+    data = load_yaml_config("alerting", configs_dir)
+    telegram = data.get("telegram", {})
+    email = data.get("email", {})
+    events = data.get("events", {})
+    return AlertingConfig(
+        telegram_enabled=telegram.get("enabled", False),
+        email_enabled=email.get("enabled", False),
+        smtp_host=email.get("smtp_host", ""),
+        smtp_port=email.get("smtp_port", 587),
+        from_address=email.get("from_address", ""),
+        to_address=email.get("to_address", ""),
+        events=AlertEventFlags(
+            fills=events.get("fills", True),
+            circuit_breaker=events.get("circuit_breaker", True),
+            refinements=events.get("refinements", True),
+            gateway_disconnect=events.get("gateway_disconnect", True),
+        ),
     )

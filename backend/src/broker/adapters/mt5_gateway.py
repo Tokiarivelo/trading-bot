@@ -14,7 +14,14 @@ from src.broker.domain.account import (
     LoginRejected,
     Mt5Credentials,
 )
-from src.broker.domain.trading import ExecutionResult, OrderRejected, OrderRequest, Position, Side
+from src.broker.domain.trading import (
+    ClosedPositionInfo,
+    ExecutionResult,
+    OrderRejected,
+    OrderRequest,
+    Position,
+    Side,
+)
 
 
 class GatewayAccount:
@@ -112,6 +119,25 @@ class GatewayBroker:
             )
             for p in response.json()
         ]
+
+    async def get_close_info(self, ticket: int) -> ClosedPositionInfo | None:
+        try:
+            response = await self._client.get(f"/positions/{ticket}/history")
+        except httpx.HTTPError as exc:
+            raise BrokerUnavailable(f"gateway unreachable: {exc}") from exc
+        if response.status_code == 404:
+            return None
+        if response.status_code != 200:
+            raise BrokerUnavailable(
+                f"gateway /positions/{ticket}/history -> {response.status_code}: {response.text}"
+            )
+        payload = response.json()
+        return ClosedPositionInfo(
+            symbol=payload["symbol"],
+            price=payload["close_price"],
+            time=datetime.fromtimestamp(payload["close_time"], tz=UTC),
+            profit=payload["profit"],
+        )
 
     async def _post(self, path: str, json: dict[str, Any]) -> dict[str, Any]:
         try:
