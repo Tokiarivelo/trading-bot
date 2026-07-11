@@ -7,13 +7,20 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, HTTPException, Query, Request
 
-from src.market_data.api.schemas import BackfillRequest, BackfillResponse, CandleOut, SymbolInfoOut
+from src.market_data.api.schemas import (
+    BackfillRequest,
+    BackfillResponse,
+    BrokerSymbolOut,
+    BrokerSymbolPageOut,
+    CandleOut,
+    SymbolInfoOut,
+)
 from src.market_data.application.candle_stream import candle_message
 from src.market_data.domain.models import MarketDataUnavailable, Timeframe
 
 router = APIRouter(prefix="/market-data", tags=["market-data"])
 
-TimeframeParam = Annotated[Timeframe, Query(description="Bar size: M5, H1, H4, or D1.")]
+TimeframeParam = Annotated[Timeframe, Query(description="Bar size: M1, M5, H1, H4, or D1.")]
 
 _UNAVAILABLE = {503: {"description": "The MT5 gateway is unreachable or not logged in."}}
 
@@ -70,6 +77,47 @@ async def get_symbol_info(
         volume_min=info.volume_min,
         volume_max=info.volume_max,
         volume_step=info.volume_step,
+    )
+
+
+@router.get(
+    "/broker-symbols",
+    response_model=BrokerSymbolPageOut,
+    summary="Browse the connected broker's tradable symbols",
+    description=(
+        "A page of the symbols the broker offers (optionally filtered by a "
+        "case-insensitive substring match on name/description), for the chart's "
+        "symbol picker — pass `offset` to page through the full catalog when no "
+        "`search` is given. This is browsing only — it never modifies "
+        "`configs/app.yaml` or `configs/symbols/`, so picking one shows its chart "
+        "on demand (including live `candle_closed` WebSocket updates for as long "
+        "as a client has it open) but does not add it to the automated engine's "
+        "traded universe (currently XAUUSD/XAGUSD/BTCUSD)."
+    ),
+    responses=_UNAVAILABLE,
+)
+async def get_broker_symbols(
+    request: Request,
+    search: str | None = Query(
+        default=None,
+        max_length=64,
+        description="Case-insensitive substring match on name/description.",
+    ),
+    limit: Annotated[int, Query(ge=1, le=500, description="Maximum symbols to return.")] = 200,
+    offset: Annotated[
+        int, Query(ge=0, description="Number of matching symbols to skip, for paging.")
+    ] = 0,
+) -> BrokerSymbolPageOut:
+    try:
+        page = await _container(request).market_data.list_symbols(search, limit, offset)
+    except MarketDataUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return BrokerSymbolPageOut(
+        items=[
+            BrokerSymbolOut(name=s.name, description=s.description, path=s.path, visible=s.visible)
+            for s in page.items
+        ],
+        total=page.total,
     )
 
 

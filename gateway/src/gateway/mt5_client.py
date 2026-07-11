@@ -108,6 +108,29 @@ class Mt5Client:
             raise Mt5Error(f"symbol_info_tick({symbol}) failed: {_last_error()}")
         return {"time": int(tick.time), "bid": float(tick.bid), "ask": float(tick.ask)}
 
+    def symbols(self, search: str | None, limit: int, offset: int) -> dict[str, Any]:
+        """A page of the broker's symbol catalog, optionally filtered by a
+        case-insensitive substring match on name or description. `mt5.symbols_get()`
+        has no text-search or pagination of its own, so this fetches the whole
+        catalog once and filters/pages it here rather than round-tripping per
+        symbol. `total` is the filtered count (before paging), so callers can
+        tell whether more pages remain."""
+        self._require_connection()
+        rows = mt5.symbols_get()
+        if rows is None:
+            raise Mt5Error(f"symbols_get failed: {_last_error()}")
+        if search:
+            needle = search.lower()
+            rows = [r for r in rows if needle in r.name.lower() or needle in r.description.lower()]
+        page = rows[offset : offset + limit]
+        return {
+            "items": [
+                {"name": r.name, "description": r.description, "path": r.path, "visible": r.visible}
+                for r in page
+            ],
+            "total": len(rows),
+        }
+
     def symbol_info(self, symbol: str) -> dict[str, Any]:
         self._require_connection()
         self._select(symbol)

@@ -11,6 +11,7 @@ def utc(*args) -> datetime:
 
 class TestTimeframe:
     def test_seconds(self):
+        assert Timeframe.M1.seconds == 60
         assert Timeframe.M5.seconds == 300
         assert Timeframe.H1.seconds == 3600
         assert Timeframe.H4.seconds == 14400
@@ -19,6 +20,7 @@ class TestTimeframe:
     @pytest.mark.parametrize(
         ("timeframe", "moment", "expected"),
         [
+            (Timeframe.M1, utc(2026, 7, 10, 14, 3, 21), utc(2026, 7, 10, 14, 3)),
             (Timeframe.M5, utc(2026, 7, 10, 14, 3, 21), utc(2026, 7, 10, 14, 0)),
             (Timeframe.M5, utc(2026, 7, 10, 14, 5, 0), utc(2026, 7, 10, 14, 5)),
             (Timeframe.H1, utc(2026, 7, 10, 14, 59, 59), utc(2026, 7, 10, 14, 0)),
@@ -34,6 +36,8 @@ class TestTimeframe:
         assert Timeframe.M5.last_closed_open(utc(2026, 7, 10, 14, 3)) == utc(2026, 7, 10, 13, 55)
         # Exactly on a boundary, the bar that just closed is the previous one.
         assert Timeframe.M5.last_closed_open(utc(2026, 7, 10, 14, 0)) == utc(2026, 7, 10, 13, 55)
+        # M1 works the same way at its own (1-minute) granularity.
+        assert Timeframe.M1.last_closed_open(utc(2026, 7, 10, 14, 3, 21)) == utc(2026, 7, 10, 14, 2)
 
 
 def make_candle(**overrides) -> Candle:

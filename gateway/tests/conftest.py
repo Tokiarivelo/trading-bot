@@ -32,6 +32,7 @@ class FakePosition:
 
 
 class FakeMt5:
+    TIMEFRAME_M1 = 1
     TIMEFRAME_M5 = 5
     TIMEFRAME_H1 = 16385
     TIMEFRAME_H4 = 16388
@@ -80,6 +81,22 @@ class FakeMt5:
 
     def symbol_select(self, symbol, enable) -> bool:
         return True
+
+    def symbols_get(self):
+        return [
+            SimpleNamespace(
+                name="XAUUSD", description="Gold vs US Dollar", path="Metals", visible=True
+            ),
+            SimpleNamespace(
+                name="XAGUSD", description="Silver vs US Dollar", path="Metals", visible=True
+            ),
+            SimpleNamespace(
+                name="EURUSD", description="Euro vs US Dollar", path="Forex\\Majors", visible=False
+            ),
+            SimpleNamespace(
+                name="BTCUSD", description="Bitcoin vs US Dollar", path="Crypto", visible=True
+            ),
+        ]
 
     def copy_rates_from_pos(self, symbol, timeframe, start, count):
         base = 1_752_100_500  # aligned to a 5-min boundary

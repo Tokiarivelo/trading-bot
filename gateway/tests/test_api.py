@@ -51,9 +51,16 @@ def test_candles_shape(api):
     assert first["time"] % 300 == 0
 
 
+def test_candles_accepts_m1_timeframe(api):
+    _login(api)
+    response = api.get("/candles", params={"symbol": "XAUUSD", "timeframe": "M1", "count": 3})
+    assert response.status_code == 200
+    assert len(response.json()) == 3
+
+
 def test_candles_rejects_unknown_timeframe(api):
     _login(api)
-    response = api.get("/candles", params={"symbol": "XAUUSD", "timeframe": "M1"})
+    response = api.get("/candles", params={"symbol": "XAUUSD", "timeframe": "M15"})
     assert response.status_code == 422
 
 
@@ -69,6 +76,48 @@ def test_symbol_info_includes_live_spread(api):
     assert body["spread_points"] == 25
     assert body["stops_level"] == 10
     assert body["point"] == 0.01
+
+
+def test_symbols_lists_broker_catalog(api):
+    _login(api)
+    body = api.get("/symbols").json()
+    assert {s["name"] for s in body["items"]} == {"XAUUSD", "XAGUSD", "EURUSD", "BTCUSD"}
+    assert body["total"] == 4
+    eurusd = next(s for s in body["items"] if s["name"] == "EURUSD")
+    assert eurusd["path"] == "Forex\\Majors"
+    assert eurusd["visible"] is False
+
+
+def test_symbols_search_filters_by_name_or_description(api):
+    _login(api)
+    body = api.get("/symbols", params={"search": "gold"}).json()
+    assert [s["name"] for s in body["items"]] == ["XAUUSD"]
+    assert body["total"] == 1
+
+
+def test_symbols_respects_limit(api):
+    _login(api)
+    body = api.get("/symbols", params={"limit": 2}).json()
+    assert len(body["items"]) == 2
+    assert body["total"] == 4  # total reflects the full (filtered) catalog, not just this page
+
+
+def test_symbols_pages_with_offset(api):
+    _login(api)
+    first = api.get("/symbols", params={"limit": 2, "offset": 0}).json()
+    second = api.get("/symbols", params={"limit": 2, "offset": 2}).json()
+    assert len(first["items"]) == 2
+    assert len(second["items"]) == 2
+    first_names = {s["name"] for s in first["items"]}
+    second_names = {s["name"] for s in second["items"]}
+    assert first_names.isdisjoint(second_names)
+    assert first_names | second_names == {"XAUUSD", "XAGUSD", "EURUSD", "BTCUSD"}
+
+
+def test_symbols_requires_login(api):
+    response = api.get("/symbols")
+    assert response.status_code == 502
+    assert "not logged in" in response.json()["detail"]
 
 
 def test_shared_secret_enforced_when_configured(api, monkeypatch):

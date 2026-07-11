@@ -1,9 +1,17 @@
 """Candle streaming: poll the gateway on bar boundaries, emit CandleClosed.
 
-This is the engine's clock (M5 entries, H1/H4/D1 confirmations). All four
-timeframes close on M5 boundaries, so one wake-up shortly after each M5 close
-covers everything. Every closed bar is also persisted, so history accumulates
-for backtests and AI snapshots as a side effect of streaming.
+This is the engine's clock (M5 entries, H1/H4/D1 confirmations) plus any
+finer timeframe configured for charting (e.g. M1). Every configured
+timeframe closes on the finest one's boundaries, so one wake-up shortly
+after each such close covers everything — see `_seconds_until_next_poll`.
+Every closed bar is also persisted, so history accumulates for backtests and
+AI snapshots as a side effect of streaming.
+
+Polling always covers `configs/app.yaml: symbols` (the engine's traded
+universe); `watch`/`unwatch` extend that set for symbols a chart is
+browsing on demand (see `market_data.api.ws`), so any symbol currently
+open on a chart gets live `candle_closed` updates too, not just the three
+the bot actually trades.
 """
 
 from __future__ import annotations
@@ -47,6 +55,38 @@ class CandleStreamService:
         self._last_emitted: dict[tuple[str, Timeframe], datetime] = {}
         self._task: asyncio.Task[None] | None = None
         self._gateway_ok = True
+        # Ref-counted: several chart subscribers can watch the same ad-hoc
+        # symbol at once (e.g. two browser tabs), so it stays active until
+        # all of them unwatch it. Configured symbols are always active and
+        # never go through this map.
+        self._extra_refcounts: dict[str, int] = {}
+
+    @property
+    def active_symbols(self) -> list[str]:
+        """Configured symbols plus any ad-hoc symbols currently watched."""
+        return [*self._symbols, *self._extra_refcounts]
+
+    def watch(self, symbol: str) -> None:
+        """Start streaming `symbol` on demand (chart browsing a non-configured
+        symbol). No-op for symbols already in `configs/app.yaml: symbols` —
+        those are always active."""
+        if symbol in self._symbols:
+            return
+        if self._extra_refcounts.get(symbol, 0) == 0:
+            logger.info("candle stream: now watching ad-hoc symbol %s", symbol)
+        self._extra_refcounts[symbol] = self._extra_refcounts.get(symbol, 0) + 1
+
+    def unwatch(self, symbol: str) -> None:
+        """Stop streaming `symbol` once nothing is watching it anymore."""
+        if symbol not in self._extra_refcounts:
+            return
+        self._extra_refcounts[symbol] -= 1
+        if self._extra_refcounts[symbol] > 0:
+            return
+        del self._extra_refcounts[symbol]
+        logger.info("candle stream: no longer watching ad-hoc symbol %s", symbol)
+        for timeframe in self._timeframes:
+            self._last_emitted.pop((symbol, timeframe), None)
 
     def start(self) -> None:
         self._task = asyncio.create_task(self._run(), name="candle-stream")
@@ -77,7 +117,7 @@ class CandleStreamService:
         """Fetch, persist, and emit newly closed bars. Returns what was emitted."""
         now = now or datetime.now(UTC)
         emitted: list[Candle] = []
-        for symbol in self._symbols:
+        for symbol in self.active_symbols:
             for timeframe in self._timeframes:
                 key = (symbol, timeframe)
                 if self._last_emitted.get(key) == timeframe.last_closed_open(now):
@@ -87,33 +127,36 @@ class CandleStreamService:
                 if not closed:
                     continue
                 await asyncio.to_thread(self._repository.upsert_many, closed)
-                latest = closed[-1]
                 previous = self._last_emitted.get(key)
-                self._last_emitted[key] = latest.time
-                if previous is None or latest.time <= previous:
-                    continue  # startup baseline, or nothing new
-                logger.info(
-                    "candle closed %s %s @ %s close=%s spread=%s",
-                    symbol,
-                    timeframe.value,
-                    latest.time.isoformat(),
-                    latest.close,
-                    latest.spread_points,
-                )
-                await self._event_bus.publish(
-                    CandleClosed(symbol=symbol, timeframe=timeframe.value)
-                )
-                await self._broadcaster.broadcast(
-                    {"type": "candle_closed", "candle": candle_message(latest)}
-                )
-                emitted.append(latest)
+                self._last_emitted[key] = closed[-1].time
+                if previous is None:
+                    continue  # startup baseline
+                # Emit every bar that closed since the last poll, not just the
+                # newest — with a finer timeframe like M1 in the mix, more than
+                # one bar can close between two polls and none should be lost.
+                new_bars = [c for c in closed if c.time > previous]
+                for candle in new_bars:
+                    logger.info(
+                        "candle closed %s %s @ %s close=%s spread=%s",
+                        symbol,
+                        timeframe.value,
+                        candle.time.isoformat(),
+                        candle.close,
+                        candle.spread_points,
+                    )
+                    await self._event_bus.publish(
+                        CandleClosed(symbol=symbol, timeframe=timeframe.value)
+                    )
+                    await self._broadcaster.broadcast(
+                        {"type": "candle_closed", "candle": candle_message(candle)}
+                    )
+                    emitted.append(candle)
         return emitted
 
-    @staticmethod
-    def _seconds_until_next_poll(now: datetime | None = None) -> float:
+    def _seconds_until_next_poll(self, now: datetime | None = None) -> float:
         now = now or datetime.now(UTC)
-        m5 = Timeframe.M5.seconds
-        until_boundary = m5 - (now.timestamp() % m5)
+        finest = min(tf.seconds for tf in self._timeframes)
+        until_boundary = finest - (now.timestamp() % finest)
         return max(until_boundary + _BOUNDARY_GRACE_S, 5.0)
 
 

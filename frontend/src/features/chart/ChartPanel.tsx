@@ -28,7 +28,7 @@ import {
 } from "@/shared/api/client";
 import { subscribeRoom } from "@/shared/api/ws";
 
-const TIMEFRAMES: Candle["timeframe"][] = ["M5", "H1", "H4", "D1"];
+const TIMEFRAMES: Candle["timeframe"][] = ["M1", "M5", "H1", "H4", "D1"];
 const CANDLE_COUNT = 300;
 const SPREAD_POLL_MS = 3000;
 const MARKERS_POLL_MS = 5000;

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from pydantic import BaseModel
 
-VALID_TIMEFRAMES = ("M5", "H1", "H4", "D1")
+VALID_TIMEFRAMES = ("M1", "M5", "H1", "H4", "D1")
 
 
 class LoginRequest(BaseModel):
@@ -47,6 +47,18 @@ class TickOut(BaseModel):
     time: int  # epoch seconds UTC
     bid: float
     ask: float
+
+
+class BrokerSymbolOut(BaseModel):
+    name: str
+    description: str
+    path: str  # broker's Market Watch group, e.g. "Forex\\Majors"
+    visible: bool  # already in Market Watch (candle/tick calls auto-add it either way)
+
+
+class BrokerSymbolPageOut(BaseModel):
+    items: list[BrokerSymbolOut]
+    total: int  # count after search filtering, before limit/offset — for pagination
 
 
 class SymbolInfoOut(BaseModel):

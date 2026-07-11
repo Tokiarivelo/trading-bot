@@ -7,7 +7,7 @@ from typing import Annotated
 from fastapi import APIRouter, HTTPException, Query
 
 from ..mt5_client import Mt5Error, client
-from ..schemas import VALID_TIMEFRAMES, CandleOut, SymbolInfoOut, TickOut
+from ..schemas import VALID_TIMEFRAMES, BrokerSymbolPageOut, CandleOut, SymbolInfoOut, TickOut
 
 router = APIRouter()
 
@@ -47,5 +47,17 @@ def tick(symbol: Symbol) -> TickOut:
 def symbol_info(symbol: Symbol) -> SymbolInfoOut:
     try:
         return SymbolInfoOut(**client.symbol_info(symbol))
+    except Mt5Error as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@router.get("/symbols", response_model=BrokerSymbolPageOut)
+def symbols(
+    search: Annotated[str | None, Query(max_length=64)] = None,
+    limit: Annotated[int, Query(ge=1, le=500)] = 200,
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> BrokerSymbolPageOut:
+    try:
+        return BrokerSymbolPageOut(**client.symbols(search, limit, offset))
     except Mt5Error as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc

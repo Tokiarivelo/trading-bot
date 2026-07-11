@@ -30,7 +30,7 @@ from src.container import build_container
 from src.engine.api.routes import router as engine_router
 from src.journal.api.routes import router as journal_router
 from src.market_data.api.routes import router as market_data_router
-from src.market_data.api.ws import sio
+from src.market_data.api.ws import bind_candle_stream, sio
 from src.shared.config.settings import load_yaml_config
 from src.shared.logging.setup import configure_logging
 from src.strategies.api.routes import router as strategies_router
@@ -111,6 +111,7 @@ async def lifespan(app: FastAPI):
     configure_logging()
     container = build_container()
     app.state.container = container
+    bind_candle_stream(container.candle_stream)
     # Reconnect with stored credentials if the gateway is already up, then
     # start the candle stream — it idles harmlessly until login succeeds.
     await container.account.reconnect_from_stored()

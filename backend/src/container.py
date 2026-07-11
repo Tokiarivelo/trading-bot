@@ -90,7 +90,9 @@ def build_container(settings: Settings | None = None) -> Container:
     gateway_client = httpx.AsyncClient(
         base_url=settings.gateway_url,
         headers={"X-Gateway-Secret": settings.gateway_shared_secret},
-        timeout=10.0,
+        # 30 s: the Wine-hosted gateway can take 15-25 s on the first
+        # mt5.initialize() call while the terminal completes its IPC handshake.
+        timeout=30.0,
     )
 
     session_factory = make_session_factory(settings.database_url)

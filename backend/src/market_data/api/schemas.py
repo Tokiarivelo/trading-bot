@@ -17,7 +17,7 @@ class CandleOut(BaseModel):
     `candle_closed` Socket.IO event."""
 
     symbol: str
-    timeframe: str = Field(description="One of 'M5', 'H1', 'H4', 'D1'.")
+    timeframe: str = Field(description="One of 'M1', 'M5', 'H1', 'H4', 'D1'.")
     time: int = Field(description="Bar open time, epoch seconds UTC.")
     open: float
     high: float
@@ -59,12 +59,38 @@ class SymbolInfoOut(BaseModel):
     volume_step: float = Field(description="Volume increment step in lots.")
 
 
+class BrokerSymbolOut(BaseModel):
+    """One entry in the broker's tradable-symbol catalog — for browsing/
+    charting only. Adding one to the chart does not configure it for the
+    automated engine; that's a separate, deliberate step (`configs/app.yaml:
+    symbols` + `configs/symbols/<sym>.yaml`, currently XAUUSD/XAGUSD/BTCUSD)."""
+
+    name: str
+    description: str = Field(description="Broker's human-readable name for the instrument.")
+    path: str = Field(description="Broker's Market Watch group, e.g. 'Forex\\\\Majors'.")
+    visible: bool = Field(description="Whether the symbol is already in Market Watch.")
+
+
+class BrokerSymbolPageOut(BaseModel):
+    """One page of the broker's symbol catalog, for paging through the full
+    list in the chart's symbol picker (as well as filtering it by `search`)."""
+
+    items: list[BrokerSymbolOut]
+    total: int = Field(
+        description=(
+            "Count of symbols matching `search` (or the full catalog if unset), "
+            "before `limit`/`offset` are applied — use it to know whether more "
+            "pages remain."
+        )
+    )
+
+
 class BackfillRequest(BaseModel):
     symbols: list[str] | None = Field(
         default=None, description="Symbols to backfill; defaults to `configs/app.yaml: symbols`."
     )
     timeframes: list[Timeframe] | None = Field(
-        default=None, description="Timeframes to backfill; defaults to all of M5/H1/H4/D1."
+        default=None, description="Timeframes to backfill; defaults to all of M1/M5/H1/H4/D1."
     )
     count: int = Field(
         default=1000, ge=1, le=5000, description="Number of bars per symbol/timeframe."

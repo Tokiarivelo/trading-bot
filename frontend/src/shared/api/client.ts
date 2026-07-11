@@ -90,7 +90,7 @@ export const disconnectAccount = (forget = false) =>
 
 export interface Candle {
   symbol: string;
-  timeframe: "M5" | "H1" | "H4" | "D1";
+  timeframe: "M1" | "M5" | "H1" | "H4" | "D1";
   time: number; // bar open, epoch seconds UTC (lightweight-charts native)
   open: number;
   high: number;
@@ -121,6 +121,27 @@ export interface SymbolInfo {
 
 export const getSymbolInfo = (symbol: string) =>
   api.get<SymbolInfo>(`/market-data/symbol-info?symbol=${encodeURIComponent(symbol)}`);
+
+export interface BrokerSymbol {
+  name: string;
+  description: string;
+  path: string; // broker's Market Watch group, e.g. "Forex\\Majors"
+  visible: boolean;
+}
+
+export interface BrokerSymbolPage {
+  items: BrokerSymbol[];
+  total: number; // count matching `search` (or full catalog), before limit/offset
+}
+
+/** Browse the connected broker's full symbol catalog (chart/watchlist only —
+ * does not configure the engine; see configs/app.yaml: symbols for that).
+ * Pass `offset` to page through the full catalog when `search` is omitted. */
+export const getBrokerSymbols = (search?: string, limit = 50, offset = 0) => {
+  const params = new URLSearchParams({ limit: String(limit), offset: String(offset) });
+  if (search) params.set("search", search);
+  return api.get<BrokerSymbolPage>(`/market-data/broker-symbols?${params}`);
+};
 
 // ── Journal (trade markers, F7) ─────────────────────────────────────────────
 

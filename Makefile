@@ -98,6 +98,11 @@ setup-wine: ## One-time host setup for the Wine-hosted MT5 gateway (Ubuntu/Debia
 
 .PHONY: dev
 dev: ## Run backend + frontend + gateway together (Ctrl-C stops all)
+	@if ! pgrep -x terminal64 > /dev/null; then \
+		echo "MT5 terminal not running — launching it now (give it ~10 s to connect)..."; \
+		WINEPREFIX=$(WINEPREFIX) wine "$(WINEPREFIX)/drive_c/Program Files/MetaTrader 5/terminal64.exe" & \
+		sleep 10; \
+	fi
 	@trap 'kill 0' EXIT; \
 	( cd $(BACKEND_DIR) && $(UV) run uvicorn src.main:socket_app --reload --port $(BACKEND_PORT) ) & \
 	( cd $(FRONTEND_DIR) && $(PNPM) dev --port $(FRONTEND_PORT) ) & \
@@ -113,10 +118,16 @@ dev-frontend: ## Run the Next.js dev server (default http://localhost:3000)
 	cd $(FRONTEND_DIR) && $(PNPM) dev --port $(FRONTEND_PORT)
 
 # Wine Python used by the gateway (override: make dev-gateway WINE_PYTHON=/path/to/python.exe)
-WINE_PYTHON ?= $(HOME)/.wine/drive_c/Python312/python.exe
+# Default path matches the WINEPREFIX=~/.mt5 setup from gateway/README.md.
+WINE_PYTHON ?= $(WINEPREFIX)/drive_c/Python312/python.exe
 
 .PHONY: dev-gateway
-dev-gateway: ## Run the MT5 gateway under Wine (http://localhost:8787) — needs the terminal already running (see setup-wine)
+dev-gateway: ## Run the MT5 gateway under Wine (http://localhost:8787); auto-starts the MT5 terminal first
+	@if ! pgrep -x terminal64 > /dev/null; then \
+		echo "MT5 terminal not running — launching it now (give it ~10 s to connect)..."; \
+		WINEPREFIX=$(WINEPREFIX) wine "$(WINEPREFIX)/drive_c/Program Files/MetaTrader 5/terminal64.exe" & \
+		sleep 10; \
+	fi
 	cd $(GATEWAY_DIR) && WINEPREFIX=$(WINEPREFIX) GATEWAY_SHARED_SECRET=$(GATEWAY_SHARED_SECRET) GATEWAY_PORT=$(GATEWAY_PORT) wine $(WINE_PYTHON) run_gateway.py
 
 .PHONY: mt5-terminal

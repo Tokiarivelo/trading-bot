@@ -12,9 +12,11 @@ from typing import Any
 import httpx
 
 from src.market_data.domain.models import (
+    BrokerSymbol,
     Candle,
     MarketDataUnavailable,
     SymbolInfo,
+    SymbolPage,
     Tick,
     Timeframe,
 )
@@ -50,6 +52,16 @@ class GatewayMarketData:
     async def get_symbol_info(self, symbol: str) -> SymbolInfo:
         info = await self._get("/symbol_info", {"symbol": symbol})
         return SymbolInfo(**info)
+
+    async def list_symbols(self, search: str | None, limit: int, offset: int = 0) -> SymbolPage:
+        """A page of the broker's tradable-symbol catalog, optionally filtered.
+        Not part of `MarketDataPort` — it's a live-broker-only browsing
+        feature with no meaning for the backtest replay adapter."""
+        params: dict[str, Any] = {"limit": limit, "offset": offset}
+        if search:
+            params["search"] = search
+        page = await self._get("/symbols", params)
+        return SymbolPage(items=[BrokerSymbol(**row) for row in page["items"]], total=page["total"])
 
     async def _get(self, path: str, params: dict[str, Any]) -> Any:
         try:

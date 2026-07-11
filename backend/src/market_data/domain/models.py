@@ -10,10 +10,11 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
 
-_TIMEFRAME_SECONDS = {"M5": 300, "H1": 3600, "H4": 14400, "D1": 86400}
+_TIMEFRAME_SECONDS = {"M1": 60, "M5": 300, "H1": 3600, "H4": 14400, "D1": 86400}
 
 
 class Timeframe(StrEnum):
+    M1 = "M1"
     M5 = "M5"
     H1 = "H1"
     H4 = "H4"
@@ -60,6 +61,28 @@ class Tick:
     time: datetime
     bid: float
     ask: float
+
+
+@dataclass(frozen=True, kw_only=True)
+class BrokerSymbol:
+    """One entry in the broker's tradable-symbol catalog (chart/watchlist
+    browsing only — adding one here does not configure it for the engine;
+    see configs/app.yaml: symbols for that)."""
+
+    name: str
+    description: str
+    path: str  # broker's Market Watch group, e.g. "Forex\\Majors"
+    visible: bool  # already in Market Watch
+
+
+@dataclass(frozen=True, kw_only=True)
+class SymbolPage:
+    """One page of the broker's symbol catalog. `total` is the count after
+    search filtering but before paging, so callers know whether more pages
+    remain (`offset + len(items) < total`)."""
+
+    items: list[BrokerSymbol]
+    total: int
 
 
 @dataclass(frozen=True, kw_only=True)

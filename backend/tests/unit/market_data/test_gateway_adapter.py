@@ -71,3 +71,47 @@ async def test_symbol_info_maps_all_fields():
     info = await adapter_with(lambda r: httpx.Response(200, json=payload)).get_symbol_info("XAUUSD")
     assert info.spread_points == 25
     assert info.stops_level == 10
+
+
+async def test_list_symbols_maps_all_fields_and_forwards_query_params():
+    payload = {
+        "items": [
+            {
+                "name": "XAUUSD",
+                "description": "Gold vs US Dollar",
+                "path": "Metals",
+                "visible": True,
+            },
+        ],
+        "total": 1,
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/symbols"
+        assert request.url.params["search"] == "gold"
+        assert request.url.params["limit"] == "50"
+        assert request.url.params["offset"] == "0"
+        return httpx.Response(200, json=payload)
+
+    page = await adapter_with(handler).list_symbols("gold", 50)
+    assert page.total == 1
+    (symbol,) = page.items
+    assert symbol.name == "XAUUSD"
+    assert symbol.path == "Metals"
+    assert symbol.visible is True
+
+
+async def test_list_symbols_omits_search_param_when_none():
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert "search" not in request.url.params
+        return httpx.Response(200, json={"items": [], "total": 0})
+
+    await adapter_with(handler).list_symbols(None, 200)
+
+
+async def test_list_symbols_forwards_offset():
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.params["offset"] == "40"
+        return httpx.Response(200, json={"items": [], "total": 0})
+
+    await adapter_with(handler).list_symbols(None, 20, offset=40)
