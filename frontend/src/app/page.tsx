@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useEffect, useState } from "react";
 import { AccountPanel } from "@/features/account/AccountPanel";
 import { ChartPanel } from "@/features/chart/ChartPanel";
@@ -43,7 +44,10 @@ export default function Home() {
             </button>
           ))}
         </nav>
-        <span className="ml-auto text-sm">
+        <Link href="/backtest" className="ml-auto text-sm text-ink-muted hover:text-accent">
+          Backtests
+        </Link>
+        <span className="text-sm">
           backend:{" "}
           {backendUp === null ? (
             "…"

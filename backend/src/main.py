@@ -22,6 +22,7 @@ import socketio
 from fastapi import FastAPI
 from pydantic import BaseModel, Field
 
+from src.backtest.api.routes import router as backtest_router
 from src.broker.api.routes import router as account_router
 from src.broker.api.trading_routes import router as trading_router
 from src.container import build_container
@@ -80,6 +81,13 @@ OPENAPI_TAGS = [
         "refinement logic and dev tooling must never call `/engine/kill` or "
         "`/engine/resume` — those are user-triggered controls only.",
     },
+    {
+        "name": "backtest",
+        "description": "Read-only backtest reports written by `python -m src.backtest.cli` "
+        "(or `make backtest`). There is no run-a-backtest endpoint — a backtest reads "
+        "the same DB the live app does and can take a while, so it stays a CLI-only "
+        "operation for now; this API only lists/reads the report files it produces.",
+    },
 ]
 
 
@@ -108,6 +116,7 @@ app.include_router(market_data_router)
 app.include_router(trading_router)
 app.include_router(journal_router)
 app.include_router(engine_router)
+app.include_router(backtest_router)
 
 
 class HealthOut(BaseModel):

@@ -579,7 +579,7 @@ review_every_n_trades: 10
 - [x] Spread-aware fill simulation
 - [x] Report: win rate, profit factor, max drawdown, R distribution, equity curve
 - [x] Backtest CLI
-- [ ] UI report page (backend + CLI shipped this pass; frontend viewer is a follow-up)
+- [x] UI report page
 
 ### Phase 6 — AI: PDF → Strategy (F4)
 - [ ] `LLMPort` + Claude adapter + Ollama adapter; provider config

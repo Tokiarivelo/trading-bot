@@ -119,3 +119,47 @@ export interface TradeMarker {
 
 export const getTradeMarkers = (symbol: string) =>
   api.get<TradeMarker[]>(`/journal/markers?symbol=${encodeURIComponent(symbol)}`);
+
+// ── Backtest (Phase 5 reports) ──────────────────────────────────────────────
+
+export interface BacktestTrade {
+  side: "buy" | "sell";
+  volume: number;
+  open_time: number; // epoch seconds UTC
+  open_price: number;
+  sl: number | null;
+  tp: number | null;
+  close_time: number; // epoch seconds UTC
+  close_price: number;
+  profit: number;
+  r_multiple: number | null;
+}
+
+export interface EquityPoint {
+  time: number; // epoch seconds UTC
+  balance: number;
+}
+
+export interface BacktestReportSummary {
+  id: string;
+  strategy: string;
+  symbol: string;
+  period: string;
+  trade_count: number;
+  win_rate: number;
+  profit_factor: number | null; // null means no losing trades (infinite)
+  max_drawdown_pct: number;
+  avg_r: number;
+  worst_losing_streak: number;
+  starting_balance: number;
+  ending_balance: number;
+}
+
+export interface BacktestReportDetail extends BacktestReportSummary {
+  trades: BacktestTrade[];
+  equity_curve: EquityPoint[];
+}
+
+export const getBacktestReports = () => api.get<BacktestReportSummary[]>("/backtest/reports");
+export const getBacktestReport = (id: string) =>
+  api.get<BacktestReportDetail>(`/backtest/reports/${encodeURIComponent(id)}`);
