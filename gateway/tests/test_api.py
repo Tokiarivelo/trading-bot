@@ -2,9 +2,7 @@ from __future__ import annotations
 
 
 def _login(api) -> None:
-    response = api.post(
-        "/login", json={"login": 123456, "password": "pw", "server": "Demo-Server"}
-    )
+    response = api.post("/login", json={"login": 123456, "password": "pw", "server": "Demo-Server"})
     assert response.status_code == 200
 
 
@@ -14,9 +12,7 @@ def test_health_reports_disconnected_before_login(api):
 
 
 def test_login_returns_account_info(api):
-    response = api.post(
-        "/login", json={"login": 123456, "password": "pw", "server": "Demo-Server"}
-    )
+    response = api.post("/login", json={"login": 123456, "password": "pw", "server": "Demo-Server"})
     assert response.status_code == 200
     body = response.json()
     assert body["login"] == 123456
@@ -62,6 +58,21 @@ def test_candles_rejects_unknown_timeframe(api):
     _login(api)
     response = api.get("/candles", params={"symbol": "XAUUSD", "timeframe": "M15"})
     assert response.status_code == 422
+
+
+def test_candles_before_returns_older_bars_strictly_before_cutoff(api):
+    _login(api)
+    cutoff = 1_752_000_000
+    response = api.get(
+        "/candles",
+        params={"symbol": "XAUUSD", "timeframe": "M5", "count": 3, "before": cutoff},
+    )
+    assert response.status_code == 200
+    candles = response.json()
+    assert len(candles) == 3
+    times = [c["time"] for c in candles]
+    assert times == sorted(times)
+    assert all(t < cutoff for t in times)
 
 
 def test_market_data_requires_login(api):
@@ -179,9 +190,9 @@ def test_order_maps_rejection_to_502(api, fake_mt5):
 
 def test_close_position_returns_realized_profit(api):
     _login(api)
-    ticket = api.post(
-        "/order", json={"symbol": "XAUUSD", "side": "buy", "volume": 0.1}
-    ).json()["ticket"]
+    ticket = api.post("/order", json={"symbol": "XAUUSD", "side": "buy", "volume": 0.1}).json()[
+        "ticket"
+    ]
 
     response = api.post(f"/positions/{ticket}/close")
     assert response.status_code == 200
@@ -194,9 +205,9 @@ def test_close_position_returns_realized_profit(api):
 
 def test_modify_position_updates_sl_tp(api):
     _login(api)
-    ticket = api.post(
-        "/order", json={"symbol": "XAUUSD", "side": "sell", "volume": 0.1}
-    ).json()["ticket"]
+    ticket = api.post("/order", json={"symbol": "XAUUSD", "side": "sell", "volume": 0.1}).json()[
+        "ticket"
+    ]
 
     response = api.post(f"/positions/{ticket}/modify", json={"sl": 2410.0, "tp": 2380.0})
     assert response.status_code == 200

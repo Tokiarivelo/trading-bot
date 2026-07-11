@@ -38,6 +38,24 @@ async def test_get_candles_parses_wire_format():
     assert candle.spread_points == 25
 
 
+async def test_get_candles_forwards_before_param():
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.params["before"] == "1752100000"
+        return httpx.Response(200, json=[CANDLE_WIRE])
+
+    await adapter_with(handler).get_candles(
+        "XAUUSD", Timeframe.M5, 10, before=datetime.fromtimestamp(1_752_100_000, tz=UTC)
+    )
+
+
+async def test_get_candles_omits_before_param_when_none():
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert "before" not in request.url.params
+        return httpx.Response(200, json=[CANDLE_WIRE])
+
+    await adapter_with(handler).get_candles("XAUUSD", Timeframe.M5, 10)
+
+
 async def test_gateway_error_becomes_market_data_unavailable():
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(502, json={"detail": "not logged in — POST /login first"})

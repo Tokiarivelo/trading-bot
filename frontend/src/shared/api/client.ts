@@ -100,10 +100,18 @@ export interface Candle {
   spread_points: number;
 }
 
-export const getCandles = (symbol: string, timeframe: Candle["timeframe"], count = 300) =>
-  api.get<Candle[]>(
-    `/market-data/candles?symbol=${encodeURIComponent(symbol)}&timeframe=${timeframe}&count=${count}`,
-  );
+/** `before` (epoch seconds) pages further back than the most recent `count`
+ * bars — pass the oldest loaded candle's `time` to fetch older history. */
+export const getCandles = (
+  symbol: string,
+  timeframe: Candle["timeframe"],
+  count = 300,
+  before?: number,
+) => {
+  const params = new URLSearchParams({ symbol, timeframe, count: String(count) });
+  if (before !== undefined) params.set("before", String(before));
+  return api.get<Candle[]>(`/market-data/candles?${params}`);
+};
 
 export interface SymbolInfo {
   symbol: string;
@@ -265,7 +273,7 @@ export const generateStrategyCode = (id: string) =>
 // ── Strategy versions & activation (Phase 6, §6.5) ──────────────────────────
 
 export type StrategyVersionStatus = "validated" | "active" | "archived";
-export type StrategySource = "ai_generated" | "manual";
+export type StrategySource = "ai_generated" | "ai_refined" | "manual";
 
 export interface StrategyVersionSummary {
   id: string;
@@ -294,3 +302,54 @@ export const getStrategyVersion = (id: string) =>
   api.get<StrategyVersionDetail>(`/strategies/versions/${encodeURIComponent(id)}`);
 export const activateStrategyVersion = (id: string) =>
   api.post<StrategyVersionSummary>(`/strategies/versions/${encodeURIComponent(id)}/activate`);
+
+// ── AI: 10-trade self-refinement loop (Phase 7, F5) ─────────────────────────
+
+export type ReportVerdict = "no_action" | "refinement_proposed";
+
+export interface AnalysisReport {
+  id: string;
+  symbol: string;
+  strategy_name: string;
+  base_version_id: string;
+  trade_ids: string[];
+  created_at: number; // epoch seconds UTC
+  win_rate: number;
+  avg_r: number;
+  common_failure_pattern: string;
+  session_or_news_correlation: string;
+  verdict: ReportVerdict;
+  raw_llm_response: string;
+  proposal_id: string | null;
+}
+
+export type ProposalStatus = "pending" | "backtested" | "applied" | "rejected";
+
+export interface RefinementProposalDetail {
+  id: string;
+  report_id: string;
+  strategy_name: string;
+  base_version_id: string;
+  rationale: string;
+  proposed_code: string;
+  status: ProposalStatus;
+  created_at: number; // epoch seconds UTC
+  sandbox_errors: string[];
+  new_version_id: string | null;
+  improvement_pct: number | null; // candidate avg_r % improvement over baseline
+  applied_mode: "suggest" | "auto" | null;
+  diff: string[]; // unified diff lines, computed fresh server-side on every read
+  baseline_backtest: BacktestReportSummary | null;
+  candidate_backtest: BacktestReportSummary | null;
+}
+
+export const getAnalysisReports = (symbol?: string) =>
+  api.get<AnalysisReport[]>(
+    `/ai/refinement/reports${symbol ? `?symbol=${encodeURIComponent(symbol)}` : ""}`,
+  );
+export const getAnalysisReport = (id: string) =>
+  api.get<AnalysisReport>(`/ai/refinement/reports/${encodeURIComponent(id)}`);
+export const getRefinementProposal = (id: string) =>
+  api.get<RefinementProposalDetail>(`/ai/refinement/proposals/${encodeURIComponent(id)}`);
+export const rejectRefinementProposal = (id: string) =>
+  api.post<RefinementProposalDetail>(`/ai/refinement/proposals/${encodeURIComponent(id)}/reject`);

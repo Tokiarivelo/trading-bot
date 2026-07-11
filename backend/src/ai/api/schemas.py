@@ -1,5 +1,6 @@
-"""Wire models for the PDF -> StrategySpec pipeline (§8.1). Mirrors
-`ai/domain/models.py`; the domain stays framework-free."""
+"""Wire models for the PDF -> StrategySpec pipeline (§8.1) and the 10-trade
+self-refinement loop (§8.2). Mirrors `ai/domain/models.py`; the domain stays
+framework-free."""
 
 from __future__ import annotations
 
@@ -7,7 +8,17 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-from src.ai.domain.models import DraftStatus, ExtractedStrategySpec, GeneratedCode, StrategyDraft
+from src.ai.domain.models import (
+    AnalysisReport,
+    DraftStatus,
+    ExtractedStrategySpec,
+    GeneratedCode,
+    ProposalStatus,
+    RefinementProposal,
+    ReportVerdict,
+    StrategyDraft,
+)
+from src.backtest.api.schemas import BacktestReportSummaryOut
 
 
 class ExtractedStrategySpecSchema(BaseModel):
@@ -113,4 +124,116 @@ class GeneratedCodeOut(BaseModel):
             sandbox_errors=list(result.sandbox_errors),
             version_id=result.version_id,
             backtest_report_id=result.backtest_report_id,
+        )
+
+
+class AnalysisReportOut(BaseModel):
+    id: str = Field(description="Report id, used at GET /ai/refinement/reports/{id}.")
+    symbol: str = Field(description="Symbol these trades were on.")
+    strategy_name: str = Field(description="Strategy family reviewed.")
+    base_version_id: str = Field(description="The StrategyVersion active when this review ran.")
+    trade_ids: list[str] = Field(description="The closed TradeRecord ids this review covers.")
+    created_at: int = Field(description="Epoch seconds UTC.")
+    win_rate: float = Field(description="Fraction of the reviewed trades with positive profit.")
+    avg_r: float = Field(description="Average profit in R-multiples across the reviewed trades.")
+    common_failure_pattern: str = Field(description="AI's finding on the most common loss cause.")
+    session_or_news_correlation: str = Field(
+        description="AI's finding on whether losses cluster around a session/time window."
+    )
+    verdict: ReportVerdict = Field(
+        description="'no_action' or 'refinement_proposed' — see proposal_id for the latter."
+    )
+    raw_llm_response: str = Field(description="The full parsed LLM response, kept for audit.")
+    proposal_id: str | None = Field(
+        description="The RefinementProposal this review produced, if verdict is "
+        "'refinement_proposed' — null otherwise."
+    )
+
+    @staticmethod
+    def from_domain(report: AnalysisReport) -> AnalysisReportOut:
+        return AnalysisReportOut(
+            id=report.id,
+            symbol=report.symbol,
+            strategy_name=report.strategy_name,
+            base_version_id=report.base_version_id,
+            trade_ids=list(report.trade_ids),
+            created_at=int(report.created_at.timestamp()),
+            win_rate=report.win_rate,
+            avg_r=report.avg_r,
+            common_failure_pattern=report.common_failure_pattern,
+            session_or_news_correlation=report.session_or_news_correlation,
+            verdict=report.verdict,
+            raw_llm_response=report.raw_llm_response,
+            proposal_id=report.proposal_id,
+        )
+
+
+class RefinementProposalDetailOut(BaseModel):
+    id: str = Field(description="Proposal id.")
+    report_id: str = Field(description="The AnalysisReport that produced this proposal.")
+    strategy_name: str = Field(description="Strategy family this proposal revises.")
+    base_version_id: str = Field(description="The StrategyVersion this proposal is a diff of.")
+    rationale: str = Field(description="The AI's explanation of what it changed and why.")
+    proposed_code: str = Field(description="Full revised source, whether or not it was applied.")
+    status: ProposalStatus = Field(
+        description="'pending' (backtest incomplete), 'backtested' (awaiting a decision), "
+        "'applied' (a StrategyVersion was activated), or 'rejected' (sandbox failure, policy "
+        "rejection, or a human declined it)."
+    )
+    created_at: int = Field(description="Epoch seconds UTC.")
+    sandbox_errors: list[str] = Field(
+        description="Why sandbox validation failed — empty unless status is 'rejected' for that "
+        "reason."
+    )
+    new_version_id: str | None = Field(
+        description="The StrategyVersion created from proposed_code, if sandbox validation "
+        "passed. Activate it via POST /strategies/versions/{id}/activate — that endpoint is "
+        "also how this proposal (or any older version) gets rolled back to later."
+    )
+    improvement_pct: float | None = Field(
+        description="Candidate's avg_r percent improvement over the baseline's, the sole metric "
+        "the auto-apply policy gates on. Null if either backtest couldn't run (no candle "
+        "history yet)."
+    )
+    applied_mode: str | None = Field(
+        description="'suggest' or 'auto' — which policy mode decided this proposal's status, "
+        "null while still awaiting a decision."
+    )
+    diff: list[str] = Field(
+        description="Unified diff of base_version_id's code against proposed_code, computed "
+        "fresh on every read (never stored) for the review UI."
+    )
+    baseline_backtest: BacktestReportSummaryOut | None = Field(
+        description="Headline stats for the base version's backtest over the comparison period, "
+        "or null if it couldn't run."
+    )
+    candidate_backtest: BacktestReportSummaryOut | None = Field(
+        description="Headline stats for proposed_code's backtest over the same period, or null "
+        "if it couldn't run."
+    )
+
+    @staticmethod
+    def from_domain(
+        proposal: RefinementProposal,
+        *,
+        diff: list[str],
+        baseline_backtest: BacktestReportSummaryOut | None,
+        candidate_backtest: BacktestReportSummaryOut | None,
+    ) -> RefinementProposalDetailOut:
+        return RefinementProposalDetailOut(
+            id=proposal.id,
+            report_id=proposal.report_id,
+            strategy_name=proposal.strategy_name,
+            base_version_id=proposal.base_version_id,
+            rationale=proposal.rationale,
+            proposed_code=proposal.proposed_code,
+            status=proposal.status,
+            created_at=int(proposal.created_at.timestamp()),
+            sandbox_errors=list(proposal.sandbox_errors),
+            new_version_id=proposal.new_version_id,
+            improvement_pct=proposal.improvement_pct,
+            applied_mode=proposal.applied_mode,
+            diff=diff,
+            baseline_backtest=baseline_backtest,
+            candidate_backtest=candidate_backtest,
         )

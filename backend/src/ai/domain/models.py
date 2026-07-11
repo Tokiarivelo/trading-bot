@@ -1,4 +1,5 @@
-"""AI layer domain models (§8.1): the PDF -> StrategySpec -> code pipeline.
+"""AI layer domain models: §8.1 (PDF -> StrategySpec -> code) and §8.2
+(10-trade self-refinement loop).
 
 Framework-free (no pydantic, no FastAPI). `ai/api/schemas.py` mirrors these
 for the wire; `strategies/domain/models.py` has the separate, narrower
@@ -103,3 +104,75 @@ class GeneratedCode:
     @property
     def is_valid(self) -> bool:
         return not self.sandbox_errors
+
+
+@dataclass(frozen=True, kw_only=True)
+class RefinementConfig:
+    """Mirrors `configs/ai.yaml: refinement` — the self-refinement loop's
+    apply policy. User-owned like `RiskCaps`; the refinement loop reads it,
+    never writes it."""
+
+    mode: str = "suggest"  # "suggest" | "auto"
+    auto_apply_min_improvement_pct: float = 10.0
+    max_auto_refinements_per_day: int = 1
+
+
+class ReportVerdict(StrEnum):
+    NO_ACTION = "no_action"
+    REFINEMENT_PROPOSED = "refinement_proposed"
+
+
+class ProposalStatus(StrEnum):
+    PENDING = "pending"
+    BACKTESTED = "backtested"
+    APPLIED = "applied"
+    REJECTED = "rejected"
+
+
+@dataclass(frozen=True, kw_only=True)
+class AnalysisReport:
+    """Output of `review_ten_trades` (§8.2): the AI's read on the last N
+    closed trades for one symbol, triggered by `TenTradesCompleted`. Always
+    persisted, even when `verdict` is `NO_ACTION` — this is the audit trail
+    of every review, not just the ones that led somewhere.
+    """
+
+    id: str
+    symbol: str
+    strategy_name: str
+    base_version_id: str
+    trade_ids: tuple[str, ...]
+    created_at: datetime
+    win_rate: float
+    avg_r: float
+    common_failure_pattern: str
+    session_or_news_correlation: str
+    verdict: ReportVerdict
+    raw_llm_response: str
+    proposal_id: str | None = None
+
+
+@dataclass(frozen=True, kw_only=True)
+class RefinementProposal:
+    """A candidate code change from `refine_strategy_code`, sandbox-validated
+    and backtested against the version it's based on before any apply
+    decision is made. `improvement_pct` is the candidate's avg_r percent
+    delta over the baseline's — the sole metric the auto-apply policy gates
+    on (bounded, always defined; profit_factor blows up to infinity with
+    zero losing trades in a small sample, so it's shown as context only).
+    """
+
+    id: str
+    report_id: str
+    strategy_name: str
+    base_version_id: str
+    rationale: str
+    proposed_code: str
+    status: ProposalStatus
+    created_at: datetime
+    sandbox_errors: tuple[str, ...] = ()
+    new_version_id: str | None = None
+    baseline_backtest_report_id: str | None = None
+    candidate_backtest_report_id: str | None = None
+    improvement_pct: float | None = None
+    applied_mode: str | None = None

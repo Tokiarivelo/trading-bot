@@ -276,6 +276,15 @@ doctor: ## Diagnose the full stack: gateway up? terminal connected? backend can 
 	echo "/symbol_info etc. return 502/503. Fix with the UI's MT5 Account panel, or:"; \
 	echo "  make mt5-login LOGIN=12345678 PASSWORD=*** SERVER=MetaQuotes-Demo"
 
+.PHONY: kill stop
+kill stop: ## Kill all dev processes (backend, frontend, gateway, MT5 terminal)
+	@echo "Stopping dev processes…"
+	@pkill -f "uvicorn src.main:socket_app" 2>/dev/null && echo "  ✓ backend stopped"  || echo "  – backend not running"
+	@pkill -f "pnpm.*dev"                   2>/dev/null && echo "  ✓ frontend stopped" || echo "  – frontend not running"
+	@pkill -f "run_gateway.py"              2>/dev/null && echo "  ✓ gateway stopped"  || echo "  – gateway not running"
+	@pkill -x terminal64                    2>/dev/null && echo "  ✓ MT5 terminal stopped" || echo "  – MT5 terminal not running"
+	@echo "Done."
+
 .PHONY: clean
 clean: ## Remove caches and build artifacts (keeps .venv and node_modules)
 	rm -rf $(FRONTEND_DIR)/.next $(FRONTEND_DIR)/out

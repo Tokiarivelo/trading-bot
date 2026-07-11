@@ -26,10 +26,13 @@ class GatewayMarketData:
     def __init__(self, client: httpx.AsyncClient) -> None:
         self._client = client
 
-    async def get_candles(self, symbol: str, timeframe: Timeframe, count: int) -> list[Candle]:
-        payload = await self._get(
-            "/candles", {"symbol": symbol, "timeframe": timeframe.value, "count": count}
-        )
+    async def get_candles(
+        self, symbol: str, timeframe: Timeframe, count: int, before: datetime | None = None
+    ) -> list[Candle]:
+        params: dict[str, Any] = {"symbol": symbol, "timeframe": timeframe.value, "count": count}
+        if before is not None:
+            params["before"] = int(before.timestamp())
+        payload = await self._get("/candles", params)
         return [
             Candle(
                 symbol=symbol,

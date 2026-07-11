@@ -3,6 +3,7 @@ see `src.market_data.api.ws`."""
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import Annotated, Any
 
 from fastapi import APIRouter, HTTPException, Query, Request
@@ -38,7 +39,9 @@ def _container(request: Request) -> Any:
         "Serves from the live gateway when connected; falls back to the local "
         "database (populated by the background candle stream and `/backfill`) "
         "when the gateway is unreachable, so the chart keeps working across "
-        "MT5 disconnects."
+        "MT5 disconnects. Pass `before` to page further back than the most "
+        "recent `count` bars, e.g. when the chart is panned to the left edge "
+        "of its currently loaded history."
     ),
 )
 async def get_candles(
@@ -46,8 +49,21 @@ async def get_candles(
     symbol: str = Query(description="Trading symbol, e.g. 'XAUUSD'."),
     timeframe: TimeframeParam = Timeframe.M5,
     count: Annotated[int, Query(ge=1, le=5000, description="Number of bars to return.")] = 300,
+    before: Annotated[
+        int | None,
+        Query(
+            description=(
+                "Epoch seconds UTC. When set, returns `count` bars with open "
+                "time strictly before this instant instead of the most recent "
+                "ones — for loading older history on demand."
+            )
+        ),
+    ] = None,
 ) -> list[CandleOut]:
-    candles = await _container(request).candle_history.get_candles(symbol, timeframe, count)
+    before_dt = datetime.fromtimestamp(before, tz=UTC) if before is not None else None
+    candles = await _container(request).candle_history.get_candles(
+        symbol, timeframe, count, before_dt
+    )
     return [CandleOut(**candle_message(c)) for c in candles]
 
 

@@ -12,6 +12,7 @@ the module stays importable for tests (which stub the `mt5` attribute).
 from __future__ import annotations
 
 import logging
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -24,6 +25,9 @@ except ImportError:  # pragma: no cover - Linux dev machines
 
 class Mt5Error(Exception):
     """Raised when the terminal is unreachable or a call is rejected."""
+
+
+_TIMEFRAME_SECONDS = {"M1": 60, "M5": 300, "H1": 3600, "H4": 14400, "D1": 86400}
 
 
 def _last_error() -> str:
@@ -81,12 +85,29 @@ class Mt5Client:
 
     # ── market data ─────────────────────────────────────────────────────
 
-    def candles(self, symbol: str, timeframe: str, count: int) -> list[dict[str, Any]]:
+    def candles(
+        self, symbol: str, timeframe: str, count: int, before: int | None = None
+    ) -> list[dict[str, Any]]:
         self._require_connection()
         self._select(symbol)
-        rates = mt5.copy_rates_from_pos(symbol, self._timeframe(timeframe), 0, count)
-        if rates is None:
-            raise Mt5Error(f"copy_rates_from_pos({symbol},{timeframe}) failed: {_last_error()}")
+        if before is None:
+            rates = mt5.copy_rates_from_pos(symbol, self._timeframe(timeframe), 0, count)
+            if rates is None:
+                raise Mt5Error(f"copy_rates_from_pos({symbol},{timeframe}) failed: {_last_error()}")
+        else:
+            # No MT5 call fetches "count bars ending just before a timestamp"
+            # directly, so pull a generously wide date range up to (but not
+            # including) `before` and keep the `count` bars closest to it.
+            # 3x the nominal calendar span comfortably covers weekend/holiday
+            # gaps without a per-symbol trading-calendar lookup.
+            date_to = datetime.fromtimestamp(before, tz=UTC) - timedelta(seconds=1)
+            span = timedelta(seconds=_TIMEFRAME_SECONDS[timeframe] * count * 3)
+            rates = mt5.copy_rates_range(
+                symbol, self._timeframe(timeframe), date_to - span, date_to
+            )
+            if rates is None:
+                raise Mt5Error(f"copy_rates_range({symbol},{timeframe}) failed: {_last_error()}")
+            rates = rates[-count:]
         return [
             {
                 "time": int(r["time"]),

@@ -68,12 +68,17 @@ class ReplayMarketDataPort:
             raise RuntimeError(f"no M5 bar closed at or before {self._cursor}")
         return bars[idx]
 
-    async def get_candles(self, symbol: str, timeframe: Timeframe, count: int) -> list[Candle]:
+    async def get_candles(
+        self, symbol: str, timeframe: Timeframe, count: int, before: datetime | None = None
+    ) -> list[Candle]:
         if self._cursor is None:
             raise RuntimeError("advance_to() must be called before get_candles()")
         bars = self._candles.get(timeframe, [])
         close_times = self._close_times.get(timeframe, [])
         idx = bisect.bisect_right(close_times, self._cursor)
+        if before is not None:
+            open_times = [c.time for c in bars[:idx]]
+            idx = bisect.bisect_left(open_times, before)
         return bars[max(0, idx - count) : idx]
 
     async def get_tick(self, symbol: str) -> Tick:

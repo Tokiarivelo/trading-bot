@@ -10,6 +10,17 @@ from fastapi import FastAPI
 
 from src.market_data.adapters.mt5_gateway import GatewayMarketData
 from src.market_data.api.routes import router
+from src.market_data.application.history import CandleHistoryService
+
+CANDLE_WIRE = {
+    "time": 1_752_100_500,
+    "open": 2400.0,
+    "high": 2401.0,
+    "low": 2399.0,
+    "close": 2400.5,
+    "tick_volume": 1000,
+    "spread": 25,
+}
 
 SYMBOLS_WIRE = [
     {"name": "XAUUSD", "description": "Gold vs US Dollar", "path": "Metals", "visible": True},
@@ -29,6 +40,45 @@ def _api(handler) -> httpx.AsyncClient:
     app.include_router(router)
     app.state.container = SimpleNamespace(market_data=GatewayMarketData(gateway_client))
     return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://backend")
+
+
+def _candles_api(handler) -> httpx.AsyncClient:
+    transport = httpx.MockTransport(handler)
+    gateway_client = httpx.AsyncClient(transport=transport, base_url="http://gw")
+    app = FastAPI()
+    app.include_router(router)
+    # Repository is never touched here — the fake gateway handler always
+    # succeeds, so the DB fallback path in CandleHistoryService is unused.
+    app.state.container = SimpleNamespace(
+        candle_history=CandleHistoryService(GatewayMarketData(gateway_client), repository=None)
+    )
+    return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://backend")
+
+
+async def test_candles_omits_before_when_not_requested():
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert "before" not in request.url.params
+        return httpx.Response(200, json=[CANDLE_WIRE])
+
+    async with _candles_api(handler) as client:
+        response = await client.get(
+            "/market-data/candles", params={"symbol": "XAUUSD", "timeframe": "M5"}
+        )
+    assert response.status_code == 200
+    assert response.json()[0]["time"] == 1_752_100_500
+
+
+async def test_candles_forwards_before_as_epoch_seconds():
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.params["before"] == "1752100000"
+        return httpx.Response(200, json=[CANDLE_WIRE])
+
+    async with _candles_api(handler) as client:
+        response = await client.get(
+            "/market-data/candles",
+            params={"symbol": "XAUUSD", "timeframe": "M5", "before": 1_752_100_000},
+        )
+    assert response.status_code == 200
 
 
 async def test_broker_symbols_lists_catalog():

@@ -113,6 +113,26 @@ class FakeMt5:
             for i in range(min(count, 3))
         ]
 
+    def copy_rates_range(self, symbol, timeframe, date_from, date_to):
+        # One bar every 5 minutes spanning the requested range, aligned to
+        # the same 5-min boundary as copy_rates_from_pos's fixed base time.
+        start = int(date_from.timestamp())
+        start -= start % 300
+        end = int(date_to.timestamp())
+        times = range(start, end + 1, 300)
+        return [
+            {
+                "time": t,
+                "open": 2300.0,
+                "high": 2301.0,
+                "low": 2299.0,
+                "close": 2300.5,
+                "tick_volume": 900,
+                "spread": 20,
+            }
+            for t in times
+        ]
+
     def symbol_info_tick(self, symbol):
         return SimpleNamespace(time=1_752_100_812, bid=2400.10, ask=2400.35)
 

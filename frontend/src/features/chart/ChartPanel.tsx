@@ -14,6 +14,7 @@ import {
   type IChartApi,
   type ISeriesApi,
   type ISeriesMarkersPluginApi,
+  type LogicalRange,
   type SeriesMarker,
   type Time,
   type UTCTimestamp,
@@ -32,6 +33,10 @@ const TIMEFRAMES: Candle["timeframe"][] = ["M1", "M5", "H1", "H4", "D1"];
 const CANDLE_COUNT = 300;
 const SPREAD_POLL_MS = 3000;
 const MARKERS_POLL_MS = 5000;
+// Start fetching the next page of history once the visible window's left
+// edge gets this close to the oldest bar currently loaded, so more arrives
+// before the user actually scrolls past the end of the data.
+const LOAD_MORE_THRESHOLD = 50;
 
 function cssVar(name: string): string {
   return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
@@ -98,10 +103,17 @@ export function ChartPanel({ symbol }: { symbol: string }) {
   // Guards against applying a live WS update before the REST history load
   // for the current symbol/timeframe has landed — see the effect below.
   const historyLoadedRef = useRef(false);
+  // All candles currently on the chart for this symbol/timeframe, oldest
+  // first — kept in sync with live updates so "load more" always pages back
+  // from the true oldest bar, and mutated in place (no React re-render).
+  const candlesRef = useRef<Candle[]>([]);
+  const hasMoreHistoryRef = useRef(true);
+  const loadingMoreRef = useRef(false);
 
   const [timeframe, setTimeframe] = useState<Candle["timeframe"]>("M5");
   const [spreadPoints, setSpreadPoints] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [loadingMore, setLoadingMore] = useState(false);
 
   // Create the chart once; destroy on unmount.
   useEffect(() => {
@@ -161,6 +173,7 @@ export function ChartPanel({ symbol }: { symbol: string }) {
   useEffect(() => {
     let cancelled = false;
     setError(null);
+    setLoadingMore(false);
     // WS updates for the new room can start arriving before the REST
     // history call below resolves. Applying one to the still-stale
     // previous symbol/timeframe's data can move time backwards (e.g.
@@ -169,14 +182,73 @@ export function ChartPanel({ symbol }: { symbol: string }) {
     // Dropping live updates until history for *this* symbol/timeframe is
     // actually on the chart avoids that race.
     historyLoadedRef.current = false;
+    candlesRef.current = [];
+    hasMoreHistoryRef.current = true;
+    loadingMoreRef.current = false;
+
+    const chart = chartRef.current;
+
+    function render() {
+      const upColor = cssVar("--color-ok");
+      const downColor = cssVar("--color-err");
+      candleSeriesRef.current?.setData(candlesRef.current.map(toBar));
+      volumeSeriesRef.current?.setData(
+        candlesRef.current.map((c) => toVolumeBar(c, upColor, downColor)),
+      );
+    }
+
+    // Fetches the next page of older bars once the user pans near the left
+    // edge of what's loaded — the chart's "fetch more" is this auto-trigger
+    // plus the `loadingMore` indicator rendered below, not a manual button.
+    async function loadMore() {
+      if (loadingMoreRef.current || !hasMoreHistoryRef.current || candlesRef.current.length === 0) {
+        return;
+      }
+      loadingMoreRef.current = true;
+      setLoadingMore(true);
+      const oldest = candlesRef.current[0];
+      try {
+        const older = await getCandles(symbol, timeframe, CANDLE_COUNT, oldest.time);
+        if (cancelled) return;
+        if (older.length === 0) {
+          hasMoreHistoryRef.current = false;
+        } else {
+          hasMoreHistoryRef.current = older.length >= CANDLE_COUNT;
+          candlesRef.current = [...older, ...candlesRef.current];
+          // Prepending shifts every existing bar's logical index forward by
+          // the number of new bars, so the visible window must shift with
+          // it or the chart jumps — lightweight-charts has no "prepend"
+          // primitive, this is the documented workaround for setData().
+          const range = chart?.timeScale().getVisibleLogicalRange();
+          render();
+          if (range) {
+            chart?.timeScale().setVisibleLogicalRange({
+              from: range.from + older.length,
+              to: range.to + older.length,
+            });
+          }
+        }
+      } catch {
+        // Transient failure — leave hasMore true so the next pan retries.
+      } finally {
+        if (!cancelled) {
+          loadingMoreRef.current = false;
+          setLoadingMore(false);
+        }
+      }
+    }
+
+    const onVisibleRangeChange = (range: LogicalRange | null) => {
+      if (range && range.from < LOAD_MORE_THRESHOLD) void loadMore();
+    };
+    chart?.timeScale().subscribeVisibleLogicalRangeChange(onVisibleRangeChange);
 
     getCandles(symbol, timeframe, CANDLE_COUNT)
       .then((candles) => {
         if (cancelled) return;
-        const upColor = cssVar("--color-ok");
-        const downColor = cssVar("--color-err");
-        candleSeriesRef.current?.setData(candles.map(toBar));
-        volumeSeriesRef.current?.setData(candles.map((c) => toVolumeBar(c, upColor, downColor)));
+        candlesRef.current = candles;
+        hasMoreHistoryRef.current = candles.length >= CANDLE_COUNT;
+        render();
         historyLoadedRef.current = true;
       })
       .catch(() => {
@@ -195,6 +267,12 @@ export function ChartPanel({ symbol }: { symbol: string }) {
         if (!isCandleMessage(message)) return;
         if (!historyLoadedRef.current) return;
         const { candle } = message;
+        const bars = candlesRef.current;
+        if (bars.length > 0 && bars[bars.length - 1].time === candle.time) {
+          bars[bars.length - 1] = candle;
+        } else {
+          bars.push(candle);
+        }
         try {
           candleSeriesRef.current?.update(toBar(candle));
           volumeSeriesRef.current?.update(
@@ -212,6 +290,7 @@ export function ChartPanel({ symbol }: { symbol: string }) {
     return () => {
       cancelled = true;
       historyLoadedRef.current = false;
+      chart?.timeScale().unsubscribeVisibleLogicalRangeChange(onVisibleRangeChange);
       unsubscribe();
     };
   }, [symbol, timeframe]);
@@ -279,12 +358,33 @@ export function ChartPanel({ symbol }: { symbol: string }) {
             </button>
           ))}
         </nav>
+        <div className="flex gap-1">
+          <button
+            className="cursor-pointer rounded border border-line px-2 py-0.5 text-xs text-ink-muted"
+            onClick={() => chartRef.current?.timeScale().scrollToRealTime()}
+          >
+            Latest
+          </button>
+          <button
+            className="cursor-pointer rounded border border-line px-2 py-0.5 text-xs text-ink-muted"
+            onClick={() => chartRef.current?.timeScale().resetTimeScale()}
+          >
+            Reset zoom
+          </button>
+        </div>
         <span className="ml-auto text-xs text-ink-muted">
           spread: {spreadPoints === null ? "—" : `${spreadPoints} pts`}
         </span>
       </header>
       {error && <p className="px-4 py-1 text-xs text-err">{error}</p>}
-      <div ref={containerRef} className="min-h-0 flex-1" />
+      <div className="relative min-h-0 flex-1">
+        <div ref={containerRef} className="h-full w-full" />
+        {loadingMore && (
+          <div className="pointer-events-none absolute left-2 top-2 rounded border border-line bg-panel px-2 py-1 text-xs text-ink-muted">
+            Loading history…
+          </div>
+        )}
+      </div>
     </section>
   );
 }

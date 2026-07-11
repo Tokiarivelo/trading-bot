@@ -13,9 +13,11 @@ from pathlib import Path
 import httpx
 import yaml
 
+from src.ai.adapters.report_repository import AnalysisReportRepository, RefinementProposalRepository
 from src.ai.adapters.repository import DraftRepository
 from src.ai.application.llm_router import LLMRouter
 from src.ai.application.pdf_to_strategy import PdfToStrategyService
+from src.ai.application.refinement_loop import RefinementLoopService
 from src.broker.adapters.credential_store import FernetCredentialStore
 from src.broker.adapters.mt5_gateway import GatewayAccount, GatewayBroker
 from src.broker.adapters.paper import PaperBroker
@@ -38,13 +40,19 @@ from src.market_data.application.live_candle import LiveCandleService
 from src.market_data.domain.models import Timeframe
 from src.shared.config.loaders import (
     load_llm_provider_config,
+    load_refinement_config,
     load_risk_caps,
     load_symbol_trading_config,
 )
 from src.shared.config.settings import Settings, load_yaml_config
 from src.shared.db.base import make_session_factory
 from src.shared.events.bus import EventBus
-from src.shared.events.definitions import CandleClosed, PositionClosed, PositionOpened
+from src.shared.events.definitions import (
+    CandleClosed,
+    PositionClosed,
+    PositionOpened,
+    TenTradesCompleted,
+)
 from src.skills.application.skill_selector import SkillSelector
 from src.skills.domain.models import NormalSkill, SessionWindow
 from src.strategies.adapters.repository import StrategyVersionRepository
@@ -72,8 +80,11 @@ class Container:
     order_service: OrderService
     trade_journal: TradeJournalService
     trade_engine: TradeEngine
+    strategy_registry: StrategyRegistry
     strategy_versions: StrategyVersionService
+    skill_selector: SkillSelector
     pdf_to_strategy: PdfToStrategyService
+    refinement_loop: RefinementLoopService
 
     _closers: list = field(default_factory=list)
 
@@ -181,6 +192,19 @@ def build_container(settings: Settings | None = None) -> Container:
         skills={symbol: _load_normal_skill(symbol) for symbol in symbols}, timezone=timezone
     )
 
+    refinement_loop = RefinementLoopService(
+        report_repository=AnalysisReportRepository(session_factory),
+        proposal_repository=RefinementProposalRepository(session_factory),
+        journal_repository=journal_repository,
+        strategy_versions=strategy_versions,
+        strategy_registry=strategy_registry,
+        skill_selector=skill_selector,
+        llm_router=llm_router,
+        refinement_config=load_refinement_config(settings.configs_dir),
+        timezone=timezone,
+    )
+    event_bus.subscribe(TenTradesCompleted, refinement_loop.on_ten_trades_completed)
+
     trade_engine = TradeEngine(
         market_data=market_data,
         order_service=order_service,
@@ -211,8 +235,11 @@ def build_container(settings: Settings | None = None) -> Container:
         order_service=order_service,
         trade_journal=trade_journal,
         trade_engine=trade_engine,
+        strategy_registry=strategy_registry,
         strategy_versions=strategy_versions,
+        skill_selector=skill_selector,
         pdf_to_strategy=pdf_to_strategy,
+        refinement_loop=refinement_loop,
     )
 
 

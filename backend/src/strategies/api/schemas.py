@@ -34,7 +34,10 @@ class StrategyVersionOut(BaseModel):
     version: int = Field(description="1-based version number within this name.")
     file_path: str = Field(description="Path under backend/ where the source file lives.")
     code_hash: str = Field(description="SHA-256 of the source, for change detection/audit.")
-    source: CodeSource = Field(description="'ai_generated' (via PDF pipeline) or 'manual'.")
+    source: CodeSource = Field(
+        description="'ai_generated' (via PDF pipeline), 'ai_refined' (via the 10-trade "
+        "self-refinement loop), or 'manual'."
+    )
     status: VersionStatus = Field(
         description="'validated' (passed the sandbox, not live), 'active' (registered in the "
         "StrategyRegistry and tradeable), or 'archived' (was active, superseded)."

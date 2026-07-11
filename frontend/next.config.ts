@@ -14,6 +14,12 @@ const nextConfig: NextConfig = {
       },
     ];
   },
+  experimental: {
+    // Default is 10MB; strategy-spec PDFs (with embedded images/diagrams)
+    // routinely exceed that. Applies to requests proxied through the /api
+    // rewrite above, e.g. POST /api/ai/pdf-strategy/upload.
+    proxyClientMaxBodySize: "50mb",
+  },
 };
 
 export default nextConfig;

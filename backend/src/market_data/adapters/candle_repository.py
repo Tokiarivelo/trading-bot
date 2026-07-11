@@ -61,6 +61,25 @@ class CandleRepository:
             rows = session.scalars(query).all()
         return [_to_domain(row) for row in reversed(rows)]
 
+    def get_before(
+        self, symbol: str, timeframe: Timeframe, before: datetime, count: int
+    ) -> list[Candle]:
+        """`count` stored bars with open time strictly before `before`, oldest
+        first — for paging further back in history than `get_latest`."""
+        query = (
+            select(CandleRow)
+            .where(
+                CandleRow.symbol == symbol,
+                CandleRow.timeframe == timeframe.value,
+                CandleRow.time < int(before.timestamp()),
+            )
+            .order_by(CandleRow.time.desc())
+            .limit(count)
+        )
+        with self._session_factory() as session:
+            rows = session.scalars(query).all()
+        return [_to_domain(row) for row in reversed(rows)]
+
     def get_range(
         self, symbol: str, timeframe: Timeframe, start: datetime, end: datetime
     ) -> list[Candle]:

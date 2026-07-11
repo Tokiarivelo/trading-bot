@@ -6,6 +6,12 @@ const TONE: Record<string, string> = {
   validated: "border-accent text-accent",
   active: "border-ok text-ok",
   archived: "border-ink-muted text-ink-muted",
+  // 10-trade refinement loop (Phase 7, F5)
+  no_action: "border-ink-muted text-ink-muted",
+  refinement_proposed: "border-accent text-accent",
+  pending: "border-ink-muted text-ink-muted",
+  backtested: "border-accent text-accent",
+  applied: "border-ok text-ok",
 };
 
 /** Small status pill shared by draft and version lists/detail pages. */

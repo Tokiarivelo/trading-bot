@@ -589,11 +589,12 @@ review_every_n_trades: 10
 - [x] Strategy versioning + activation flow (paper first)
 
 ### Phase 7 — AI: 10-trade refinement loop (F5)
-- [ ] `TenTradesCompleted` event from journal
-- [ ] Review bundle builder (trades + snapshots + code + spec)
-- [ ] `review_ten_trades` prompt → AnalysisReport → UI page
-- [ ] `refine_strategy_code` → diff → sandbox → backtest comparison
-- [ ] Suggest/auto apply policy + rollback UI
+- [x] `TenTradesCompleted` event from journal
+- [x] Review bundle builder (trades + snapshots + code + spec)
+- [x] `review_ten_trades` prompt → AnalysisReport → UI page
+- [x] `refine_strategy_code` → diff → sandbox → backtest comparison
+- [x] Suggest/auto apply policy + rollback UI (rollback reuses the existing
+      strategy version activate endpoint)
 
 ### Phase 8 — News skills (F8)
 - [ ] `news` module: calendar fetch, impact classification, window detection

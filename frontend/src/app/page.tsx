@@ -125,6 +125,9 @@ export default function Home() {
         <Link href="/backtest" className="text-sm text-ink-muted hover:text-accent">
           Backtests
         </Link>
+        <Link href="/ai-reports" className="text-sm text-ink-muted hover:text-accent">
+          AI Reports
+        </Link>
         <span className="text-sm">
           backend:{" "}
           {backendUp === null ? (
@@ -149,7 +152,12 @@ export default function Home() {
             </Link>{" "}
             PDF upload, spec review, AI codegen, versions
           </Panel>
-          <Panel>AI 10-trade review (Phase 7)</Panel>
+          <Panel>
+            <Link href="/ai-reports" className="text-accent hover:underline">
+              AI reviews →
+            </Link>{" "}
+            10-trade reviews, refinement proposals, backtest comparisons
+          </Panel>
           <Panel>News (Phase 8)</Panel>
         </aside>
       </main>

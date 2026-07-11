@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from src.ai.domain.models import RefinementConfig
 from src.ai.ports.llm import ProviderSpec
 from src.broker.domain.symbol_config import SymbolTradingConfig
 from src.engine.domain.models import RiskCaps
@@ -45,3 +46,12 @@ def load_llm_provider_config(configs_dir: Path) -> dict[str, ProviderSpec]:
         task: ProviderSpec(provider=entry["provider"], model=entry["model"])
         for task, entry in data.items()
     }
+
+
+def load_refinement_config(configs_dir: Path) -> RefinementConfig:
+    data = load_yaml_config("ai", configs_dir).get("refinement", {})
+    return RefinementConfig(
+        mode=data.get("mode", "suggest"),
+        auto_apply_min_improvement_pct=data.get("auto_apply_min_improvement_pct", 10.0),
+        max_auto_refinements_per_day=data.get("max_auto_refinements_per_day", 1),
+    )

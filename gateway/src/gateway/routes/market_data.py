@@ -27,10 +27,19 @@ def candles(
     symbol: Symbol,
     timeframe: str,
     count: Annotated[int, Query(ge=1, le=5000)] = 300,
+    before: Annotated[
+        int | None,
+        Query(
+            description=(
+                "Epoch seconds UTC; returns bars ending just before this "
+                "instant instead of the most recent ones."
+            )
+        ),
+    ] = None,
 ) -> list[CandleOut]:
     _validate_timeframe(timeframe)
     try:
-        return [CandleOut(**c) for c in client.candles(symbol, timeframe, count)]
+        return [CandleOut(**c) for c in client.candles(symbol, timeframe, count, before)]
     except Mt5Error as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 

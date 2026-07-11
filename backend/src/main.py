@@ -23,6 +23,7 @@ from fastapi import FastAPI
 from pydantic import BaseModel, Field
 
 from src.ai.api.routes import router as ai_router
+from src.ai.api.routes_refinement import router as ai_refinement_router
 from src.backtest.api.routes import router as backtest_router
 from src.broker.api.routes import router as account_router
 from src.broker.api.trading_routes import router as trading_router
@@ -92,10 +93,11 @@ OPENAPI_TAGS = [
     },
     {
         "name": "ai",
-        "description": "PDF -> StrategySpec -> code pipeline (F4). Every step is human-gated: "
-        "upload only produces a review draft, and code generation only ever produces a "
-        "'validated' strategy version — never an active, tradeable one. See the `strategies` "
-        "tag for activation.",
+        "description": "PDF -> StrategySpec -> code pipeline (F4), and the 10-trade "
+        "self-refinement loop (F5). Every step is human-gated: upload/review only produces a "
+        "draft or proposal, and code generation/refinement only ever produces a 'validated' "
+        "strategy version — never an active, tradeable one, unless the refinement policy is "
+        "'auto' and its backtest threshold is met. See the `strategies` tag for activation.",
     },
     {
         "name": "strategies",
@@ -136,6 +138,7 @@ app.include_router(journal_router)
 app.include_router(engine_router)
 app.include_router(backtest_router)
 app.include_router(ai_router)
+app.include_router(ai_refinement_router)
 app.include_router(strategies_router)
 
 

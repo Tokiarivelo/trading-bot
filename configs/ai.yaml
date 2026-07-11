@@ -3,6 +3,7 @@ provider_per_task:
   pdf_extraction:   { provider: claude, model: claude-sonnet-5 }
   code_generation:  { provider: claude, model: claude-sonnet-5 }
   ten_trade_review: { provider: claude, model: claude-haiku-4-5 }
+  code_refinement:  { provider: claude, model: claude-sonnet-5 }
   # Local alternative for any task:
   #   { provider: ollama, model: "qwen2.5-coder:14b" }
 

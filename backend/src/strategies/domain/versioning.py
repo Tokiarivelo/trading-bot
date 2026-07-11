@@ -23,6 +23,7 @@ class VersionStatus(StrEnum):
 class CodeSource(StrEnum):
     AI_GENERATED = "ai_generated"
     MANUAL = "manual"
+    AI_REFINED = "ai_refined"  # produced by the 10-trade refinement loop (§8.2)
 
 
 @dataclass(frozen=True)

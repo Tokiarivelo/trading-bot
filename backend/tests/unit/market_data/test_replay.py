@@ -70,6 +70,14 @@ async def test_symbol_info_derives_bid_ask_from_current_m5_bar(candle_factory):
     assert info.contract_size == 100.0
 
 
+async def test_get_candles_before_pages_further_back(candle_factory):
+    replay = make_replay(candle_factory)
+    replay.advance_to(utc(2026, 7, 10, 9, 25))
+
+    bars = await replay.get_candles("XAUUSD", Timeframe.M5, 2, before=utc(2026, 7, 10, 9, 15))
+    assert [c.time for c in bars] == [utc(2026, 7, 10, 9, 5), utc(2026, 7, 10, 9, 10)]
+
+
 async def test_get_candles_before_any_data_raises_without_advance(candle_factory):
     replay = make_replay(candle_factory)
     with pytest.raises(RuntimeError):
