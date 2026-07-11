@@ -55,14 +55,11 @@ function toVolumeBar(candle: Candle, upColor: string, downColor: string) {
   };
 }
 
-function isCandleClosedMessage(
+function isCandleMessage(
   message: unknown,
-): message is { type: "candle_closed"; candle: Candle } {
-  return (
-    typeof message === "object" &&
-    message !== null &&
-    (message as { type?: unknown }).type === "candle_closed"
-  );
+): message is { type: "candle_closed" | "candle_update"; candle: Candle } {
+  const type = (message as { type?: unknown } | null)?.type;
+  return type === "candle_closed" || type === "candle_update";
 }
 
 function toSeriesMarkers(
@@ -98,6 +95,9 @@ export function ChartPanel({ symbol }: { symbol: string }) {
   const candleSeriesRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
   const volumeSeriesRef = useRef<ISeriesApi<"Histogram"> | null>(null);
   const seriesMarkersRef = useRef<ISeriesMarkersPluginApi<Time> | null>(null);
+  // Guards against applying a live WS update before the REST history load
+  // for the current symbol/timeframe has landed — see the effect below.
+  const historyLoadedRef = useRef(false);
 
   const [timeframe, setTimeframe] = useState<Candle["timeframe"]>("M5");
   const [spreadPoints, setSpreadPoints] = useState<number | null>(null);
@@ -161,6 +161,14 @@ export function ChartPanel({ symbol }: { symbol: string }) {
   useEffect(() => {
     let cancelled = false;
     setError(null);
+    // WS updates for the new room can start arriving before the REST
+    // history call below resolves. Applying one to the still-stale
+    // previous symbol/timeframe's data can move time backwards (e.g.
+    // switching from M1 to D1: the D1 forming bar's open time is earlier
+    // than the M1 bar still on screen) and lightweight-charts throws.
+    // Dropping live updates until history for *this* symbol/timeframe is
+    // actually on the chart avoids that race.
+    historyLoadedRef.current = false;
 
     getCandles(symbol, timeframe, CANDLE_COUNT)
       .then((candles) => {
@@ -169,22 +177,41 @@ export function ChartPanel({ symbol }: { symbol: string }) {
         const downColor = cssVar("--color-err");
         candleSeriesRef.current?.setData(candles.map(toBar));
         volumeSeriesRef.current?.setData(candles.map((c) => toVolumeBar(c, upColor, downColor)));
+        historyLoadedRef.current = true;
       })
       .catch(() => {
         if (!cancelled) setError("failed to load candles");
       });
 
-    const unsubscribe = subscribeRoom("candle_closed", { symbol, timeframe }, (message) => {
-      if (!isCandleClosedMessage(message)) return;
-      const { candle } = message;
-      candleSeriesRef.current?.update(toBar(candle));
-      volumeSeriesRef.current?.update(
-        toVolumeBar(candle, cssVar("--color-ok"), cssVar("--color-err")),
-      );
-    });
+    // `candle_update` streams the in-progress bar every ~1.5s so the
+    // rightmost candle moves continuously like MT5; `candle_closed` is the
+    // authoritative final print once the bar completes. Both are handled
+    // identically here — lightweight-charts' `update()` amends the last bar
+    // in place when the timestamp matches, or appends a new one otherwise.
+    const unsubscribe = subscribeRoom(
+      ["candle_closed", "candle_update"],
+      { symbol, timeframe },
+      (message) => {
+        if (!isCandleMessage(message)) return;
+        if (!historyLoadedRef.current) return;
+        const { candle } = message;
+        try {
+          candleSeriesRef.current?.update(toBar(candle));
+          volumeSeriesRef.current?.update(
+            toVolumeBar(candle, cssVar("--color-ok"), cssVar("--color-err")),
+          );
+        } catch (err) {
+          // Defensive: lightweight-charts throws if a live update's time
+          // is older than what's on the chart. Shouldn't happen once
+          // gated by historyLoadedRef, but a dropped frame beats a crash.
+          console.warn("chart: dropped out-of-order live update", err);
+        }
+      },
+    );
 
     return () => {
       cancelled = true;
+      historyLoadedRef.current = false;
       unsubscribe();
     };
   }, [symbol, timeframe]);

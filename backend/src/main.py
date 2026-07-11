@@ -30,7 +30,7 @@ from src.container import build_container
 from src.engine.api.routes import router as engine_router
 from src.journal.api.routes import router as journal_router
 from src.market_data.api.routes import router as market_data_router
-from src.market_data.api.ws import bind_candle_stream, sio
+from src.market_data.api.ws import bind_candle_stream, bind_live_candle, sio
 from src.shared.config.settings import load_yaml_config
 from src.shared.logging.setup import configure_logging
 from src.strategies.api.routes import router as strategies_router
@@ -46,7 +46,7 @@ call is proxied through the MT5 Gateway HTTP service (see
 
 Live candle streaming is Socket.IO, not REST — see the `market-data` tag
 description and `src/market_data/api/ws.py` for the `subscribe` /
-`unsubscribe` / `candle_closed` event contract.
+`unsubscribe` / `candle_closed` / `candle_update` event contract.
 """
 
 OPENAPI_TAGS = [
@@ -112,10 +112,12 @@ async def lifespan(app: FastAPI):
     container = build_container()
     app.state.container = container
     bind_candle_stream(container.candle_stream)
+    bind_live_candle(container.live_candle)
     # Reconnect with stored credentials if the gateway is already up, then
-    # start the candle stream — it idles harmlessly until login succeeds.
+    # start the candle streams — they idle harmlessly until login succeeds.
     await container.account.reconnect_from_stored()
     container.candle_stream.start()
+    container.live_candle.start()
     yield
     await container.aclose()
 

@@ -34,6 +34,7 @@ from src.market_data.adapters.mt5_gateway import GatewayMarketData
 from src.market_data.api.ws import WsBroadcaster
 from src.market_data.application.candle_stream import CandleStreamService
 from src.market_data.application.history import CandleHistoryService
+from src.market_data.application.live_candle import LiveCandleService
 from src.market_data.domain.models import Timeframe
 from src.shared.config.loaders import (
     load_llm_provider_config,
@@ -64,6 +65,7 @@ class Container:
     market_data: GatewayMarketData
     candle_history: CandleHistoryService
     candle_stream: CandleStreamService
+    live_candle: LiveCandleService
     ws_broadcaster: WsBroadcaster
     account: AccountService
     broker: BrokerPort
@@ -77,6 +79,7 @@ class Container:
 
     async def aclose(self) -> None:
         await self.candle_stream.stop()
+        await self.live_candle.stop()
         await self.gateway_client.aclose()
 
 
@@ -108,6 +111,7 @@ def build_container(settings: Settings | None = None) -> Container:
         timeframes=list(Timeframe),
     )
     candle_history = CandleHistoryService(market_data, candle_repository)
+    live_candle = LiveCandleService(market_data=market_data, broadcaster=ws_broadcaster)
 
     account = AccountService(
         gateway=GatewayAccount(gateway_client),
@@ -200,6 +204,7 @@ def build_container(settings: Settings | None = None) -> Container:
         market_data=market_data,
         candle_history=candle_history,
         candle_stream=candle_stream,
+        live_candle=live_candle,
         ws_broadcaster=ws_broadcaster,
         account=account,
         broker=broker,

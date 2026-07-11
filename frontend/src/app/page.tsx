@@ -8,6 +8,8 @@ import { SymbolPicker } from "@/features/chart/SymbolPicker";
 import { getAppConfig, getHealth, type AppConfig } from "@/shared/api/client";
 
 const EXTRA_SYMBOLS_KEY = "tb.extraSymbols";
+const SYMBOL_QUERY_KEY = "symbol";
+const DEFAULT_SYMBOLS = ["XAUUSD", "XAGUSD", "BTCUSD"];
 
 export default function Home() {
   const [backendUp, setBackendUp] = useState<boolean | null>(null);
@@ -15,20 +17,42 @@ export default function Home() {
   const [symbol, setSymbol] = useState("XAUUSD");
   const [extraSymbols, setExtraSymbols] = useState<string[]>([]);
 
+  // Restore whatever was selected before a refresh: `?symbol=` wins over the
+  // default, and if it's not a configured symbol it's re-added to the
+  // browsed-extras list so it still shows as a chip (and its chart/live
+  // stream can resume — see SymbolPicker/ChartPanel).
   useEffect(() => {
     getHealth()
       .then(() => setBackendUp(true))
       .catch(() => setBackendUp(false));
     getAppConfig().then(setConfig).catch(() => {});
+
+    let storedExtras: string[] = [];
     try {
       const stored = localStorage.getItem(EXTRA_SYMBOLS_KEY);
-      if (stored) setExtraSymbols(JSON.parse(stored));
+      if (stored) storedExtras = JSON.parse(stored);
     } catch {
       // Ignore malformed/blocked localStorage — just start with no extras.
     }
+
+    const urlSymbol = new URLSearchParams(window.location.search).get(SYMBOL_QUERY_KEY);
+    if (urlSymbol && !DEFAULT_SYMBOLS.includes(urlSymbol) && !storedExtras.includes(urlSymbol)) {
+      storedExtras = [...storedExtras, urlSymbol];
+      localStorage.setItem(EXTRA_SYMBOLS_KEY, JSON.stringify(storedExtras));
+    }
+    setExtraSymbols(storedExtras);
+    if (urlSymbol) setSymbol(urlSymbol);
   }, []);
 
-  const configuredSymbols = config?.symbols ?? ["XAUUSD", "XAGUSD", "BTCUSD"];
+  // Keep `?symbol=` in sync so a page refresh (or a shared/bookmarked link)
+  // resumes the same chart. `replaceState` avoids piling up history entries.
+  useEffect(() => {
+    const url = new URL(window.location.href);
+    url.searchParams.set(SYMBOL_QUERY_KEY, symbol);
+    window.history.replaceState(null, "", url);
+  }, [symbol]);
+
+  const configuredSymbols = config?.symbols ?? DEFAULT_SYMBOLS;
 
   function addExtraSymbol(sym: string) {
     if (configuredSymbols.includes(sym) || extraSymbols.includes(sym)) {

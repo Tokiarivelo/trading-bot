@@ -41,22 +41,23 @@ function getSocket(): Socket {
 
 export type WsHandler = (message: unknown) => void;
 
-/** Subscribe to one symbol/timeframe room and a single event name; returns an unsubscribe fn. */
+/** Subscribe to one symbol/timeframe room for one or more event names; returns an unsubscribe fn. */
 export function subscribeRoom(
-  event: string,
+  events: string | string[],
   room: { symbol: string; timeframe: string },
   onMessage: WsHandler,
 ): () => void {
   const s = getSocket();
+  const eventNames = Array.isArray(events) ? events : [events];
   const handler = (payload: unknown) => onMessage(payload);
   const key = roomKey(room);
 
   activeRooms.set(key, room);
   s.emit("subscribe", room);
-  s.on(event, handler);
+  for (const event of eventNames) s.on(event, handler);
 
   return () => {
-    s.off(event, handler);
+    for (const event of eventNames) s.off(event, handler);
     activeRooms.delete(key);
     s.emit("unsubscribe", room);
   };
