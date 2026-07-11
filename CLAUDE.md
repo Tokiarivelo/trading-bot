@@ -12,6 +12,26 @@ Read `IMPLEMENTATION_PLAN.md` for the full design. These rules are binding.
   explicit application-service calls wired in `backend/src/container.py` — never
   by importing another module's internals.
 
+## API documentation (OpenAPI) — binding for every backend route
+- Every FastAPI route needs an explicit `response_model` — a Pydantic
+  `BaseModel` in that module's `api/schemas.py`, never a bare `dict`/`list[dict]`.
+  Request bodies are Pydantic models too. Schemas mirror the module's
+  `domain/` dataclasses; the domain itself stays framework-free (no pydantic
+  imports in `domain/`).
+- Every `Field` gets a `description`; every path/query `Param` gets a
+  `description` via `Query(...)`. This is what renders in `/docs` — a field
+  with no description is treated as undocumented and should be fixed.
+- Every route needs `summary` (short) and `description` (what it does, when
+  to use it, and any non-obvious side effect — e.g. "publishes `PositionOpened`
+  on the event bus"). Every non-2xx status a route can raise gets a `responses=`
+  entry explaining when it happens.
+- Add new tags to `OPENAPI_TAGS` in `backend/src/main.py` with a one-line
+  description before using a new tag on a router.
+- Verify: run the backend (`make dev-backend`) and check `/docs`, or
+  `make openapi` to dump the raw schema — every path should show a summary,
+  description, and typed request/response schema, not `Body_xxx` placeholders
+  or untyped `object`/`dict` responses.
+
 ## Strategies & AI safety (non-negotiable)
 - Strategy files in `backend/src/strategies/generated/` implement the `Strategy`
   protocol and must be sandbox-safe: imports limited to `math`, `statistics`,
@@ -37,11 +57,15 @@ Read `IMPLEMENTATION_PLAN.md` for the full design. These rules are binding.
   of `frontend/src/app/globals.css` — no raw hex in components, no separate
   CSS files.
 - Backend REST is proxied under `/api` (rewrites in `next.config.ts`).
-  WebSockets connect to the backend directly (`src/shared/api/ws.ts`) because
-  Next rewrites don't proxy WS.
+  Live streaming uses Socket.IO (`src/shared/api/ws.ts`, rooms per
+  `symbol:timeframe`) and connects to the backend directly, because Next
+  rewrites don't proxy WS.
 - Feature folders under `frontend/src/features/` mirror backend modules.
 - All charting via `lightweight-charts` only.
 - API types come from the backend OpenAPI schema — don't hand-write duplicates.
+  See "API documentation (OpenAPI)" above: every backend route is fully typed
+  and documented, so the schema at `/openapi.json` (`make openapi`) is always
+  a complete, accurate source for generated types.
 - Package manager is **pnpm** (version pinned via `packageManager` in
   `frontend/package.json`) — never npm or yarn; never commit a
   `package-lock.json` / `yarn.lock`.

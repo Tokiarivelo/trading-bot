@@ -25,12 +25,23 @@ class CandleClosed(Event):
 class PositionOpened(Event):
     symbol: str
     position_id: str
+    side: str  # "buy" | "sell"
+    volume: float
+    price: float
+    sl: float | None
+    tp: float | None
+    spread_points: int
+    comment: str = ""
+    strategy_version: str | None = None
+    skill: str | None = None
 
 
 @dataclass(frozen=True, kw_only=True)
 class PositionClosed(Event):
     symbol: str
     position_id: str
+    close_price: float
+    profit: float
 
 
 @dataclass(frozen=True, kw_only=True)

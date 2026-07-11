@@ -26,20 +26,28 @@ et auto-amélioration automatique toutes les 10 trades.
 Tout passe par le `Makefile` racine — lancez `make help` pour la liste complète.
 
 ```bash
-make setup             # backend (uv sync) + frontend (pnpm install) + .env
-make dev               # backend sur :8000 + frontend sur :3000, Ctrl-C arrête les deux
+make setup             # backend (uv sync) + frontend (pnpm install) + gateway (uv sync) + .env
+make dev               # backend :8000 + frontend :3000 + gateway :8787 — Ctrl-C arrête tout
 
 # ou individuellement :
 make dev-backend       # FastAPI avec rechargement auto — http://localhost:8000
 make dev-frontend      # serveur de dev Next.js — http://localhost:3000
-
-# Passerelle — nécessite un terminal MT5 ; voir gateway/README.fr.md :
-#   Wine sous Linux pour le développement, VPS Windows recommandé pour le
-#   trading réel 24h/24
+make dev-gateway       # passerelle MT5 sous Wine — http://localhost:8787
 ```
 
+La passerelle nécessite un terminal MT5 en cours d'exécution sous Wine
+(développement) ou sur un VPS Windows (trading réel). Voir
+[`gateway/README.fr.md`](gateway/README.fr.md) pour les instructions complètes.
+
+**Documentation de l'API backend** (une fois `make dev-backend` lancé) :
+interface Swagger interactive sur <http://localhost:8000/docs>, ReDoc sur
+<http://localhost:8000/redoc>, schéma brut sur
+<http://localhost:8000/openapi.json> (ou `make openapi`). Chaque route est
+entièrement typée et documentée — voir `backend/src/*/api/schemas.py`.
+
 Sous le capot : le backend est en Python 3.12 via `uv`, le frontend en Next.js
-via `pnpm` (version épinglée dans `frontend/package.json`).
+via `pnpm` (version épinglée dans `frontend/package.json`), la passerelle
+tourne avec Python 3.12 Windows sous Wine.
 
 ## Vérifications
 

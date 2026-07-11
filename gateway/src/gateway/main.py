@@ -14,7 +14,7 @@ from __future__ import annotations
 from fastapi import Depends, FastAPI
 
 from .mt5_client import client
-from .routes import auth, market_data
+from .routes import auth, market_data, trading
 from .schemas import HealthOut
 from .security import verify_secret
 
@@ -22,6 +22,7 @@ app = FastAPI(title="MT5 Gateway")
 
 app.include_router(auth.router, dependencies=[Depends(verify_secret)])
 app.include_router(market_data.router, dependencies=[Depends(verify_secret)])
+app.include_router(trading.router, dependencies=[Depends(verify_secret)])
 
 
 @app.get("/health", response_model=HealthOut)

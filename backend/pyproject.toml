@@ -15,6 +15,9 @@ dependencies = [
     "pyyaml>=6.0",
     "cryptography>=49.0.0",
     "keyring>=25.7.0",
+    "python-socketio>=5.16.3",
+    "pandas>=3.0.3",
+    "numpy>=2.5.1",
 ]
 
 [dependency-groups]

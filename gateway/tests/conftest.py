@@ -15,15 +15,42 @@ from gateway import mt5_client
 from gateway.main import app
 
 
+class FakePosition:
+    def __init__(
+        self, ticket, symbol, type_, volume, price_open, sl, tp, time, profit, comment=""
+    ) -> None:
+        self.ticket = ticket
+        self.symbol = symbol
+        self.type = type_
+        self.volume = volume
+        self.price_open = price_open
+        self.sl = sl
+        self.tp = tp
+        self.time = time
+        self.profit = profit
+        self.comment = comment
+
+
 class FakeMt5:
     TIMEFRAME_M5 = 5
     TIMEFRAME_H1 = 16385
     TIMEFRAME_H4 = 16388
     TIMEFRAME_D1 = 16408
 
+    ORDER_TYPE_BUY = 0
+    ORDER_TYPE_SELL = 1
+    TRADE_ACTION_DEAL = 1
+    TRADE_ACTION_SLTP = 2
+    ORDER_TIME_GTC = 0
+    ORDER_FILLING_IOC = 1
+    TRADE_RETCODE_DONE = 10009
+
     def __init__(self) -> None:
         self.reject_login = False
         self.shutdown_called = False
+        self.reject_order = False
+        self._next_ticket = 1000
+        self._positions: dict[int, FakePosition] = {}
 
     def initialize(self) -> bool:
         return True
@@ -86,6 +113,61 @@ class FakeMt5:
             volume_max=100.0,
             volume_step=0.01,
         )
+
+    def order_send(self, request):
+        if self.reject_order:
+            return SimpleNamespace(retcode=10004, order=0, volume=0.0, price=0.0)
+        if request["action"] == self.TRADE_ACTION_SLTP:
+            position = self._positions.get(request["position"])
+            if position is not None:
+                position.sl = request.get("sl") or None
+                position.tp = request.get("tp") or None
+            return SimpleNamespace(
+                retcode=self.TRADE_RETCODE_DONE, order=request["position"], volume=0.0, price=0.0
+            )
+        if "position" in request:
+            ticket = request["position"]
+            position = self._positions.get(ticket)
+            close_volume = request["volume"]
+            if position is not None:
+                if close_volume >= position.volume:
+                    del self._positions[ticket]
+                else:
+                    position.volume -= close_volume
+            return SimpleNamespace(
+                retcode=self.TRADE_RETCODE_DONE,
+                order=ticket,
+                volume=close_volume,
+                price=request["price"],
+            )
+        ticket = self._next_ticket
+        self._next_ticket += 1
+        self._positions[ticket] = FakePosition(
+            ticket=ticket,
+            symbol=request["symbol"],
+            type_=request["type"],
+            volume=request["volume"],
+            price_open=request["price"],
+            sl=request["sl"] or None,
+            tp=request["tp"] or None,
+            time=1_752_100_812,
+            profit=12.5,
+            comment=request.get("comment", ""),
+        )
+        return SimpleNamespace(
+            retcode=self.TRADE_RETCODE_DONE,
+            order=ticket,
+            volume=request["volume"],
+            price=request["price"],
+        )
+
+    def positions_get(self, symbol=None, ticket=None):
+        rows = list(self._positions.values())
+        if ticket is not None:
+            rows = [p for p in rows if p.ticket == ticket]
+        if symbol is not None:
+            rows = [p for p in rows if p.symbol == symbol]
+        return rows
 
 
 @pytest.fixture

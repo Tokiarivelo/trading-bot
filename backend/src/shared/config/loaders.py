@@ -1,0 +1,38 @@
+"""Config -> domain dataclass loaders shared by the app composition root
+(`container.py`) and the backtest composition root (`backtest/application/run_backtest.py`).
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+from src.broker.domain.symbol_config import SymbolTradingConfig
+from src.engine.domain.models import RiskCaps
+from src.shared.config.settings import load_yaml_config
+
+
+def load_symbol_trading_config(symbol: str, configs_dir: Path) -> SymbolTradingConfig:
+    data = load_yaml_config(f"symbols/{symbol.lower()}", configs_dir)
+    return SymbolTradingConfig(
+        symbol=data["symbol"],
+        max_spread_points=data["max_spread_points"],
+        min_rr=data["min_rr"],
+        contract_size=data["contract_size"],
+        point=data["point"],
+        digits=data["digits"],
+        stops_level=data["stops_level"],
+        volume_min=data["volume_min"],
+        volume_max=data["volume_max"],
+        volume_step=data["volume_step"],
+    )
+
+
+def load_risk_caps(configs_dir: Path) -> RiskCaps:
+    data = load_yaml_config("risk", configs_dir)
+    return RiskCaps(
+        risk_per_trade_pct=data["risk_per_trade_pct"],
+        daily_loss_limit_pct=data["daily_loss_limit_pct"],
+        max_open_positions=data["max_open_positions"],
+        max_trades_per_day=data["max_trades_per_day"],
+        consecutive_loss_pause=data["consecutive_loss_pause"],
+    )

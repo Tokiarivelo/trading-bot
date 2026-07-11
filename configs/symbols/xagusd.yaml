@@ -6,3 +6,11 @@ sessions:
   - { start: "09:00", end: "12:00" }
   - { start: "14:30", end: "18:00" }
 default_skill: normal/xagusd
+# Static broker facts — see xauusd.yaml comment. Calibrate against your broker.
+contract_size: 5000           # 5000 oz per standard lot
+point: 0.001
+digits: 3
+stops_level: 0
+volume_min: 0.01
+volume_max: 50
+volume_step: 0.01

@@ -61,6 +61,25 @@ class CandleRepository:
             rows = session.scalars(query).all()
         return [_to_domain(row) for row in reversed(rows)]
 
+    def get_range(
+        self, symbol: str, timeframe: Timeframe, start: datetime, end: datetime
+    ) -> list[Candle]:
+        """Stored bars with open time in `[start, end)`, oldest first — used
+        by the backtest replay adapter to load a bounded historical window."""
+        query = (
+            select(CandleRow)
+            .where(
+                CandleRow.symbol == symbol,
+                CandleRow.timeframe == timeframe.value,
+                CandleRow.time >= int(start.timestamp()),
+                CandleRow.time < int(end.timestamp()),
+            )
+            .order_by(CandleRow.time.asc())
+        )
+        with self._session_factory() as session:
+            rows = session.scalars(query).all()
+        return [_to_domain(row) for row in rows]
+
 
 def _to_domain(row: CandleRow) -> Candle:
     return Candle(

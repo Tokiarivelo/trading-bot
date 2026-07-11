@@ -6,3 +6,13 @@ sessions:                    # broker/server time; gold is most liquid in these 
   - { start: "09:00", end: "12:00" }
   - { start: "14:30", end: "18:00" }
 default_skill: normal/xauusd
+# Static broker facts, normally read live from MT5 symbol_info — needed here
+# as backtest/replay defaults since there's no live gateway to ask offline.
+# Calibrate against your broker before trusting live sizing off these values.
+contract_size: 100           # 100 oz per standard lot
+point: 0.01
+digits: 2
+stops_level: 0
+volume_min: 0.01
+volume_max: 50
+volume_step: 0.01

@@ -43,6 +43,26 @@ def test_get_latest_returns_most_recent_oldest_first(repository, candle_factory)
     assert [c.time for c in stored] == times[-2:]
 
 
+def test_get_range_bounds_are_start_inclusive_end_exclusive(repository, candle_factory):
+    times = [utc(2026, 7, 10, 14, m) for m in (0, 5, 10, 15)]
+    repository.upsert_many([candle_factory(t) for t in times])
+
+    stored = repository.get_range(
+        "XAUUSD", Timeframe.M5, utc(2026, 7, 10, 14, 5), utc(2026, 7, 10, 14, 15)
+    )
+    assert [c.time for c in stored] == times[1:3]
+
+
+def test_get_range_returns_oldest_first(repository, candle_factory):
+    times = [utc(2026, 7, 10, 14, m) for m in (10, 0, 5)]
+    repository.upsert_many([candle_factory(t) for t in times])
+
+    stored = repository.get_range(
+        "XAUUSD", Timeframe.M5, utc(2026, 7, 10, 13, 0), utc(2026, 7, 10, 15, 0)
+    )
+    assert [c.time for c in stored] == sorted(times)
+
+
 def test_symbols_and_timeframes_are_isolated(repository, candle_factory):
     time = utc(2026, 7, 10, 14, 0)
     repository.upsert_many(

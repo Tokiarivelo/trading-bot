@@ -35,8 +35,8 @@ src/
 
 - REST: proxied under `/api` via rewrites in `next.config.ts`
   (`BACKEND_URL`, default `http://127.0.0.1:8000`).
-- WebSocket: Next rewrites don't proxy WS, so `src/shared/api/ws.ts` connects
-  to the backend directly (`NEXT_PUBLIC_WS_URL`, default `ws://127.0.0.1:8000`).
+- Socket.IO: Next rewrites don't proxy WS, so `src/shared/api/ws.ts` connects
+  to the backend directly (`NEXT_PUBLIC_WS_URL`, default `http://127.0.0.1:8000`).
 - API types come from the backend OpenAPI schema — don't hand-write duplicates.
 
 ## Commands

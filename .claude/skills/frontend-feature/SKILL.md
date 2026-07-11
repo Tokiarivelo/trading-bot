@@ -17,6 +17,9 @@ frontend stack: **Next.js (App Router) + Tailwind CSS + TypeScript**.
   never separate CSS files.
 - All charting via `lightweight-charts` only.
 - API types come from the backend OpenAPI schema — don't hand-write duplicates.
+  Every backend route is fully documented (response_model, summary,
+  description, typed errors); browse it live at `http://localhost:8000/docs`
+  or dump it with `make openapi` before wiring a new API call.
 
 ## Steps
 1. Create/extend the feature folder `frontend/src/features/<feature>/` — the

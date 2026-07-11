@@ -61,3 +61,51 @@ class SymbolInfoOut(BaseModel):
     volume_min: float
     volume_max: float
     volume_step: float
+
+
+VALID_SIDES = ("buy", "sell")
+
+
+class OrderRequest(BaseModel):
+    symbol: str
+    side: str  # "buy" | "sell"
+    volume: float
+    sl: float | None = None
+    tp: float | None = None
+    comment: str = ""
+
+
+class OrderResultOut(BaseModel):
+    ticket: int
+    symbol: str
+    side: str
+    volume: float
+    price: float
+    sl: float | None
+    tp: float | None
+    time: int  # epoch seconds UTC
+    spread_points: int
+    comment: str = ""
+    profit: float | None = None  # populated on close, None on open
+
+
+class ModifyRequest(BaseModel):
+    sl: float | None = None
+    tp: float | None = None
+
+
+class CloseRequest(BaseModel):
+    volume: float | None = None  # None = close in full
+
+
+class PositionOut(BaseModel):
+    ticket: int
+    symbol: str
+    side: str
+    volume: float
+    open_price: float
+    sl: float | None
+    tp: float | None
+    open_time: int
+    profit: float
+    comment: str = ""

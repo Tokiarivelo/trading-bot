@@ -82,3 +82,40 @@ export const getCandles = (symbol: string, timeframe: Candle["timeframe"], count
   api.get<Candle[]>(
     `/market-data/candles?symbol=${encodeURIComponent(symbol)}&timeframe=${timeframe}&count=${count}`,
   );
+
+export interface SymbolInfo {
+  symbol: string;
+  bid: number;
+  ask: number;
+  spread_points: number;
+  point: number;
+  digits: number;
+  stops_level: number;
+  contract_size: number;
+  volume_min: number;
+  volume_max: number;
+  volume_step: number;
+}
+
+export const getSymbolInfo = (symbol: string) =>
+  api.get<SymbolInfo>(`/market-data/symbol-info?symbol=${encodeURIComponent(symbol)}`);
+
+// ── Journal (trade markers, F7) ─────────────────────────────────────────────
+
+export interface TradeMarker {
+  id: string;
+  symbol: string;
+  side: "buy" | "sell";
+  volume: number;
+  open_price: number;
+  open_time: number; // epoch seconds UTC
+  sl: number | null;
+  tp: number | null;
+  close_price: number | null;
+  close_time: number | null; // epoch seconds UTC, null while open
+  profit: number | null;
+  comment: string;
+}
+
+export const getTradeMarkers = (symbol: string) =>
+  api.get<TradeMarker[]>(`/journal/markers?symbol=${encodeURIComponent(symbol)}`);

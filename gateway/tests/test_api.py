@@ -93,3 +93,77 @@ def test_logout_shuts_terminal_down(api, fake_mt5):
     assert api.post("/logout").status_code == 200
     assert fake_mt5.shutdown_called is True
     assert api.get("/health").json()["terminal_connected"] is False
+
+
+def test_order_opens_a_position(api):
+    _login(api)
+    response = api.post(
+        "/order",
+        json={"symbol": "XAUUSD", "side": "buy", "volume": 0.1, "sl": 2390.0, "tp": 2420.0},
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["symbol"] == "XAUUSD"
+    assert body["side"] == "buy"
+    assert body["price"] == 2400.35  # buy fills at ask
+    assert body["profit"] is None
+    assert body["ticket"] > 0
+
+    positions = api.get("/positions").json()
+    assert len(positions) == 1
+    assert positions[0]["ticket"] == body["ticket"]
+    assert positions[0]["sl"] == 2390.0
+
+
+def test_order_rejects_unknown_side(api):
+    _login(api)
+    response = api.post("/order", json={"symbol": "XAUUSD", "side": "long", "volume": 0.1})
+    assert response.status_code == 422
+
+
+def test_order_maps_rejection_to_502(api, fake_mt5):
+    _login(api)
+    fake_mt5.reject_order = True
+    response = api.post("/order", json={"symbol": "XAUUSD", "side": "buy", "volume": 0.1})
+    assert response.status_code == 502
+
+
+def test_close_position_returns_realized_profit(api):
+    _login(api)
+    ticket = api.post(
+        "/order", json={"symbol": "XAUUSD", "side": "buy", "volume": 0.1}
+    ).json()["ticket"]
+
+    response = api.post(f"/positions/{ticket}/close")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["price"] == 2400.10  # buy closes at bid
+    assert body["profit"] == 12.5
+
+    assert api.get("/positions").json() == []
+
+
+def test_modify_position_updates_sl_tp(api):
+    _login(api)
+    ticket = api.post(
+        "/order", json={"symbol": "XAUUSD", "side": "sell", "volume": 0.1}
+    ).json()["ticket"]
+
+    response = api.post(f"/positions/{ticket}/modify", json={"sl": 2410.0, "tp": 2380.0})
+    assert response.status_code == 200
+
+    positions = api.get("/positions").json()
+    assert positions[0]["sl"] == 2410.0
+    assert positions[0]["tp"] == 2380.0
+
+
+def test_close_unknown_position_returns_502(api):
+    _login(api)
+    response = api.post("/positions/999/close")
+    assert response.status_code == 502
+
+
+def test_trading_requires_login(api):
+    response = api.post("/order", json={"symbol": "XAUUSD", "side": "buy", "volume": 0.1})
+    assert response.status_code == 502
+    assert "not logged in" in response.json()["detail"]

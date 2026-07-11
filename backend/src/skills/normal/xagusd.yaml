@@ -1,0 +1,8 @@
+# Default trading behavior for XAGUSD — sessions mirror configs/symbols/xagusd.yaml.
+name: normal/xagusd
+symbol: XAGUSD
+strategy: breakout_v1
+risk_multiplier: 0.8   # thinner book — trade a bit lighter than gold
+sessions:
+  - { start: "09:00", end: "12:00" }
+  - { start: "14:30", end: "18:00" }

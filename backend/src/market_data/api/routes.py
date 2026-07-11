@@ -1,53 +1,91 @@
-"""Market data REST + WS endpoints (chart + tooling)."""
+"""Market data REST endpoints (chart + tooling). Live streaming is Socket.IO —
+see `src.market_data.api.ws`."""
 
 from __future__ import annotations
 
-from dataclasses import asdict
 from typing import Annotated, Any
 
-from fastapi import APIRouter, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
-from pydantic import BaseModel, Field
+from fastapi import APIRouter, HTTPException, Query, Request
 
+from src.market_data.api.schemas import BackfillRequest, BackfillResponse, CandleOut, SymbolInfoOut
 from src.market_data.application.candle_stream import candle_message
 from src.market_data.domain.models import MarketDataUnavailable, Timeframe
 
 router = APIRouter(prefix="/market-data", tags=["market-data"])
 
-TimeframeParam = Annotated[Timeframe, Query()]
+TimeframeParam = Annotated[Timeframe, Query(description="Bar size: M5, H1, H4, or D1.")]
+
+_UNAVAILABLE = {503: {"description": "The MT5 gateway is unreachable or not logged in."}}
 
 
 def _container(request: Request) -> Any:
     return request.app.state.container
 
 
-@router.get("/candles")
+@router.get(
+    "/candles",
+    response_model=list[CandleOut],
+    summary="Get historical candles",
+    description=(
+        "Returns up to `count` closed bars for `symbol`/`timeframe`, newest last. "
+        "Serves from the live gateway when connected; falls back to the local "
+        "database (populated by the background candle stream and `/backfill`) "
+        "when the gateway is unreachable, so the chart keeps working across "
+        "MT5 disconnects."
+    ),
+)
 async def get_candles(
     request: Request,
-    symbol: str,
+    symbol: str = Query(description="Trading symbol, e.g. 'XAUUSD'."),
     timeframe: TimeframeParam = Timeframe.M5,
-    count: Annotated[int, Query(ge=1, le=5000)] = 300,
-) -> list[dict]:
+    count: Annotated[int, Query(ge=1, le=5000, description="Number of bars to return.")] = 300,
+) -> list[CandleOut]:
     candles = await _container(request).candle_history.get_candles(symbol, timeframe, count)
-    return [candle_message(c) for c in candles]
+    return [CandleOut(**candle_message(c)) for c in candles]
 
 
-@router.get("/symbol-info")
-async def get_symbol_info(request: Request, symbol: str) -> dict:
+@router.get(
+    "/symbol-info",
+    response_model=SymbolInfoOut,
+    summary="Get live symbol spec",
+    description="Live bid/ask, spread, and broker-side volume/price constraints for a symbol.",
+    responses=_UNAVAILABLE,
+)
+async def get_symbol_info(
+    request: Request, symbol: str = Query(description="Trading symbol, e.g. 'XAUUSD'.")
+) -> SymbolInfoOut:
     try:
         info = await _container(request).market_data.get_symbol_info(symbol)
     except MarketDataUnavailable as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
-    return asdict(info)
+    return SymbolInfoOut(
+        symbol=info.symbol,
+        bid=info.bid,
+        ask=info.ask,
+        spread_points=info.spread_points,
+        point=info.point,
+        digits=info.digits,
+        stops_level=info.stops_level,
+        contract_size=info.contract_size,
+        volume_min=info.volume_min,
+        volume_max=info.volume_max,
+        volume_step=info.volume_step,
+    )
 
 
-class BackfillRequest(BaseModel):
-    symbols: list[str] | None = None  # default: configured symbols
-    timeframes: list[Timeframe] | None = None  # default: M5/H1/H4/D1
-    count: int = Field(default=1000, ge=1, le=5000)
-
-
-@router.post("/backfill")
-async def backfill(request: Request, body: BackfillRequest) -> dict:
+@router.post(
+    "/backfill",
+    response_model=BackfillResponse,
+    summary="Backfill candle history into the local database",
+    description=(
+        "Fetches `count` bars per symbol/timeframe from the gateway and upserts "
+        "them into the local database, so `GET /candles` has data to fall back "
+        "to when the gateway later goes offline. Safe to call repeatedly — "
+        "existing bars are overwritten in place, not duplicated."
+    ),
+    responses=_UNAVAILABLE,
+)
+async def backfill(request: Request, body: BackfillRequest) -> BackfillResponse:
     container = _container(request)
     symbols = body.symbols or container.symbols
     timeframes = body.timeframes or list(Timeframe)
@@ -59,15 +97,4 @@ async def backfill(request: Request, body: BackfillRequest) -> dict:
                 stored[f"{symbol}:{timeframe.value}"] = bars
     except MarketDataUnavailable as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
-    return {"stored": stored}
-
-
-@router.websocket("/ws")
-async def market_ws(websocket: WebSocket) -> None:
-    broadcaster = websocket.app.state.container.ws_broadcaster
-    await broadcaster.connect(websocket)
-    try:
-        while True:
-            await websocket.receive_text()  # client messages ignored for now
-    except WebSocketDisconnect:
-        broadcaster.disconnect(websocket)
+    return BackfillResponse(stored=stored)

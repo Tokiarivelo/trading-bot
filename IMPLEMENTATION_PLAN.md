@@ -171,6 +171,9 @@ trading-bot/
 │   │   │   │   ├── mt5_gateway.py    ← calls the gateway HTTP API
 │   │   │   │   └── replay.py         ← historical replay for backtests
 │   │   │   └── api/                  ← REST + WS endpoints for the chart
+│   │   │       ├── routes.py         ← fully documented FastAPI routes (response_model, summary, description)
+│   │   │       ├── schemas.py        ← pydantic wire models (mirrors domain/, never imported by domain/)
+│   │   │       └── ws.py             ← Socket.IO candle stream
 │   │   │
 │   │   ├── broker/                   ← F3, F10, F11: order execution
 │   │   │   ├── domain/               ← Order, Position, ExecutionResult, SpreadModel
@@ -179,7 +182,7 @@ trading-bot/
 │   │   │   ├── adapters/
 │   │   │   │   ├── mt5_gateway.py
 │   │   │   │   └── paper.py          ← paper-trading simulator (same interface)
-│   │   │   └── api/                  ← MT5 credentials login endpoint
+│   │   │   └── api/                  ← MT5 credentials login + order endpoints (routes.py, schemas.py)
 │   │   │
 │   │   ├── engine/                   ← F3, F6: the bot's beating heart
 │   │   │   ├── domain/               ← Signal, TradePlan, RiskParams, EngineState
@@ -189,7 +192,8 @@ trading-bot/
 │   │   │   │   ├── risk_manager.py   ← lot sizing, max drawdown, daily loss cap
 │   │   │   │   └── position_manager.py ← trailing, BE moves, auto close
 │   │   │   ├── ports/                ← StrategyPort, SkillSelectorPort
-│   │   │   └── adapters/
+│   │   │   ├── adapters/
+│   │   │   └── api/                  ← status + kill switch (routes.py, schemas.py)
 │   │   │
 │   │   ├── strategies/               ← F4: strategy artifacts (AI-generated)
 │   │   │   ├── domain/               ← Strategy, StrategyVersion, Rule models
@@ -241,7 +245,7 @@ trading-bot/
 │   │   │   │                            strategy-version/M5+HTF snapshots at entry)
 │   │   │   ├── application/          ← record_trade, snapshot_market_context,
 │   │   │   │                            get_last_n_trades
-│   │   │   └── api/                  ← feeds chart markers & AI review
+│   │   │   └── api/                  ← feeds chart markers & AI review (routes.py, schemas.py)
 │   │   │
 │   │   └── backtest/                 ← validation before anything goes live
 │   │       ├── application/          ← run_backtest(strategy, period, symbol)
@@ -433,6 +437,9 @@ Contents to include:
   (signal, veto reason, spread, lot calc) at INFO.
 - Frontend: Next.js (App Router) + Tailwind CSS; features mirror backend modules;
   charts via lightweight-charts only; always latest stable packages.
+- API docs: every backend route has an explicit response_model (api/schemas.py),
+  summary/description, and documented error responses — /docs and /openapi.json
+  are always complete and accurate (see backend/src/main.py's OPENAPI_TAGS).
 ```
 
 ### 9.2 `.claude/skills/` (Claude Code dev skills)
@@ -549,29 +556,30 @@ review_every_n_trades: 10
 - [x] MT5 login flow end-to-end from the UI (F11), encrypted storage
 
 ### Phase 2 — Chart (F2, F7 partial)
-- [ ] lightweight-charts candlestick + volume, dark theme
-- [ ] WebSocket live updates; timeframe switcher
-- [ ] Symbol switcher (XAUUSD/XAGUSD/BTCUSD)
-- [ ] Spread indicator on chart header
+- [x] lightweight-charts candlestick + volume, dark theme
+- [x] WebSocket live updates; timeframe switcher
+- [x] Symbol switcher (XAUUSD/XAGUSD/BTCUSD)
+- [x] Spread indicator on chart header
 
 ### Phase 3 — Broker & paper trading
-- [ ] Gateway trading endpoints: open/modify/close/positions
-- [ ] `broker` module: domain models, spread rules, `mt5_gateway` + `paper` adapters
-- [ ] `journal` module: TradeRecord + market context snapshots
-- [ ] Trade markers on chart (F7 complete)
+- [x] Gateway trading endpoints: open/modify/close/positions
+- [x] `broker` module: domain models, spread rules, `mt5_gateway` + `paper` adapters
+- [x] `journal` module: TradeRecord + market context snapshots
+- [x] Trade markers on chart (F7 complete)
 
 ### Phase 4 — Engine & first strategy (manual, not AI yet)
-- [ ] Trade loop on M5 close; HTF confirmation; risk manager; position manager
-- [ ] One hand-written baseline strategy (e.g., simple breakout) to prove the pipe
-- [ ] Skill selector + `normal/` skills for the 3 symbols
-- [ ] Circuit breakers (daily loss, consecutive losses) + kill switch
+- [x] Trade loop on M5 close; HTF confirmation; risk manager; position manager
+- [x] One hand-written baseline strategy (e.g., simple breakout) to prove the pipe
+- [x] Skill selector + `normal/` skills for the 3 symbols
+- [x] Circuit breakers (daily loss, consecutive losses) + kill switch
 - [ ] **Run 2+ weeks in paper mode** — do not proceed to live before this
 
 ### Phase 5 — Backtesting
-- [ ] Replay adapter + paper broker → deterministic backtest runner
-- [ ] Spread-aware fill simulation
-- [ ] Report: win rate, profit factor, max drawdown, R distribution, equity curve
-- [ ] Backtest CLI + UI report page
+- [x] Replay adapter + paper broker → deterministic backtest runner
+- [x] Spread-aware fill simulation
+- [x] Report: win rate, profit factor, max drawdown, R distribution, equity curve
+- [x] Backtest CLI
+- [ ] UI report page (backend + CLI shipped this pass; frontend viewer is a follow-up)
 
 ### Phase 6 — AI: PDF → Strategy (F4)
 - [ ] `LLMPort` + Claude adapter + Ollama adapter; provider config

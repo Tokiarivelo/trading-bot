@@ -24,19 +24,27 @@ by an AI (Claude or Ollama), and automatic self-refinement every 10 trades.
 Everything goes through the root `Makefile` — run `make help` for the full list.
 
 ```bash
-make setup             # backend (uv sync) + frontend (pnpm install) + .env
-make dev               # backend on :8000 + frontend on :3000, Ctrl-C stops both
+make setup             # backend (uv sync) + frontend (pnpm install) + gateway (uv sync) + .env
+make dev               # backend :8000 + frontend :3000 + gateway :8787 — Ctrl-C stops all
 
 # or individually:
 make dev-backend       # FastAPI with auto-reload — http://localhost:8000
 make dev-frontend      # Next.js dev server — http://localhost:3000
-
-# Gateway — requires an MT5 terminal; see gateway/README.md for full setup:
-#   Wine on Linux for development, Windows VPS recommended for 24/7 live trading
+make dev-gateway       # MT5 gateway under Wine — http://localhost:8787
 ```
 
+The gateway requires a running MT5 terminal under Wine (development) or on a
+Windows VPS (live trading). See [`gateway/README.md`](gateway/README.md) for
+full setup instructions.
+
+**Backend API docs** (once `make dev-backend` is running): interactive Swagger
+UI at <http://localhost:8000/docs>, ReDoc at <http://localhost:8000/redoc>, raw
+schema at <http://localhost:8000/openapi.json> (or `make openapi`). Every
+route is fully typed and documented — see `backend/src/*/api/schemas.py`.
+
 Under the hood: backend is Python 3.12 via `uv`, frontend is Next.js via
-`pnpm` (version pinned in `frontend/package.json`).
+`pnpm` (version pinned in `frontend/package.json`), gateway runs Windows
+Python 3.12 under Wine.
 
 ## Checks
 

@@ -128,6 +128,138 @@ class Mt5Client:
             "volume_step": float(info.volume_step),
         }
 
+    # ── trading ─────────────────────────────────────────────────────────
+
+    def order_send(
+        self,
+        symbol: str,
+        side: str,
+        volume: float,
+        sl: float | None,
+        tp: float | None,
+        comment: str,
+    ) -> dict[str, Any]:
+        self._require_connection()
+        self._select(symbol)
+        tick = mt5.symbol_info_tick(symbol)
+        if tick is None:
+            raise Mt5Error(f"symbol_info_tick({symbol}) failed: {_last_error()}")
+        order_type = mt5.ORDER_TYPE_BUY if side == "buy" else mt5.ORDER_TYPE_SELL
+        price = tick.ask if side == "buy" else tick.bid
+        request = {
+            "action": mt5.TRADE_ACTION_DEAL,
+            "symbol": symbol,
+            "volume": volume,
+            "type": order_type,
+            "price": price,
+            "sl": sl or 0.0,
+            "tp": tp or 0.0,
+            "deviation": 20,
+            "comment": comment,
+            "type_time": mt5.ORDER_TIME_GTC,
+            "type_filling": mt5.ORDER_FILLING_IOC,
+        }
+        result = mt5.order_send(request)
+        if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
+            code = result.retcode if result is not None else None
+            raise Mt5Error(f"order_send({symbol},{side}) rejected: retcode={code} {_last_error()}")
+        return {
+            "ticket": int(result.order),
+            "symbol": symbol,
+            "side": side,
+            "volume": float(result.volume),
+            "price": float(result.price),
+            "sl": sl,
+            "tp": tp,
+            "time": int(tick.time),
+            "spread_points": int(mt5.symbol_info(symbol).spread),
+            "comment": comment,
+            "profit": None,
+        }
+
+    def positions(self, symbol: str | None = None) -> list[dict[str, Any]]:
+        self._require_connection()
+        rows = mt5.positions_get(symbol=symbol) if symbol else mt5.positions_get()
+        if rows is None:
+            return []
+        return [self._position_dict(p) for p in rows]
+
+    def position_modify(self, ticket: int, sl: float | None, tp: float | None) -> None:
+        self._require_connection()
+        position = self._get_position(ticket)
+        request = {
+            "action": mt5.TRADE_ACTION_SLTP,
+            "position": ticket,
+            "symbol": position.symbol,
+            "sl": sl if sl is not None else position.sl,
+            "tp": tp if tp is not None else position.tp,
+        }
+        result = mt5.order_send(request)
+        if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
+            code = result.retcode if result is not None else None
+            raise Mt5Error(f"position_modify({ticket}) rejected: retcode={code} {_last_error()}")
+
+    def position_close(self, ticket: int, volume: float | None = None) -> dict[str, Any]:
+        self._require_connection()
+        position = self._get_position(ticket)
+        close_volume = volume if volume is not None else float(position.volume)
+        tick = mt5.symbol_info_tick(position.symbol)
+        if tick is None:
+            raise Mt5Error(f"symbol_info_tick({position.symbol}) failed: {_last_error()}")
+        is_buy = position.type == mt5.ORDER_TYPE_BUY
+        request = {
+            "action": mt5.TRADE_ACTION_DEAL,
+            "symbol": position.symbol,
+            "volume": close_volume,
+            "type": mt5.ORDER_TYPE_SELL if is_buy else mt5.ORDER_TYPE_BUY,
+            "position": ticket,
+            "price": tick.bid if is_buy else tick.ask,
+            "deviation": 20,
+            "type_time": mt5.ORDER_TIME_GTC,
+            "type_filling": mt5.ORDER_FILLING_IOC,
+        }
+        # Realized profit isn't returned by order_send; approximate it from the
+        # position's floating profit at the moment of the close request.
+        profit = float(position.profit) * (close_volume / float(position.volume))
+        result = mt5.order_send(request)
+        if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
+            code = result.retcode if result is not None else None
+            raise Mt5Error(f"position_close({ticket}) rejected: retcode={code} {_last_error()}")
+        return {
+            "ticket": ticket,
+            "symbol": position.symbol,
+            "side": "buy" if is_buy else "sell",
+            "volume": close_volume,
+            "price": float(result.price),
+            "sl": float(position.sl) if position.sl else None,
+            "tp": float(position.tp) if position.tp else None,
+            "time": int(tick.time),
+            "spread_points": int(mt5.symbol_info(position.symbol).spread),
+            "comment": position.comment,
+            "profit": profit,
+        }
+
+    def _get_position(self, ticket: int) -> Any:
+        rows = mt5.positions_get(ticket=ticket)
+        if not rows:
+            raise Mt5Error(f"no open position with ticket {ticket}")
+        return rows[0]
+
+    @staticmethod
+    def _position_dict(p: Any) -> dict[str, Any]:
+        return {
+            "ticket": int(p.ticket),
+            "symbol": p.symbol,
+            "side": "buy" if p.type == mt5.ORDER_TYPE_BUY else "sell",
+            "volume": float(p.volume),
+            "open_price": float(p.price_open),
+            "sl": float(p.sl) if p.sl else None,
+            "tp": float(p.tp) if p.tp else None,
+            "open_time": int(p.time),
+            "profit": float(p.profit),
+            "comment": p.comment,
+        }
+
     # ── internals ───────────────────────────────────────────────────────
 
     def _require_connection(self) -> None:
