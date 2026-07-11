@@ -39,7 +39,7 @@ from src.backtest.reports.writer import write_report
 from src.journal.adapters.repository import JournalRepository
 from src.journal.domain.models import CandleSnapshot, TradeRecord
 from src.shared.events.definitions import TenTradesCompleted
-from src.skills.application.skill_selector import SkillSelector
+from src.skills.ports.skill_selector import SkillSelectorPort
 from src.strategies.application.versioning import StrategyValidationError, StrategyVersionService
 from src.strategies.domain.versioning import CodeSource, VersionStatus
 from src.strategies.registry import StrategyRegistry
@@ -60,7 +60,7 @@ class RefinementLoopService:
         journal_repository: JournalRepository,
         strategy_versions: StrategyVersionService,
         strategy_registry: StrategyRegistry,
-        skill_selector: SkillSelector,
+        skill_selector: SkillSelectorPort,
         llm_router: LLMRouter,
         refinement_config: RefinementConfig,
         timezone: str = "UTC",

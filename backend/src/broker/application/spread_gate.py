@@ -29,14 +29,16 @@ class SpreadGate:
         point: float,
         sl_distance: float,
         tp_distance: float,
+        max_spread_override: int | None = None,
     ) -> SpreadVeto | None:
         config = self._configs.get(symbol)
         if config is None:
             return SpreadVeto(reason=f"no trading config for {symbol}")
-        if spread_points > config.max_spread_points:
-            return SpreadVeto(
-                reason=f"spread {spread_points}pts > max {config.max_spread_points}pts"
-            )
+        max_spread_points = (
+            max_spread_override if max_spread_override is not None else config.max_spread_points
+        )
+        if spread_points > max_spread_points:
+            return SpreadVeto(reason=f"spread {spread_points}pts > max {max_spread_points}pts")
         spread_value = spread_points * point
         required_tp = config.min_rr * (sl_distance + spread_value)
         if tp_distance < required_tp:

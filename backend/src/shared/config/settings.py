@@ -28,6 +28,9 @@ class Settings(BaseSettings):
     gateway_shared_secret: str = ""
     anthropic_api_key: str = ""
     ollama_url: str = "http://127.0.0.1:11434"
+    forexfactory_calendar_url: str = "https://nfs.faireconomy.wisdomtree.com"
+    finnhub_calendar_url: str = "https://finnhub.io/api/v1"
+    finnhub_api_key: str = ""
     configs_dir: Path = CONFIGS_DIR
 
 

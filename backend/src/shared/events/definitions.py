@@ -56,6 +56,9 @@ class TenTradesCompleted(Event):
 class NewsWindowEntered(Event):
     event_name: str
     symbols: tuple[str, ...]
+    close_all: bool = False
+    """Whether the matched news skill's `pre_event.close_all` requests
+    flattening open positions in `symbols` before the event (§6.6)."""
 
 
 @dataclass(frozen=True, kw_only=True)

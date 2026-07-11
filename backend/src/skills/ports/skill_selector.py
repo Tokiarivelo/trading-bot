@@ -20,6 +20,9 @@ class SkillDecision:
     strategy_name: str = ""
     risk_multiplier: float = 1.0
     reason: str = ""
+    max_spread_points: int | None = None
+    """News-skill spread cap override (§6.6 `post_event.max_spread_points`);
+    `None` means use the symbol's configured `max_spread_points` unchanged."""
 
 
 class SkillSelectorPort(Protocol):

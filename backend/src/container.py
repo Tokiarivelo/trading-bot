@@ -38,8 +38,14 @@ from src.market_data.application.candle_stream import CandleStreamService
 from src.market_data.application.history import CandleHistoryService
 from src.market_data.application.live_candle import LiveCandleService
 from src.market_data.domain.models import Timeframe
+from src.news.adapters.finnhub import FinnhubCalendar
+from src.news.adapters.forexfactory import ForexFactoryCalendar
+from src.news.application.news_window_service import NewsWindowService
+from src.news.domain.models import WindowSpec
+from src.news.ports.calendar import NewsCalendarPort
 from src.shared.config.loaders import (
     load_llm_provider_config,
+    load_news_config,
     load_refinement_config,
     load_risk_caps,
     load_symbol_trading_config,
@@ -49,18 +55,30 @@ from src.shared.db.base import make_session_factory
 from src.shared.events.bus import EventBus
 from src.shared.events.definitions import (
     CandleClosed,
+    NewsWindowEntered,
     PositionClosed,
     PositionOpened,
     TenTradesCompleted,
 )
+from src.skills.application.news_skill_selector import NewsSkillSelector
 from src.skills.application.skill_selector import SkillSelector
-from src.skills.domain.models import NormalSkill, SessionWindow
+from src.skills.domain.models import (
+    NewsActivation,
+    NewsActivationWindow,
+    NewsSkill,
+    NormalSkill,
+    PostEventRules,
+    PreEventRules,
+    SessionWindow,
+)
+from src.skills.ports.skill_selector import SkillSelectorPort
 from src.strategies.adapters.repository import StrategyVersionRepository
 from src.strategies.application.versioning import StrategyVersionService
 from src.strategies.generated.breakout_v1 import BreakoutV1
 from src.strategies.registry import StrategyRegistry
 
 _SKILLS_DIR = Path(__file__).resolve().parent / "skills" / "normal"
+_NEWS_SKILLS_DIR = Path(__file__).resolve().parent / "skills" / "news"
 _STRATEGIES_GENERATED_DIR = Path(__file__).resolve().parent / "strategies" / "generated"
 
 
@@ -82,16 +100,20 @@ class Container:
     trade_engine: TradeEngine
     strategy_registry: StrategyRegistry
     strategy_versions: StrategyVersionService
-    skill_selector: SkillSelector
+    skill_selector: SkillSelectorPort
     pdf_to_strategy: PdfToStrategyService
     refinement_loop: RefinementLoopService
+    news_client: httpx.AsyncClient
+    news_window_service: NewsWindowService
 
     _closers: list = field(default_factory=list)
 
     async def aclose(self) -> None:
         await self.candle_stream.stop()
         await self.live_candle.stop()
+        await self.news_window_service.stop()
         await self.gateway_client.aclose()
+        await self.news_client.aclose()
 
 
 def build_container(settings: Settings | None = None) -> Container:
@@ -188,8 +210,45 @@ def build_container(settings: Settings | None = None) -> Container:
         llm_router=llm_router,
     )
 
-    skill_selector = SkillSelector(
+    normal_skill_selector = SkillSelector(
         skills={symbol: _load_normal_skill(symbol) for symbol in symbols}, timezone=timezone
+    )
+
+    news_config = load_news_config(settings.configs_dir)
+    news_skills = _load_news_skills()
+    window_specs = {
+        name: WindowSpec(
+            skill_name=name,
+            before_min=skill.activation.window.before_min,
+            after_min=skill.activation.window.after_min,
+            symbols=skill.activation.symbols,
+            close_all=skill.pre_event.close_all,
+        )
+        for name, skill in news_skills.items()
+    }
+    news_client = httpx.AsyncClient(
+        base_url=(
+            settings.finnhub_calendar_url
+            if news_config.calendar_source == "finnhub"
+            else settings.forexfactory_calendar_url
+        ),
+        timeout=15.0,
+    )
+    news_calendar: NewsCalendarPort = (
+        FinnhubCalendar(news_client, settings.finnhub_api_key)
+        if news_config.calendar_source == "finnhub"
+        else ForexFactoryCalendar(news_client)
+    )
+    news_window_service = NewsWindowService(
+        calendar=news_calendar,
+        config=news_config,
+        window_specs=window_specs,
+        event_bus=event_bus,
+    )
+    skill_selector: SkillSelectorPort = NewsSkillSelector(
+        normal_selector=normal_skill_selector,
+        news_skills=news_skills,
+        window_source=news_window_service,
     )
 
     refinement_loop = RefinementLoopService(
@@ -219,6 +278,7 @@ def build_container(settings: Settings | None = None) -> Container:
     )
     event_bus.subscribe(CandleClosed, trade_engine.on_candle_closed)
     event_bus.subscribe(PositionClosed, trade_engine.on_position_closed)
+    event_bus.subscribe(NewsWindowEntered, trade_engine.on_news_window_entered)
 
     return Container(
         settings=settings,
@@ -240,6 +300,8 @@ def build_container(settings: Settings | None = None) -> Container:
         skill_selector=skill_selector,
         pdf_to_strategy=pdf_to_strategy,
         refinement_loop=refinement_loop,
+        news_client=news_client,
+        news_window_service=news_window_service,
     )
 
 
@@ -257,3 +319,36 @@ def _load_normal_skill(symbol: str) -> NormalSkill:
         risk_multiplier=data.get("risk_multiplier", 1.0),
         sessions=sessions,
     )
+
+
+def _load_news_skills() -> dict[str, NewsSkill]:
+    skills: dict[str, NewsSkill] = {}
+    for path in sorted(_NEWS_SKILLS_DIR.glob("*.yaml")):
+        with path.open() as f:
+            data = yaml.safe_load(f)
+        activation = data["activation"]
+        window = activation["window"]
+        pre = data["rules"]["pre_event"]
+        post = data["rules"]["post_event"]
+        skill = NewsSkill(
+            name=data["name"],
+            activation=NewsActivation(
+                calendar_events=tuple(activation["calendar_event"]),
+                window=NewsActivationWindow(
+                    before_min=window["before_min"], after_min=window["after_min"]
+                ),
+                symbols=tuple(activation["symbols"]),
+            ),
+            pre_event=PreEventRules(
+                close_all=pre.get("close_all", False),
+                block_new_entries=pre.get("block_new_entries", True),
+            ),
+            post_event=PostEventRules(
+                wait_candles_m5=post.get("wait_candles_m5", 0),
+                strategy_override=post.get("strategy_override", ""),
+                max_spread_points=post.get("max_spread_points", 0),
+                risk_multiplier=post.get("risk_multiplier", 1.0),
+            ),
+        )
+        skills[skill.name] = skill
+    return skills

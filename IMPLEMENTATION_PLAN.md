@@ -597,10 +597,10 @@ review_every_n_trades: 10
       strategy version activate endpoint)
 
 ### Phase 8 — News skills (F8)
-- [ ] `news` module: calendar fetch, impact classification, window detection
-- [ ] News skills YAML (NFP, CPI, FOMC, generic) + skill override in engine
-- [ ] Pre-news flatten / entry-block; post-news strategy override
-- [ ] News windows shaded on chart; upcoming-events panel
+- [x] `news` module: calendar fetch, impact classification, window detection
+- [x] News skills YAML (NFP, CPI, FOMC, generic) + skill override in engine
+- [x] Pre-news flatten / entry-block; post-news strategy override
+- [x] News windows shaded on chart; upcoming-events panel
 
 ### Phase 9 — Hardening & go-live
 - [ ] Security checklist (§11) fully done

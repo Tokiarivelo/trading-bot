@@ -1,0 +1,16 @@
+# FOMC rate decision + press conference — matches both "FOMC Statement" and
+# "FOMC Press Conference" in configs/news.yaml: tracked_events. Two-stage
+# event (statement, then Powell's Q&A ~30 min later) so the window is wider
+# than NFP/CPI on both sides to cover the full volatility stretch.
+name: fomc
+activation:
+  calendar_event: ["FOMC Statement", "FOMC Press Conference"]
+  window: { before_min: 30, after_min: 90 }
+  symbols: [XAUUSD, XAGUSD, BTCUSD]
+rules:
+  pre_event: { close_all: true, block_new_entries: true }
+  post_event:
+    wait_candles_m5: 4
+    strategy_override: ""
+    max_spread_points: 100
+    risk_multiplier: 0.4

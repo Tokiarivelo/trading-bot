@@ -5,6 +5,7 @@ import { useEffect, useState } from "react";
 import { AccountPanel } from "@/features/account/AccountPanel";
 import { ChartPanel } from "@/features/chart/ChartPanel";
 import { SymbolPicker } from "@/features/chart/SymbolPicker";
+import { ActiveNewsWindowsSummary } from "@/features/news/ActiveNewsWindowsSummary";
 import { getAppConfig, getHealth, type AppConfig } from "@/shared/api/client";
 
 const EXTRA_SYMBOLS_KEY = "tb.extraSymbols";
@@ -128,6 +129,9 @@ export default function Home() {
         <Link href="/ai-reports" className="text-sm text-ink-muted hover:text-accent">
           AI Reports
         </Link>
+        <Link href="/news" className="text-sm text-ink-muted hover:text-accent">
+          News
+        </Link>
         <span className="text-sm">
           backend:{" "}
           {backendUp === null ? (
@@ -158,7 +162,9 @@ export default function Home() {
             </Link>{" "}
             10-trade reviews, refinement proposals, backtest comparisons
           </Panel>
-          <Panel>News (Phase 8)</Panel>
+          <Panel>
+            <ActiveNewsWindowsSummary />
+          </Panel>
         </aside>
       </main>
     </div>

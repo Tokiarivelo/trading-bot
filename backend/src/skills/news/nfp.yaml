@@ -1,0 +1,15 @@
+# Non-Farm Payrolls — monthly US jobs report, first Friday of the month.
+# One of the single highest-volatility USD releases; XAUUSD/XAGUSD routinely
+# see 5-15x normal spread and 10-20 USD whipsaws in the first minute.
+name: nfp
+activation:
+  calendar_event: ["Non-Farm Payrolls"]
+  window: { before_min: 30, after_min: 60 }
+  symbols: [XAUUSD, XAGUSD]
+rules:
+  pre_event: { close_all: true, block_new_entries: true }
+  post_event:
+    wait_candles_m5: 3 # let the first, wildest 15 min of M5 bars close before re-entering
+    strategy_override: "" # no dedicated breakout strategy registered yet; falls back to the normal skill's strategy once wait_candles_m5 elapses
+    max_spread_points: 80
+    risk_multiplier: 0.5

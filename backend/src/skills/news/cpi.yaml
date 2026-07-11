@@ -1,0 +1,16 @@
+# US Consumer Price Index — monthly inflation print, mid-month.
+# High-impact for gold/silver (inflation hedge repricing) and, to a lesser
+# extent, BTC via risk-sentiment moves; slightly less violent than NFP so the
+# window and risk cut are a bit lighter.
+name: cpi
+activation:
+  calendar_event: ["CPI"]
+  window: { before_min: 20, after_min: 45 }
+  symbols: [XAUUSD, XAGUSD]
+rules:
+  pre_event: { close_all: true, block_new_entries: true }
+  post_event:
+    wait_candles_m5: 2
+    strategy_override: ""
+    max_spread_points: 60
+    risk_multiplier: 0.6

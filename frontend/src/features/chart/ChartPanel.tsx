@@ -21,10 +21,12 @@ import {
 } from "lightweight-charts";
 import { useEffect, useRef, useState } from "react";
 import {
+  getActiveNewsWindows,
   getCandles,
   getSymbolInfo,
   getTradeMarkers,
   type Candle,
+  type NewsWindow,
   type TradeMarker,
 } from "@/shared/api/client";
 import { subscribeRoom } from "@/shared/api/ws";
@@ -33,6 +35,9 @@ const TIMEFRAMES: Candle["timeframe"][] = ["M1", "M5", "H1", "H4", "D1"];
 const CANDLE_COUNT = 300;
 const SPREAD_POLL_MS = 3000;
 const MARKERS_POLL_MS = 5000;
+// Matches the backend's own news-window transition-check cadence — no point
+// polling faster than the window state can actually change.
+const NEWS_POLL_MS = 30_000;
 // Start fetching the next page of history once the visible window's left
 // edge gets this close to the oldest bar currently loaded, so more arrives
 // before the user actually scrolls past the end of the data.
@@ -40,6 +45,23 @@ const LOAD_MORE_THRESHOLD = 50;
 
 function cssVar(name: string): string {
   return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+}
+
+function hexToRgba(hex: string, alpha: number): string {
+  const clean = hex.replace("#", "");
+  const value = parseInt(clean, 16);
+  const r = (value >> 16) & 255;
+  const g = (value >> 8) & 255;
+  const b = value & 255;
+  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+}
+
+interface NewsBand {
+  key: string;
+  left: number;
+  width: number;
+  label: string;
+  phase: "pre" | "post";
 }
 
 function toBar(candle: Candle) {
@@ -114,6 +136,7 @@ export function ChartPanel({ symbol }: { symbol: string }) {
   const [spreadPoints, setSpreadPoints] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loadingMore, setLoadingMore] = useState(false);
+  const [newsBands, setNewsBands] = useState<NewsBand[]>([]);
 
   // Create the chart once; destroy on unmount.
   useEffect(() => {
@@ -341,6 +364,74 @@ export function ChartPanel({ symbol }: { symbol: string }) {
     };
   }, [symbol]);
 
+  // News window shading (§8, F8): shade the pre/post-event window of any
+  // active news window that affects this symbol. Pixel positions are
+  // recomputed on every news poll, pan/zoom, and resize since they depend on
+  // the chart's current visible time range, not just the window's own times.
+  useEffect(() => {
+    let cancelled = false;
+    let currentWindows: NewsWindow[] = [];
+    const chart = chartRef.current;
+    const container = containerRef.current;
+
+    function recompute() {
+      if (!chart || !container) {
+        setNewsBands([]);
+        return;
+      }
+      const visible = chart.timeScale().getVisibleRange();
+      if (!visible) {
+        setNewsBands([]);
+        return;
+      }
+      const from = visible.from as number;
+      const to = visible.to as number;
+      const bands: NewsBand[] = [];
+      for (const w of currentWindows) {
+        if (!w.symbols.includes(symbol)) continue;
+        if (w.window_end < from || w.window_start > to) continue;
+        const x1 = chart
+          .timeScale()
+          .timeToCoordinate(Math.max(from, w.window_start) as UTCTimestamp);
+        const x2 = chart.timeScale().timeToCoordinate(Math.min(to, w.window_end) as UTCTimestamp);
+        if (x1 === null || x2 === null) continue;
+        bands.push({
+          key: `${w.event.name}-${w.window_start}`,
+          left: Math.min(x1, x2),
+          width: Math.max(1, Math.abs(x2 - x1)),
+          label: w.event.name,
+          phase: w.phase,
+        });
+      }
+      setNewsBands(bands);
+    }
+
+    function pollNews() {
+      getActiveNewsWindows()
+        .then((windows) => {
+          if (cancelled) return;
+          currentWindows = windows;
+          recompute();
+        })
+        .catch(() => {
+          if (!cancelled) setNewsBands([]);
+        });
+    }
+
+    pollNews();
+    const timer = setInterval(pollNews, NEWS_POLL_MS);
+    chart?.timeScale().subscribeVisibleTimeRangeChange(recompute);
+    const resizeObserver = new ResizeObserver(recompute);
+    if (container) resizeObserver.observe(container);
+
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+      chart?.timeScale().unsubscribeVisibleTimeRangeChange(recompute);
+      resizeObserver.disconnect();
+    };
+  }, [symbol, timeframe]);
+
   return (
     <section className="flex flex-1 flex-col rounded-md border border-line bg-panel">
       <header className="flex items-center gap-3 border-b border-line px-4 py-2">
@@ -379,6 +470,22 @@ export function ChartPanel({ symbol }: { symbol: string }) {
       {error && <p className="px-4 py-1 text-xs text-err">{error}</p>}
       <div className="relative min-h-0 flex-1">
         <div ref={containerRef} className="h-full w-full" />
+        {newsBands.map((b) => {
+          const color = cssVar(b.phase === "pre" ? "--color-err" : "--color-accent");
+          return (
+            <div
+              key={b.key}
+              className="pointer-events-none absolute top-0 h-full border-x border-dashed"
+              style={{
+                left: b.left,
+                width: b.width,
+                backgroundColor: hexToRgba(color, 0.1),
+                borderColor: color,
+              }}
+              title={`${b.label} (${b.phase}-event news window)`}
+            />
+          );
+        })}
         {loadingMore && (
           <div className="pointer-events-none absolute left-2 top-2 rounded border border-line bg-panel px-2 py-1 text-xs text-ink-muted">
             Loading history…

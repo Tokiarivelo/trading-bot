@@ -12,6 +12,12 @@ const TONE: Record<string, string> = {
   pending: "border-ink-muted text-ink-muted",
   backtested: "border-accent text-accent",
   applied: "border-ok text-ok",
+  // News windows (Phase 8, F8)
+  pre: "border-err text-err",
+  post: "border-accent text-accent",
+  low: "border-ink-muted text-ink-muted",
+  medium: "border-accent text-accent",
+  high: "border-err text-err",
 };
 
 /** Small status pill shared by draft and version lists/detail pages. */

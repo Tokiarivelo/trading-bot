@@ -43,14 +43,24 @@ class OrderService:
         comment: str = "",
         strategy_version: str | None = None,
         skill: str | None = None,
+        max_spread_points: int | None = None,
     ) -> ExecutionResult:
+        """`max_spread_points`, when set, overrides the symbol's configured
+        cap for this order only — used by news skills to widen (or, in
+        principle, tighten) the allowance during a post-event window
+        (`SkillDecision.max_spread_points`, §6.6)."""
         info = await self._market_data.get_symbol_info(symbol)
         reference_price = info.ask if side is Side.BUY else info.bid
         sl_distance = abs(reference_price - sl) if sl is not None else 0.0
         tp_distance = abs(tp - reference_price) if tp is not None else 0.0
 
         veto = self._spread_gate.check(
-            symbol, info.spread_points, info.point, sl_distance, tp_distance
+            symbol,
+            info.spread_points,
+            info.point,
+            sl_distance,
+            tp_distance,
+            max_spread_override=max_spread_points,
         )
         if veto is not None:
             logger.info(

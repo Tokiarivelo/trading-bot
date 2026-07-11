@@ -353,3 +353,28 @@ export const getRefinementProposal = (id: string) =>
   api.get<RefinementProposalDetail>(`/ai/refinement/proposals/${encodeURIComponent(id)}`);
 export const rejectRefinementProposal = (id: string) =>
   api.post<RefinementProposalDetail>(`/ai/refinement/proposals/${encodeURIComponent(id)}/reject`);
+
+// ── News: economic calendar & active windows (Phase 8, F8) ─────────────────
+
+export type ImpactLevel = "low" | "medium" | "high";
+
+export interface NewsEvent {
+  name: string;
+  time: number; // epoch seconds UTC
+  impact: ImpactLevel;
+  currency: string;
+  skill: string | null; // matched news skill, or null if this event never activates one
+}
+
+export interface NewsWindow {
+  event: NewsEvent;
+  skill: string;
+  window_start: number; // epoch seconds UTC
+  window_end: number; // epoch seconds UTC
+  phase: "pre" | "post";
+  symbols: string[]; // symbols this window affects
+}
+
+export const getUpcomingNews = (daysAhead = 7) =>
+  api.get<NewsEvent[]>(`/news/upcoming?days_ahead=${daysAhead}`);
+export const getActiveNewsWindows = () => api.get<NewsWindow[]>("/news/active-windows");

@@ -32,6 +32,7 @@ from src.engine.api.routes import router as engine_router
 from src.journal.api.routes import router as journal_router
 from src.market_data.api.routes import router as market_data_router
 from src.market_data.api.ws import bind_candle_stream, bind_live_candle, sio
+from src.news.api.routes import router as news_router
 from src.shared.config.settings import load_yaml_config
 from src.shared.logging.setup import configure_logging
 from src.strategies.api.routes import router as strategies_router
@@ -105,6 +106,14 @@ OPENAPI_TAGS = [
         "version live in the engine's `StrategyRegistry`; it never changes "
         "`configs/app.yaml`'s paper/live mode or any risk cap.",
     },
+    {
+        "name": "news",
+        "description": "Economic calendar and active news-window status (F8) — read-only. "
+        "The engine reacts to news windows internally: `NewsSkillSelector` blocks/overrides "
+        "entries and the trade engine flattens positions on `NewsWindowEntered` when the "
+        "matched news skill's `pre_event.close_all` requests it "
+        "(`backend/src/skills/news/*.yaml`); this API only reports that state for the UI.",
+    },
 ]
 
 
@@ -120,6 +129,7 @@ async def lifespan(app: FastAPI):
     await container.account.reconnect_from_stored()
     container.candle_stream.start()
     container.live_candle.start()
+    container.news_window_service.start()
     yield
     await container.aclose()
 
@@ -140,6 +150,7 @@ app.include_router(backtest_router)
 app.include_router(ai_router)
 app.include_router(ai_refinement_router)
 app.include_router(strategies_router)
+app.include_router(news_router)
 
 
 class HealthOut(BaseModel):

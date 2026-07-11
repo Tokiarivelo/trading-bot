@@ -23,7 +23,7 @@ from src.engine.domain.models import EngineStatus
 from src.engine.ports.strategy_source import StrategySourcePort
 from src.market_data.domain.models import MarketDataUnavailable, Timeframe
 from src.market_data.ports.market_data import MarketDataPort
-from src.shared.events.definitions import CandleClosed, PositionClosed
+from src.shared.events.definitions import CandleClosed, NewsWindowEntered, PositionClosed
 from src.skills.ports.skill_selector import SkillSelectorPort
 
 logger = logging.getLogger(__name__)
@@ -84,6 +84,26 @@ class TradeEngine:
                 await self._order_service.close_position(position.ticket)
             except OrderRejected:
                 logger.exception("kill switch: failed to close ticket=%d", position.ticket)
+
+    async def on_news_window_entered(self, event: NewsWindowEntered) -> None:
+        """Pre-news flatten (§6.6, §8): closes open positions in the news
+        skill's `symbols` when `pre_event.close_all` requested it. Unlike
+        `kill_switch`, this never pauses the engine — new-entry blocking for
+        the window is handled entirely by `NewsSkillSelector` returning
+        `allowed=False`."""
+        if not event.close_all:
+            return
+        for symbol in event.symbols:
+            for position in await self._order_service.get_positions(symbol):
+                try:
+                    await self._order_service.close_position(position.ticket)
+                except OrderRejected:
+                    logger.exception(
+                        "news flatten: failed to close ticket=%d ahead of %s",
+                        position.ticket,
+                        event.event_name,
+                    )
+            logger.info("news flatten: closed %s positions ahead of %s", symbol, event.event_name)
 
     def resume(self) -> None:
         self._risk_manager.resume()
@@ -178,6 +198,7 @@ class TradeEngine:
                 comment=signal.reason[:255],
                 strategy_version=f"{strategy.spec.name}:v{strategy.spec.version}",
                 skill=decision.skill_name,
+                max_spread_points=decision.max_spread_points,
             )
         except OrderRejected:
             return  # spread/RR gate already logged the veto inside order_service

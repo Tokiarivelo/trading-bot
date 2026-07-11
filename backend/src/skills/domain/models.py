@@ -41,3 +41,44 @@ class NormalSkill:
         if not self.sessions:
             return True
         return any(window.contains(moment) for window in self.sessions)
+
+
+@dataclass(frozen=True, kw_only=True)
+class NewsActivationWindow:
+    before_min: int
+    after_min: int
+
+
+@dataclass(frozen=True, kw_only=True)
+class NewsActivation:
+    calendar_events: tuple[str, ...]
+    window: NewsActivationWindow
+    symbols: tuple[str, ...]
+
+
+@dataclass(frozen=True, kw_only=True)
+class PreEventRules:
+    close_all: bool = False
+    block_new_entries: bool = True
+
+
+@dataclass(frozen=True, kw_only=True)
+class PostEventRules:
+    wait_candles_m5: int = 0
+    strategy_override: str = ""
+    max_spread_points: int = 0  # 0 = no override, use the symbol's configured cap
+    risk_multiplier: float = 1.0
+
+
+@dataclass(frozen=True, kw_only=True)
+class NewsSkill:
+    """A high-volatility playbook (§6.6, §8): activates within a window
+    around specific calendar events, taking priority over the symbol's
+    `NormalSkill`. `activation.calendar_events` and `window` are informational
+    for this skill's own docs — the actual event -> skill match happens via
+    `configs/news.yaml: tracked_events`, resolved by `NewsWindowService`."""
+
+    name: str
+    activation: NewsActivation
+    pre_event: PreEventRules
+    post_event: PostEventRules

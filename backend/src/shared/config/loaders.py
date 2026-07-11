@@ -10,6 +10,7 @@ from src.ai.domain.models import RefinementConfig
 from src.ai.ports.llm import ProviderSpec
 from src.broker.domain.symbol_config import SymbolTradingConfig
 from src.engine.domain.models import RiskCaps
+from src.news.domain.models import ImpactLevel, NewsConfig, TrackedEvent
 from src.shared.config.settings import load_yaml_config
 
 
@@ -54,4 +55,22 @@ def load_refinement_config(configs_dir: Path) -> RefinementConfig:
         mode=data.get("mode", "suggest"),
         auto_apply_min_improvement_pct=data.get("auto_apply_min_improvement_pct", 10.0),
         max_auto_refinements_per_day=data.get("max_auto_refinements_per_day", 1),
+    )
+
+
+def load_news_config(configs_dir: Path) -> NewsConfig:
+    data = load_yaml_config("news", configs_dir)
+    calendar = data.get("calendar", {})
+    default_window = data.get("default_window", {})
+    return NewsConfig(
+        calendar_source=calendar.get("source", "forexfactory"),
+        refresh_minutes=calendar.get("refresh_minutes", 60),
+        tracked_events=tuple(
+            TrackedEvent(
+                name=entry["name"], impact=ImpactLevel(entry["impact"]), skill=entry["skill"]
+            )
+            for entry in data.get("tracked_events", [])
+        ),
+        default_before_min=default_window.get("before_min", 30),
+        default_after_min=default_window.get("after_min", 60),
     )

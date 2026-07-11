@@ -1,0 +1,17 @@
+# Catch-all for any high-impact calendar event not individually named in
+# configs/news.yaml: tracked_events (matched via that file's "*" wildcard
+# entry). Conservative defaults: shorter window, tighter spread allowance,
+# heavier risk cut than the named events above, since the specific
+# volatility profile of an unnamed high-impact release is unknown.
+name: generic_high_impact
+activation:
+  calendar_event: ["*"]
+  window: { before_min: 15, after_min: 30 }
+  symbols: [XAUUSD, XAGUSD, BTCUSD]
+rules:
+  pre_event: { close_all: true, block_new_entries: true }
+  post_event:
+    wait_candles_m5: 2
+    strategy_override: ""
+    max_spread_points: 50
+    risk_multiplier: 0.5

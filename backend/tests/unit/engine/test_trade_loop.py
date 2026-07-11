@@ -5,7 +5,7 @@ from src.engine.application.risk_manager import RiskManager
 from src.engine.application.trade_loop import TradeEngine
 from src.engine.domain.models import RiskCaps
 from src.market_data.domain.models import Candle, SymbolInfo, Timeframe
-from src.shared.events.definitions import CandleClosed, PositionClosed
+from src.shared.events.definitions import CandleClosed, NewsWindowEntered, PositionClosed
 from src.skills.ports.skill_selector import SkillDecision
 from src.strategies.domain.models import Direction, MarketContext, Signal, StrategySpec
 
@@ -101,7 +101,16 @@ class FakeOrderService:
         return list(self._positions)
 
     async def open_position(
-        self, symbol, side, volume, sl=None, tp=None, comment="", strategy_version=None, skill=None
+        self,
+        symbol,
+        side,
+        volume,
+        sl=None,
+        tp=None,
+        comment="",
+        strategy_version=None,
+        skill=None,
+        max_spread_points=None,
     ):
         if self._raise_on_open:
             raise self._raise_on_open
@@ -115,6 +124,7 @@ class FakeOrderService:
                 comment=comment,
                 strategy_version=strategy_version,
                 skill=skill,
+                max_spread_points=max_spread_points,
             )
         )
         return ExecutionResult(
@@ -368,6 +378,51 @@ async def test_kill_switch_pauses_and_closes_all_positions():
 
     assert risk_manager.paused
     assert order_service.closed == [1]
+
+
+async def test_news_window_entered_flattens_positions_when_close_all():
+    position = Position(
+        ticket=7,
+        symbol="XAUUSD",
+        side=Side.BUY,
+        volume=0.1,
+        open_price=2400.0,
+        sl=None,
+        tp=None,
+        open_time=datetime.now(UTC),
+        profit=0.0,
+    )
+    order_service = FakeOrderService(positions=[position])
+    engine, order_service, risk_manager, _ = make_engine(order_service=order_service)
+
+    await engine.on_news_window_entered(
+        NewsWindowEntered(event_name="Non-Farm Payrolls", symbols=("XAUUSD",), close_all=True)
+    )
+
+    assert order_service.closed == [7]
+    assert not risk_manager.paused  # unlike kill_switch, this never pauses the engine
+
+
+async def test_news_window_entered_does_nothing_when_close_all_false():
+    position = Position(
+        ticket=7,
+        symbol="XAUUSD",
+        side=Side.BUY,
+        volume=0.1,
+        open_price=2400.0,
+        sl=None,
+        tp=None,
+        open_time=datetime.now(UTC),
+        profit=0.0,
+    )
+    order_service = FakeOrderService(positions=[position])
+    engine, order_service, *_ = make_engine(order_service=order_service)
+
+    await engine.on_news_window_entered(
+        NewsWindowEntered(event_name="CPI", symbols=("XAUUSD",), close_all=False)
+    )
+
+    assert order_service.closed == []
 
 
 def test_resume_clears_pause():
