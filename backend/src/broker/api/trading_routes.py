@@ -1,6 +1,11 @@
-"""Manual order control (F3 plumbing). The engine drives this service from
-the trade loop; these endpoints let the same plumbing be exercised directly
-from the UI/tooling for manual trades and position management."""
+"""Manual order control (F3 plumbing, extended for chart-driven manual
+trading). The engine drives `order_service` from the trade loop; these
+endpoints let the same plumbing be exercised directly from the UI for manual
+trades and position management. Market and pending-order *placement* go
+through `manual_trade_gate` instead of `order_service` directly, so a manual
+order is subject to the same `RiskManager` caps (max open positions, max
+trades/day, pause/kill-switch) as an automated one — everything else
+(close/modify/list) talks to `order_service` since those aren't gated."""
 
 from __future__ import annotations
 
@@ -13,23 +18,42 @@ from src.broker.api.schemas import (
     ExecutionResultOut,
     ModifyOrderRequest,
     ModifyOrderResponse,
+    ModifyPendingOrderRequest,
     OpenOrderRequest,
+    PendingOrderOut,
+    PlacePendingOrderRequest,
     PositionOut,
 )
 from src.broker.domain.account import BrokerUnavailable
-from src.broker.domain.trading import ExecutionResult, OrderRejected, Position, Side
+from src.broker.domain.trading import (
+    ExecutionResult,
+    OrderRejected,
+    OrderType,
+    PendingOrder,
+    Position,
+    Side,
+)
 from src.market_data.domain.models import MarketDataUnavailable
 
 router = APIRouter(prefix="/broker", tags=["broker"])
 
 _UNAVAILABLE = {503: {"description": "The MT5 gateway or market data feed is unreachable."}}
 _REJECTED = {
-    422: {"description": "The order was rejected (spread gate, RR gate, or broker refusal)."}
+    422: {
+        "description": (
+            "The order was rejected (spread gate, RR gate, risk cap, "
+            "engine pause/kill-switch, or broker refusal)."
+        )
+    }
 }
 
 
 def _service(request: Request) -> Any:
     return request.app.state.container.order_service
+
+
+def _gate(request: Request) -> Any:
+    return request.app.state.container.manual_trade_gate
 
 
 def _execution_out(result: ExecutionResult) -> ExecutionResultOut:
@@ -63,6 +87,21 @@ def _position_out(position: Position) -> PositionOut:
     )
 
 
+def _pending_order_out(order: PendingOrder) -> PendingOrderOut:
+    return PendingOrderOut(
+        ticket=order.ticket,
+        symbol=order.symbol,
+        side=order.side.value,
+        order_type=order.order_type.value,
+        volume=order.volume,
+        price=order.price,
+        sl=order.sl,
+        tp=order.tp,
+        placed_time=order.placed_time.isoformat(),
+        comment=order.comment,
+    )
+
+
 @router.post(
     "/orders",
     response_model=ExecutionResultOut,
@@ -70,10 +109,16 @@ def _position_out(position: Position) -> PositionOut:
     description=(
         "Places a market order through the active broker adapter (paper or live, "
         "per `configs/app.yaml: mode`). Before reaching the broker the order must "
-        "clear the per-symbol spread gate and minimum risk/reward ratio "
-        "(`configs/symbols/*.yaml`) — both `sl` and `tp` are required for the RR "
-        "check to run. A successful fill is published as `PositionOpened` on the "
-        "event bus, which the trade journal picks up automatically."
+        "clear the account-level risk gate (`configs/risk.yaml`: not paused/killed, "
+        "under `max_open_positions` and `max_trades_per_day` — the same caps that "
+        "gate automated entries) and the per-symbol spread gate "
+        "(`configs/symbols/*.yaml`). `sl`/`tp` are optional; when both are set, "
+        "the minimum risk/reward ratio also applies to them. A symbol with no "
+        "`configs/symbols/*.yaml` (e.g. one browsed from the broker's catalog "
+        "rather than engine-traded) still gets a default RR floor but no spread "
+        "cap, rather than being rejected outright. A successful fill is "
+        "published as `PositionOpened` on the event bus, which the trade "
+        "journal picks up automatically."
     ),
     responses={**_REJECTED, **_UNAVAILABLE},
 )
@@ -83,7 +128,7 @@ async def open_order(request: Request, body: OpenOrderRequest) -> ExecutionResul
     except ValueError:
         raise HTTPException(status_code=422, detail="side must be 'buy' or 'sell'") from None
     try:
-        result = await _service(request).open_position(
+        result = await _gate(request).open_position(
             body.symbol, side, body.volume, body.sl, body.tp, body.comment
         )
     except OrderRejected as exc:
@@ -155,3 +200,98 @@ async def get_positions(
     except (BrokerUnavailable, MarketDataUnavailable) as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     return [_position_out(p) for p in positions]
+
+
+@router.post(
+    "/orders/pending",
+    response_model=PendingOrderOut,
+    summary="Place a pending limit or stop order",
+    description=(
+        "Places a resting order that fills once price reaches `price`, instead "
+        "of immediately. Only the engine's pause/kill-switch state is checked at "
+        "placement — `max_open_positions`/`max_trades_per_day` describe open "
+        "trades, and a resting order isn't one yet, so those are re-checked when "
+        "it actually fills. In paper mode the fill is simulated on each M5 close; "
+        "in live mode MT5 triggers it server-side and the backend detects and "
+        "journals the fill afterward, publishing `PositionOpened` either way."
+    ),
+    responses={**_REJECTED, **_UNAVAILABLE},
+)
+async def place_pending_order(request: Request, body: PlacePendingOrderRequest) -> PendingOrderOut:
+    try:
+        side = Side(body.side)
+    except ValueError:
+        raise HTTPException(status_code=422, detail="side must be 'buy' or 'sell'") from None
+    try:
+        order_type = OrderType(body.order_type)
+    except ValueError:
+        raise HTTPException(
+            status_code=422, detail="order_type must be 'limit' or 'stop'"
+        ) from None
+    try:
+        result = await _gate(request).place_pending_order(
+            body.symbol, side, order_type, body.volume, body.price, body.sl, body.tp, body.comment
+        )
+    except OrderRejected as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except (BrokerUnavailable, MarketDataUnavailable) as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return _pending_order_out(result)
+
+
+@router.get(
+    "/orders/pending",
+    response_model=list[PendingOrderOut],
+    summary="List pending (unfilled) orders",
+    description="Returns all resting limit/stop orders, optionally filtered to one symbol.",
+    responses=_UNAVAILABLE,
+)
+async def get_pending_orders(
+    request: Request,
+    symbol: str | None = Query(default=None, description="Restrict results to this symbol."),
+) -> list[PendingOrderOut]:
+    try:
+        orders = await _service(request).get_pending_orders(symbol)
+    except (BrokerUnavailable, MarketDataUnavailable) as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return [_pending_order_out(o) for o in orders]
+
+
+@router.post(
+    "/orders/pending/{ticket}/modify",
+    response_model=ModifyOrderResponse,
+    summary="Modify a pending order's trigger price, stop loss, or take profit",
+    description=(
+        "Updates `price`, `sl`, and/or `tp` on a resting order in place; pass "
+        "null to leave a field unchanged. Used for dragging a pending order's "
+        "trigger/SL/TP lines on the chart."
+    ),
+    responses={**_REJECTED, **_UNAVAILABLE},
+)
+async def modify_pending_order(
+    request: Request, ticket: int, body: ModifyPendingOrderRequest
+) -> ModifyOrderResponse:
+    try:
+        await _service(request).modify_pending_order(ticket, body.price, body.sl, body.tp)
+    except OrderRejected as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except (BrokerUnavailable, MarketDataUnavailable) as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return ModifyOrderResponse(status="ok")
+
+
+@router.delete(
+    "/orders/pending/{ticket}",
+    response_model=ModifyOrderResponse,
+    summary="Cancel a pending order",
+    description="Removes a resting order before it fills.",
+    responses={**_REJECTED, **_UNAVAILABLE},
+)
+async def cancel_pending_order(request: Request, ticket: int) -> ModifyOrderResponse:
+    try:
+        await _service(request).cancel_pending_order(ticket)
+    except OrderRejected as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except (BrokerUnavailable, MarketDataUnavailable) as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return ModifyOrderResponse(status="ok")

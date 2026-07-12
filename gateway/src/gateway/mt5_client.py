@@ -383,7 +383,9 @@ class Mt5Client:
         result = mt5.order_send(request)
         if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
             code = result.retcode if result is not None else None
-            raise Mt5Error(f"modify_pending_order({ticket}) rejected: retcode={code} {_last_error()}")
+            raise Mt5Error(
+                f"modify_pending_order({ticket}) rejected: retcode={code} {_last_error()}"
+            )
 
     def cancel_pending_order(self, ticket: int) -> None:
         self._require_connection()
@@ -391,7 +393,9 @@ class Mt5Client:
         result = mt5.order_send(request)
         if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
             code = result.retcode if result is not None else None
-            raise Mt5Error(f"cancel_pending_order({ticket}) rejected: retcode={code} {_last_error()}")
+            raise Mt5Error(
+                f"cancel_pending_order({ticket}) rejected: retcode={code} {_last_error()}"
+            )
 
     def pending_orders(self, symbol: str | None = None) -> list[dict[str, Any]]:
         self._require_connection()

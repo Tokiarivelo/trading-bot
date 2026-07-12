@@ -69,8 +69,6 @@ class FakeMarketData:
 
 class FakeMarketContext:
     async def capture(self, symbol):
-        from src.journal.domain.models import MarketSnapshot
-
         return MarketSnapshot(m5=(), h1=())
 
 
@@ -116,13 +114,9 @@ async def test_kill_switch_closes_paper_position_and_fires_alerts(tmp_path):
     event_bus.subscribe(PositionClosed, trade_journal.on_position_closed)
 
     alert_port = FakeAlertPort()
-    alert_service = AlertService(
-        port=CompositeAlertAdapter([alert_port]), config=AlertingConfig()
-    )
+    alert_service = AlertService(port=CompositeAlertAdapter([alert_port]), config=AlertingConfig())
     event_bus.subscribe(PositionOpened, alert_service.on_position_opened)
     event_bus.subscribe(PositionClosed, alert_service.on_position_closed)
-    from src.shared.events.definitions import CircuitBreakerTripped
-
     event_bus.subscribe(CircuitBreakerTripped, alert_service.on_circuit_breaker_tripped)
 
     reconciliation = ReconciliationService(

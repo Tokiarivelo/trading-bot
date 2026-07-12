@@ -277,9 +277,7 @@ async def api(tmp_path):
 
 
 async def test_candle_close_drives_full_entry_through_the_engine(api):
-    await api.container.trade_engine.on_candle_closed(
-        CandleClosed(symbol="XAUUSD", timeframe="M5")
-    )
+    await api.container.trade_engine.on_candle_closed(CandleClosed(symbol="XAUUSD", timeframe="M5"))
 
     positions = (await api.get("/broker/positions")).json()
     assert len(positions) == 1
@@ -297,9 +295,7 @@ async def test_candle_close_drives_full_entry_through_the_engine(api):
 
 
 async def test_kill_switch_endpoint_pauses_and_closes_positions(api):
-    await api.container.trade_engine.on_candle_closed(
-        CandleClosed(symbol="XAUUSD", timeframe="M5")
-    )
+    await api.container.trade_engine.on_candle_closed(CandleClosed(symbol="XAUUSD", timeframe="M5"))
     assert len((await api.get("/broker/positions")).json()) == 1
 
     killed = await api.post("/engine/kill")
@@ -313,20 +309,14 @@ async def test_kill_switch_endpoint_pauses_and_closes_positions(api):
 
 
 async def test_engine_does_not_reenter_once_max_open_positions_reached(api):
-    await api.container.trade_engine.on_candle_closed(
-        CandleClosed(symbol="XAUUSD", timeframe="M5")
-    )
+    await api.container.trade_engine.on_candle_closed(CandleClosed(symbol="XAUUSD", timeframe="M5"))
     # RISK_CAPS allows 2 open positions; feed the same breakout candle again —
     # the strategy would signal again, but this asserts the pipe runs
     # end-to-end a second time without error and caps eventually apply.
-    await api.container.trade_engine.on_candle_closed(
-        CandleClosed(symbol="XAUUSD", timeframe="M5")
-    )
+    await api.container.trade_engine.on_candle_closed(CandleClosed(symbol="XAUUSD", timeframe="M5"))
     positions = (await api.get("/broker/positions")).json()
     assert len(positions) == 2  # exactly at the cap, not beyond
 
-    await api.container.trade_engine.on_candle_closed(
-        CandleClosed(symbol="XAUUSD", timeframe="M5")
-    )
+    await api.container.trade_engine.on_candle_closed(CandleClosed(symbol="XAUUSD", timeframe="M5"))
     positions = (await api.get("/broker/positions")).json()
     assert len(positions) == 2  # third attempt blocked by max_open_positions

@@ -59,7 +59,7 @@ async def connect(request: Request, body: ConnectRequest) -> ConnectResponse:
     summary="Log out of MT5",
     description=(
         "Logs out of the current MT5 session through the gateway. Pass "
-        "`{\"forget\": true}` to also erase any persisted credentials — otherwise "
+        '`{"forget": true}` to also erase any persisted credentials — otherwise '
         "they remain for the next auto-reconnect."
     ),
     responses={503: _ERROR_RESPONSES[503]},

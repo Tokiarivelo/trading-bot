@@ -126,3 +126,69 @@ async def test_activate_is_rollback(api, service):
 async def test_activate_not_found(api):
     response = await api.post("/strategies/versions/does-not-exist/activate")
     assert response.status_code == 404
+
+
+async def test_duplicate_version(api, service):
+    strategy_versions, _ = service
+    v1 = strategy_versions.save_generated_code(
+        name="sample", code=VALID_CODE, source=CodeSource.AI_GENERATED
+    )
+    response = await api.post(
+        f"/strategies/versions/{v1.id}/duplicate", json={"name": "sample_fork"}
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["name"] == "sample_fork"
+    assert body["version"] == 1
+    assert body["parent_version_id"] is None
+
+
+async def test_duplicate_version_name_conflict(api, service):
+    strategy_versions, _ = service
+    v1 = strategy_versions.save_generated_code(
+        name="sample", code=VALID_CODE, source=CodeSource.AI_GENERATED
+    )
+    response = await api.post(f"/strategies/versions/{v1.id}/duplicate", json={"name": "sample"})
+    assert response.status_code == 409
+
+
+async def test_duplicate_version_not_found(api):
+    response = await api.post(
+        "/strategies/versions/does-not-exist/duplicate", json={"name": "sample_fork"}
+    )
+    assert response.status_code == 404
+
+
+async def test_rename_version(api, service):
+    strategy_versions, _ = service
+    v1 = strategy_versions.save_generated_code(
+        name="sample", code=VALID_CODE, source=CodeSource.AI_GENERATED
+    )
+    response = await api.patch(
+        f"/strategies/versions/{v1.id}/rename", json={"name": "renamed_sample"}
+    )
+    assert response.status_code == 200
+    assert response.json()["name"] == "renamed_sample"
+
+    listed = await api.get("/strategies/versions")
+    (summary,) = listed.json()
+    assert summary["name"] == "renamed_sample"
+
+
+async def test_rename_version_name_conflict(api, service):
+    strategy_versions, _ = service
+    v1 = strategy_versions.save_generated_code(
+        name="sample", code=VALID_CODE, source=CodeSource.AI_GENERATED
+    )
+    strategy_versions.save_generated_code(
+        name="other", code=VALID_CODE, source=CodeSource.AI_GENERATED
+    )
+    response = await api.patch(f"/strategies/versions/{v1.id}/rename", json={"name": "other"})
+    assert response.status_code == 409
+
+
+async def test_rename_version_not_found(api):
+    response = await api.patch(
+        "/strategies/versions/does-not-exist/rename", json={"name": "renamed"}
+    )
+    assert response.status_code == 404

@@ -9,8 +9,17 @@ from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException, Path, Query, Request
 
-from src.strategies.api.schemas import StrategyVersionDetailOut, StrategyVersionOut
-from src.strategies.application.versioning import StrategyValidationError, StrategyVersionService
+from src.strategies.api.schemas import (
+    DuplicateVersionRequest,
+    RenameVersionRequest,
+    StrategyVersionDetailOut,
+    StrategyVersionOut,
+)
+from src.strategies.application.versioning import (
+    StrategyNameConflictError,
+    StrategyValidationError,
+    StrategyVersionService,
+)
 
 router = APIRouter(prefix="/strategies", tags=["strategies"])
 
@@ -84,3 +93,79 @@ async def activate_version(
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     return StrategyVersionOut.from_domain(version)
+
+
+@router.post(
+    "/versions/{version_id}/duplicate",
+    response_model=StrategyVersionOut,
+    summary="Duplicate a strategy version into a new strategy family",
+    description=(
+        "Clones this version's generated code and spec snapshot into a brand-new "
+        "strategy family — new name, version 1, no parent — a fork for retargeting "
+        "(e.g. same logic, different symbol), not a supersession of the original. "
+        "Optionally pass `symbols` to also retarget the clone to different symbols; "
+        "this rewrites the `StrategySpec(symbols=...)` literal in the generated source "
+        "and re-validates it in the sandbox before saving. Never edits configs/app.yaml — "
+        "the engine won't trade the new symbol live until a human adds it there."
+    ),
+    responses={
+        **_VERSION_NOT_FOUND,
+        409: {
+            "description": "The requested new name is already in use by another strategy family."
+        },
+        422: {
+            "description": "The clone (with the symbols override applied, if any) failed "
+            "sandbox validation, or no `symbols=(...)` literal could be found to rewrite."
+        },
+    },
+)
+async def duplicate_version(
+    request: Request,
+    body: DuplicateVersionRequest,
+    version_id: str = Path(description="Version id to duplicate."),
+) -> StrategyVersionOut:
+    service = _service(request)
+    try:
+        duplicated = service.duplicate_version(
+            version_id,
+            new_name=body.name,
+            symbols=tuple(body.symbols) if body.symbols else None,
+        )
+    except StrategyNameConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except StrategyValidationError as exc:
+        raise HTTPException(status_code=422, detail="; ".join(exc.errors)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return StrategyVersionOut.from_domain(duplicated)
+
+
+@router.patch(
+    "/versions/{version_id}/rename",
+    response_model=StrategyVersionOut,
+    summary="Rename a strategy family",
+    description=(
+        "Renames the display name shared by every version of this strategy family "
+        "(not just this one) — updates the stored records only, never the generated "
+        "file's on-disk name or contents."
+    ),
+    responses={
+        **_VERSION_NOT_FOUND,
+        409: {
+            "description": "The requested new name is already in use by another strategy family."
+        },
+    },
+)
+async def rename_version(
+    request: Request,
+    body: RenameVersionRequest,
+    version_id: str = Path(description="Any version id belonging to the family to rename."),
+) -> StrategyVersionOut:
+    service = _service(request)
+    try:
+        renamed = service.rename_family(version_id, body.name)
+    except StrategyNameConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return StrategyVersionOut.from_domain(renamed)

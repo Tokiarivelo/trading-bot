@@ -153,3 +153,51 @@ async def test_reconcile_vanished_publishes_position_closed(journal):
     assert len(published) == 1
     assert published[0].position_id == "7"
     assert published[0].profit == 15.0
+
+
+async def test_reconcile_pending_fill_matches_by_ticket_and_publishes_opened(journal):
+    broker = FakeBroker(open_positions=[_open_position(ticket=5)], close_info={})
+    event_bus = EventBus()
+    published: list[PositionOpened] = []
+
+    async def on_opened(event: PositionOpened) -> None:
+        published.append(event)
+
+    event_bus.subscribe(PositionOpened, on_opened)
+    reconciliation = ReconciliationService(broker=broker, journal=journal, event_bus=event_bus)
+
+    filled = await reconciliation.reconcile_pending_fill("XAUUSD", 5, Side.BUY, 0.1)
+
+    assert filled is True
+    assert len(published) == 1
+    assert published[0].position_id == "5"
+    assert published[0].side == "buy"
+
+
+async def test_reconcile_pending_fill_falls_back_to_side_and_volume_match(journal):
+    # Ticket 5 was the pending order's ticket; the resulting position got a
+    # different ticket (9) but matches side/volume.
+    broker = FakeBroker(open_positions=[_open_position(ticket=9)], close_info={})
+    event_bus = EventBus()
+    published: list[PositionOpened] = []
+
+    async def on_opened(event: PositionOpened) -> None:
+        published.append(event)
+
+    event_bus.subscribe(PositionOpened, on_opened)
+    reconciliation = ReconciliationService(broker=broker, journal=journal, event_bus=event_bus)
+
+    filled = await reconciliation.reconcile_pending_fill("XAUUSD", 5, Side.BUY, 0.1)
+
+    assert filled is True
+    assert published[0].position_id == "9"
+
+
+async def test_reconcile_pending_fill_returns_false_when_no_match(journal):
+    broker = FakeBroker(open_positions=[], close_info={})
+    event_bus = EventBus()
+    reconciliation = ReconciliationService(broker=broker, journal=journal, event_bus=event_bus)
+
+    filled = await reconciliation.reconcile_pending_fill("XAUUSD", 5, Side.BUY, 0.1)
+
+    assert filled is False

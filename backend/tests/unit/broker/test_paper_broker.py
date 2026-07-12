@@ -3,7 +3,13 @@ from datetime import UTC, datetime
 import pytest
 
 from src.broker.adapters.paper import PaperBroker
-from src.broker.domain.trading import OrderRejected, OrderRequest, Side
+from src.broker.domain.trading import (
+    OrderRejected,
+    OrderRequest,
+    OrderType,
+    PendingOrderRequest,
+    Side,
+)
 from src.market_data.domain.models import SymbolInfo
 
 XAUUSD = SymbolInfo(
@@ -141,3 +147,88 @@ async def test_close_at_price_short_uses_explicit_price(broker):
 async def test_close_at_price_unknown_ticket_raises(broker):
     with pytest.raises(OrderRejected):
         await broker.close_at_price(999, 2400.0, datetime(2025, 1, 1, tzinfo=UTC))
+
+
+async def test_place_pending_buy_limit_below_ask_is_accepted(broker):
+    order = await broker.place_pending_order(
+        PendingOrderRequest(
+            symbol="XAUUSD", side=Side.BUY, order_type=OrderType.LIMIT, volume=0.1, price=2395.0
+        )
+    )
+    assert order.ticket > 0
+    assert order.price == 2395.0
+    (listed,) = await broker.get_pending_orders("XAUUSD")
+    assert listed.ticket == order.ticket
+
+
+async def test_place_pending_buy_limit_above_ask_is_rejected(broker):
+    with pytest.raises(OrderRejected):
+        await broker.place_pending_order(
+            PendingOrderRequest(
+                symbol="XAUUSD",
+                side=Side.BUY,
+                order_type=OrderType.LIMIT,
+                volume=0.1,
+                price=2405.0,  # above ask — a limit like this would fill immediately
+            )
+        )
+
+
+async def test_place_pending_sell_stop_above_bid_is_rejected(broker):
+    with pytest.raises(OrderRejected):
+        await broker.place_pending_order(
+            PendingOrderRequest(
+                symbol="XAUUSD",
+                side=Side.SELL,
+                order_type=OrderType.STOP,
+                volume=0.1,
+                price=2405.0,  # above bid — wrong side for a sell-stop breakout
+            )
+        )
+
+
+async def test_modify_pending_order_updates_price(broker):
+    order = await broker.place_pending_order(
+        PendingOrderRequest(
+            symbol="XAUUSD", side=Side.BUY, order_type=OrderType.LIMIT, volume=0.1, price=2395.0
+        )
+    )
+    await broker.modify_pending_order(order.ticket, price=2394.0, sl=None, tp=2415.0)
+
+    (listed,) = await broker.get_pending_orders()
+    assert listed.price == 2394.0
+    assert listed.tp == 2415.0
+
+
+async def test_modify_pending_unknown_ticket_raises(broker):
+    with pytest.raises(OrderRejected):
+        await broker.modify_pending_order(999, price=1.0, sl=None, tp=None)
+
+
+async def test_cancel_pending_order_removes_it(broker):
+    order = await broker.place_pending_order(
+        PendingOrderRequest(
+            symbol="XAUUSD", side=Side.BUY, order_type=OrderType.LIMIT, volume=0.1, price=2395.0
+        )
+    )
+    await broker.cancel_pending_order(order.ticket)
+    assert await broker.get_pending_orders() == []
+
+
+async def test_cancel_pending_unknown_ticket_raises(broker):
+    with pytest.raises(OrderRejected):
+        await broker.cancel_pending_order(999)
+
+
+async def test_get_pending_orders_filters_by_symbol(broker):
+    await broker.place_pending_order(
+        PendingOrderRequest(
+            symbol="XAUUSD", side=Side.BUY, order_type=OrderType.LIMIT, volume=0.1, price=2395.0
+        )
+    )
+    assert len(await broker.get_pending_orders(symbol="XAUUSD")) == 1
+    assert await broker.get_pending_orders(symbol="BTCUSD") == []
+
+
+def test_paper_broker_simulates_pending_fills(broker):
+    assert broker.simulates_pending_fills is True

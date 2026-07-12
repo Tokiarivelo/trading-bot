@@ -8,6 +8,8 @@ import {
   getStrategyVersion,
   type StrategyVersionDetail as VersionDetail,
 } from "@/shared/api/client";
+import { DuplicateVersionForm } from "./DuplicateVersionForm";
+import { RenameVersionInline } from "./RenameVersionInline";
 import { StatusBadge } from "./StatusBadge";
 
 /** Full version detail: spec snapshot, source code, and the activate button
@@ -51,10 +53,15 @@ export function StrategyVersionDetail({ versionId }: { versionId: string }) {
           <h2 className="text-lg font-semibold">
             {version.name} · v{version.version}
           </h2>
+          <RenameVersionInline versionId={version.id} name={version.name} onRenamed={load} />
           <StatusBadge status={version.status} />
         </div>
         <p className="text-sm text-ink-muted">
           {version.source === "ai_generated" ? "AI generated" : "Manual"} · {version.file_path}
+        </p>
+        <p className="text-xs text-ink-muted">
+          Symbols are independent from configs/app.yaml — duplicating or retargeting a bot
+          here never makes the engine trade it live; that's a separate, human-confirmed step.
         </p>
       </div>
 
@@ -67,6 +74,10 @@ export function StrategyVersionDetail({ versionId }: { versionId: string }) {
         >
           {version.status === "active" ? "Active" : busy ? "Activating…" : "Activate"}
         </button>
+        <DuplicateVersionForm
+          versionId={version.id}
+          sourceSymbols={version.spec?.symbols ?? []}
+        />
         {version.parent_version_id && (
           <Link
             href={`/strategies/versions/${version.parent_version_id}`}

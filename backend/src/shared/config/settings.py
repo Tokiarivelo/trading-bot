@@ -19,9 +19,7 @@ CONFIGS_DIR = REPO_ROOT / "configs"
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(
-        env_file=REPO_ROOT / ".env", env_prefix="TB_", extra="ignore"
-    )
+    model_config = SettingsConfigDict(env_file=REPO_ROOT / ".env", env_prefix="TB_", extra="ignore")
 
     database_url: str = "sqlite+aiosqlite:///./data/trading.db"
     gateway_url: str = "http://127.0.0.1:8787"

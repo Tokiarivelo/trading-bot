@@ -45,9 +45,7 @@ def build_m5_candles() -> list[Candle]:
     bars: list[Candle] = []
     # Episode 1: 20-bar flat range, a bullish breakout, then a bar whose high
     # clears the strategy's TP.
-    bars += [
-        m5(i, open=2400.0, high=2401.0, low=2399.0, close=2400.0) for i in range(20)
-    ]
+    bars += [m5(i, open=2400.0, high=2401.0, low=2399.0, close=2400.0) for i in range(20)]
     bars.append(m5(20, open=2401.0, high=2411.0, low=2400.5, close=2410.0))  # BUY breakout
     # Wick reaches the TP (2434.325) but the close stays below bar 20's high
     # (2411) so this bar doesn't *also* look like a fresh breakout signal.
@@ -55,9 +53,7 @@ def build_m5_candles() -> list[Candle]:
 
     # Episode 2: a fresh 20-bar flat range, a bearish breakout, then a bar
     # whose high clears the strategy's SL (stopping the short out at a loss).
-    bars += [
-        m5(22 + i, open=2440.0, high=2441.0, low=2439.0, close=2440.0) for i in range(20)
-    ]
+    bars += [m5(22 + i, open=2440.0, high=2441.0, low=2439.0, close=2440.0) for i in range(20)]
     bars.append(m5(42, open=2439.0, high=2439.5, low=2429.0, close=2430.0))  # SELL breakout
     bars.append(m5(43, open=2430.0, high=2445.0, low=2428.0, close=2432.0))  # clears SL
     return bars

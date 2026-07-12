@@ -33,6 +33,7 @@ from src.broker.application.order_service import OrderService
 from src.broker.application.reconciliation import ReconciliationService
 from src.broker.application.spread_gate import SpreadGate
 from src.broker.ports.trading import BrokerPort
+from src.engine.application.manual_trading import ManualTradeGate
 from src.engine.application.position_manager import PositionManager
 from src.engine.application.risk_manager import RiskManager
 from src.engine.application.trade_loop import TradeEngine
@@ -110,6 +111,7 @@ class Container:
     account: AccountService
     broker: BrokerPort
     order_service: OrderService
+    manual_trade_gate: ManualTradeGate
     reconciliation: ReconciliationService
     health_monitor: GatewayHealthMonitor
     trade_journal: TradeJournalService
@@ -203,9 +205,7 @@ def build_container(settings: Settings | None = None) -> Container:
     alert_adapters: list[AlertPort] = []
     alert_telegram_client: httpx.AsyncClient | None = None
     if alerting_config.telegram_enabled and settings.telegram_bot_token:
-        alert_telegram_client = httpx.AsyncClient(
-            base_url="https://api.telegram.org", timeout=10.0
-        )
+        alert_telegram_client = httpx.AsyncClient(base_url="https://api.telegram.org", timeout=10.0)
         alert_adapters.append(
             TelegramAlertAdapter(
                 alert_telegram_client, settings.telegram_bot_token, settings.telegram_chat_id
@@ -236,6 +236,7 @@ def build_container(settings: Settings | None = None) -> Container:
     engine_config = app_config.get("engine", {})
     risk_caps = load_risk_caps(settings.configs_dir)
     risk_manager = RiskManager(caps=risk_caps, timezone=timezone)
+    manual_trade_gate = ManualTradeGate(order_service=order_service, risk_manager=risk_manager)
 
     reconciliation = ReconciliationService(
         broker=broker, journal=trade_journal, event_bus=event_bus
@@ -244,7 +245,10 @@ def build_container(settings: Settings | None = None) -> Container:
         account=account, reconciliation=reconciliation, event_bus=event_bus
     )
     position_manager = PositionManager(
-        order_service=order_service, market_data=market_data, reconciliation=reconciliation
+        order_service=order_service,
+        market_data=market_data,
+        reconciliation=reconciliation,
+        risk_manager=risk_manager,
     )
 
     strategy_registry = StrategyRegistry()
@@ -359,6 +363,7 @@ def build_container(settings: Settings | None = None) -> Container:
         account=account,
         broker=broker,
         order_service=order_service,
+        manual_trade_gate=manual_trade_gate,
         reconciliation=reconciliation,
         health_monitor=health_monitor,
         trade_journal=trade_journal,
@@ -378,9 +383,7 @@ def _load_normal_skill(symbol: str) -> NormalSkill:
     path = _SKILLS_DIR / f"{symbol.lower()}.yaml"
     with path.open() as f:
         data = yaml.safe_load(f)
-    sessions = tuple(
-        SessionWindow.parse(s["start"], s["end"]) for s in data.get("sessions", [])
-    )
+    sessions = tuple(SessionWindow.parse(s["start"], s["end"]) for s in data.get("sessions", []))
     return NormalSkill(
         name=data["name"],
         symbol=data["symbol"],

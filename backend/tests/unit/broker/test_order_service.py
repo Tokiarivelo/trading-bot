@@ -5,7 +5,14 @@ import pytest
 from src.broker.application.order_service import OrderService
 from src.broker.application.spread_gate import SpreadGate
 from src.broker.domain.symbol_config import SymbolTradingConfig
-from src.broker.domain.trading import ExecutionResult, OrderRejected, Position, Side
+from src.broker.domain.trading import (
+    ExecutionResult,
+    OrderRejected,
+    OrderType,
+    PendingOrder,
+    Position,
+    Side,
+)
 from src.market_data.domain.models import SymbolInfo
 from src.shared.events.bus import EventBus
 from src.shared.events.definitions import PositionClosed, PositionOpened
@@ -52,10 +59,14 @@ class FakeMarketData:
 
 
 class FakeBroker:
-    def __init__(self) -> None:
+    def __init__(self, simulates_pending_fills: bool = True) -> None:
         self.opened: list = []
         self.closed: list = []
         self.modified: list = []
+        self.pending_placed: list = []
+        self.pending_cancelled: list = []
+        self.pending_modified: list = []
+        self._simulates_pending_fills = simulates_pending_fills
 
     async def open_position(self, order):
         self.opened.append(order)
@@ -105,6 +116,34 @@ class FakeBroker:
             )
         ]
 
+    async def place_pending_order(self, order):
+        self.pending_placed.append(order)
+        return PendingOrder(
+            ticket=2,
+            symbol=order.symbol,
+            side=order.side,
+            order_type=order.order_type,
+            volume=order.volume,
+            price=order.price,
+            sl=order.sl,
+            tp=order.tp,
+            placed_time=datetime.now(UTC),
+            comment=order.comment,
+        )
+
+    async def cancel_pending_order(self, ticket):
+        self.pending_cancelled.append(ticket)
+
+    async def modify_pending_order(self, ticket, price, sl, tp):
+        self.pending_modified.append((ticket, price, sl, tp))
+
+    async def get_pending_orders(self, symbol=None):
+        return []
+
+    @property
+    def simulates_pending_fills(self):
+        return self._simulates_pending_fills
+
 
 def make_service(broker=None):
     broker = broker or FakeBroker()
@@ -149,6 +188,16 @@ async def test_spread_veto_blocks_order_and_publishes_nothing():
     assert published == []
 
 
+async def test_open_position_without_sl_tp_skips_rr_check():
+    # sl/tp are optional (F-manual-trading) — omitting either one means
+    # there's no RR to evaluate, so the RR gate can't block it.
+    service, broker, _, published = make_service()
+    result = await service.open_position("XAUUSD", Side.BUY, 0.1)
+    assert result.ticket == 1
+    assert len(broker.opened) == 1
+    assert len(published) == 1
+
+
 async def test_close_position_publishes_event_with_profit():
     service, broker, _, published = make_service()
     result = await service.close_position(1, volume=0.1)
@@ -171,3 +220,30 @@ async def test_get_positions_delegates_to_broker():
     positions = await service.get_positions()
     assert len(positions) == 1
     assert positions[0].symbol == "XAUUSD"
+
+
+async def test_place_pending_order_delegates_to_broker():
+    service, broker, _, _ = make_service()
+    result = await service.place_pending_order(
+        "XAUUSD", Side.BUY, OrderType.LIMIT, 0.1, 2395.0, sl=2390.0, tp=2415.0
+    )
+    assert result.ticket == 2
+    assert len(broker.pending_placed) == 1
+    assert broker.pending_placed[0].price == 2395.0
+
+
+async def test_cancel_pending_order_delegates_to_broker():
+    service, broker, _, _ = make_service()
+    await service.cancel_pending_order(2)
+    assert broker.pending_cancelled == [2]
+
+
+async def test_modify_pending_order_delegates_to_broker():
+    service, broker, _, _ = make_service()
+    await service.modify_pending_order(2, price=2394.0, sl=None, tp=2415.0)
+    assert broker.pending_modified == [(2, 2394.0, None, 2415.0)]
+
+
+async def test_simulates_pending_fills_passes_through_broker_flag():
+    service, _, _, _ = make_service(FakeBroker(simulates_pending_fills=False))
+    assert service.simulates_pending_fills is False

@@ -75,6 +75,29 @@ class StrategyVersionOut(BaseModel):
         )
 
 
+class DuplicateVersionRequest(BaseModel):
+    name: str = Field(
+        description="New strategy family name for the duplicate — must not already be in "
+        "use by another family, or the request is rejected."
+    )
+    symbols: list[str] | None = Field(
+        default=None,
+        description="Optional symbol list to retarget the duplicate to. Rewrites the "
+        "`StrategySpec(symbols=...)` literal in the cloned source and re-validates it in "
+        "the sandbox before saving; the request fails if no such literal can be found. "
+        "Leave unset to duplicate with the same symbols as the source version. This never "
+        "edits configs/app.yaml — the engine won't trade the new symbol live until a human "
+        "adds it there separately.",
+    )
+
+
+class RenameVersionRequest(BaseModel):
+    name: str = Field(
+        description="New display name for this version's strategy family — applies to "
+        "every version that currently shares the family's name, not just this one."
+    )
+
+
 class StrategyVersionDetailOut(StrategyVersionOut):
     code: str = Field(description="The full generated Python source for this version.")
 

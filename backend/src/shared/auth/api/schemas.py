@@ -18,8 +18,9 @@ class LoginResponse(BaseModel):
 
 
 class LogoutResponse(BaseModel):
-    ok: bool = Field(description="Always true; logout is stateless — the client just "
-        "discards the token.")
+    ok: bool = Field(
+        description="Always true; logout is stateless — the client just discards the token."
+    )
 
 
 class AuthStatusOut(BaseModel):

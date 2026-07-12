@@ -33,6 +33,7 @@ export function StrategyDraftList() {
             <thead>
               <tr className="border-b border-line text-left text-xs text-ink-muted">
                 <th className="px-3 py-2 font-medium">Name</th>
+                <th className="px-3 py-2 font-medium">Symbols</th>
                 <th className="px-3 py-2 font-medium">Source PDF</th>
                 <th className="px-3 py-2 font-medium">Status</th>
                 <th className="px-3 py-2 font-medium">Created</th>
@@ -48,6 +49,9 @@ export function StrategyDraftList() {
                     >
                       {d.effective_spec.name}
                     </Link>
+                  </td>
+                  <td className="px-3 py-2 text-ink-muted">
+                    {d.effective_spec.symbols.length ? d.effective_spec.symbols.join(", ") : "—"}
                   </td>
                   <td className="px-3 py-2 text-ink-muted">{d.source_filename}</td>
                   <td className="px-3 py-2">

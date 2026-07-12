@@ -79,15 +79,22 @@ class AccountStatusOut(BaseModel):
 
 
 class OpenOrderRequest(BaseModel):
-    """Market order request. Rejected by the spread/RR gate before it ever
-    reaches the broker if `sl`/`tp` don't clear `configs/symbols/*.yaml`."""
+    """Market order request. Optional `sl`/`tp` can be rejected by the spread
+    gate or (when both are set) the minimum risk/reward gate in
+    `configs/symbols/*.yaml` before the order ever reaches the broker."""
 
     symbol: str = Field(description="Trading symbol, e.g. 'XAUUSD'.")
     side: str = Field(description="Order direction: 'buy' or 'sell'.", examples=["buy"])
     volume: float = Field(gt=0, description="Lot size, > 0.")
-    sl: float | None = Field(default=None, description="Stop loss price. Required by the RR gate.")
+    sl: float | None = Field(
+        default=None,
+        description="Stop loss price, optional. When both sl and tp are set, "
+        "the minimum risk/reward gate applies to them.",
+    )
     tp: float | None = Field(
-        default=None, description="Take profit price. Required by the RR gate."
+        default=None,
+        description="Take profit price, optional. When both sl and tp are set, "
+        "the minimum risk/reward gate applies to them.",
     )
     comment: str = Field(default="", description="Free-text order comment.")
 
@@ -142,3 +149,49 @@ class PositionOut(BaseModel):
     open_time: str = Field(description="Position open time, ISO 8601 UTC.")
     profit: float = Field(description="Current floating P/L.")
     comment: str = ""
+
+
+class PlacePendingOrderRequest(BaseModel):
+    """A resting limit/stop order: fires once price reaches `price`, not
+    immediately. In paper mode it's triggered by the engine's own M5 clock;
+    in live mode MT5 triggers it server-side."""
+
+    symbol: str = Field(description="Trading symbol, e.g. 'XAUUSD'.")
+    side: str = Field(description="Order direction: 'buy' or 'sell'.", examples=["buy"])
+    order_type: str = Field(
+        description="'limit' (fill at a better price than market) or "
+        "'stop' (fill on a breakout through `price`).",
+        examples=["limit"],
+    )
+    volume: float = Field(gt=0, description="Lot size, > 0.")
+    price: float = Field(gt=0, description="Trigger price at which the order activates.")
+    sl: float | None = Field(default=None, description="Stop loss price, applied on fill.")
+    tp: float | None = Field(default=None, description="Take profit price, applied on fill.")
+    comment: str = Field(default="", description="Free-text order comment.")
+
+
+class ModifyPendingOrderRequest(BaseModel):
+    price: float | None = Field(
+        default=None, description="New trigger price, or null to leave unchanged."
+    )
+    sl: float | None = Field(
+        default=None, description="New stop loss price, or null to leave unchanged."
+    )
+    tp: float | None = Field(
+        default=None, description="New take profit price, or null to leave unchanged."
+    )
+
+
+class PendingOrderOut(BaseModel):
+    """A resting limit/stop order not yet filled."""
+
+    ticket: int = Field(description="Broker order ticket.")
+    symbol: str = Field(description="Trading symbol, e.g. 'XAUUSD'.")
+    side: str = Field(description="'buy' or 'sell'.")
+    order_type: str = Field(description="'limit' or 'stop'.")
+    volume: float = Field(description="Lot size.")
+    price: float = Field(description="Trigger price.")
+    sl: float | None = Field(description="Stop loss price, applied on fill.")
+    tp: float | None = Field(description="Take profit price, applied on fill.")
+    placed_time: str = Field(description="Placement time, ISO 8601 UTC.")
+    comment: str = Field(default="", description="Free-text order comment.")

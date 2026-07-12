@@ -50,9 +50,7 @@ class BacktestBookkeeper:
         self._clock = clock
         self._open: dict[str, _OpenLeg] = {}
         self.trades: list[BacktestTrade] = []
-        self.equity_curve: list[EquityPoint] = [
-            EquityPoint(time=clock(), balance=starting_balance)
-        ]
+        self.equity_curve: list[EquityPoint] = [EquityPoint(time=clock(), balance=starting_balance)]
 
     async def status(self) -> dict[str, Any]:
         return {"account": {"balance": self.balance}}

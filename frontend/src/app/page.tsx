@@ -7,71 +7,168 @@ import { ChartPanel } from "@/features/chart/ChartPanel";
 import { SymbolPicker } from "@/features/chart/SymbolPicker";
 import { EngineControlPanel } from "@/features/engine/EngineControlPanel";
 import { ActiveNewsWindowsSummary } from "@/features/news/ActiveNewsWindowsSummary";
+import { TradePanel } from "@/features/trading/TradePanel";
+import { useTrading } from "@/features/trading/useTrading";
 import { getAppConfig, getHealth, type AppConfig } from "@/shared/api/client";
 
 const EXTRA_SYMBOLS_KEY = "tb.extraSymbols";
+const FAVORITE_SYMBOLS_KEY = "tb.favoriteSymbols";
+const FAVORITES_MIGRATED_KEY = "tb.favoritesMigrated";
+const LAST_SYMBOL_KEY = "tb.lastSymbol";
 const SYMBOL_QUERY_KEY = "symbol";
+// Last-resort fallback when nothing else (URL, last-viewed, favorites,
+// engine config) can resolve an initial symbol — e.g. the very first load
+// with the backend unreachable. Not used as the nav bar's default chip set
+// anymore — see favoriteSymbols below.
 const DEFAULT_SYMBOLS = ["XAUUSD", "XAGUSD", "BTCUSD"];
+
+function readJsonList(key: string): string[] {
+  try {
+    const stored = localStorage.getItem(key);
+    return stored ? JSON.parse(stored) : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeJsonList(key: string, value: string[]) {
+  try {
+    localStorage.setItem(key, JSON.stringify(value));
+  } catch {
+    // Ignore blocked/full localStorage — favorites/extras just won't persist.
+  }
+}
 
 export default function Home() {
   const [backendUp, setBackendUp] = useState<boolean | null>(null);
   const [config, setConfig] = useState<AppConfig | null>(null);
-  const [symbol, setSymbol] = useState("XAUUSD");
+  const [symbol, setSymbol] = useState<string | null>(null);
   const [extraSymbols, setExtraSymbols] = useState<string[]>([]);
+  const [favoriteSymbols, setFavoriteSymbols] = useState<string[]>([]);
+  // ChartPanel needs a symbol string even while the real one is still
+  // resolving on mount (see the effect below) — the empty-string placeholder
+  // is never rendered since ChartPanel itself is gated on `symbol` below.
+  const trading = useTrading(symbol ?? "");
 
-  // Restore whatever was selected before a refresh: `?symbol=` wins over the
-  // default, and if it's not a configured symbol it's re-added to the
-  // browsed-extras list so it still shows as a chip (and its chart/live
-  // stream can resume — see SymbolPicker/ChartPanel).
+  // Resolve the symbol to open on load — `?symbol=` wins over the last one
+  // viewed (`tb.lastSymbol`), which wins over the first favorite, which wins
+  // over the first engine-configured symbol. Nothing here is hardcoded to
+  // XAUUSD: DEFAULT_SYMBOLS only kicks in if the backend is unreachable *and*
+  // there's no favorite/last-viewed symbol yet.
   useEffect(() => {
     getHealth()
       .then(() => setBackendUp(true))
       .catch(() => setBackendUp(false));
-    getAppConfig().then(setConfig).catch(() => {});
 
-    let storedExtras: string[] = [];
-    try {
-      const stored = localStorage.getItem(EXTRA_SYMBOLS_KEY);
-      if (stored) storedExtras = JSON.parse(stored);
-    } catch {
-      // Ignore malformed/blocked localStorage — just start with no extras.
-    }
+    const storedExtras = readJsonList(EXTRA_SYMBOLS_KEY);
+    let storedFavorites = readJsonList(FAVORITE_SYMBOLS_KEY);
+    const migrated = localStorage.getItem(FAVORITES_MIGRATED_KEY) === "1";
 
     const urlSymbol = new URLSearchParams(window.location.search).get(SYMBOL_QUERY_KEY);
-    if (urlSymbol && !DEFAULT_SYMBOLS.includes(urlSymbol) && !storedExtras.includes(urlSymbol)) {
-      storedExtras = [...storedExtras, urlSymbol];
-      localStorage.setItem(EXTRA_SYMBOLS_KEY, JSON.stringify(storedExtras));
+    let lastSymbol: string | null = null;
+    try {
+      lastSymbol = localStorage.getItem(LAST_SYMBOL_KEY);
+    } catch {
+      // Ignore blocked localStorage.
     }
+    const resolved = urlSymbol ?? lastSymbol;
+
     setExtraSymbols(storedExtras);
-    if (urlSymbol) setSymbol(urlSymbol);
+    setFavoriteSymbols(storedFavorites);
+
+    getAppConfig()
+      .then((cfg) => {
+        setConfig(cfg);
+        const engineSymbols = cfg.symbols ?? DEFAULT_SYMBOLS;
+
+        // One-time migration: the nav bar used to be seeded implicitly from
+        // configuredSymbols — carry that over into favorites so existing
+        // users don't lose their nav bar contents now that it's user-owned.
+        if (!migrated) {
+          storedFavorites = Array.from(new Set([...storedFavorites, ...engineSymbols]));
+          writeJsonList(FAVORITE_SYMBOLS_KEY, storedFavorites);
+          localStorage.setItem(FAVORITES_MIGRATED_KEY, "1");
+          setFavoriteSymbols(storedFavorites);
+        }
+
+        const initial = resolved ?? storedFavorites[0] ?? engineSymbols[0] ?? DEFAULT_SYMBOLS[0];
+        if (
+          initial &&
+          !engineSymbols.includes(initial) &&
+          !storedFavorites.includes(initial) &&
+          !storedExtras.includes(initial)
+        ) {
+          const updatedExtras = [...storedExtras, initial];
+          writeJsonList(EXTRA_SYMBOLS_KEY, updatedExtras);
+          setExtraSymbols(updatedExtras);
+        }
+        setSymbol((prev) => prev ?? initial);
+      })
+      .catch(() => {
+        const initial = resolved ?? storedFavorites[0] ?? DEFAULT_SYMBOLS[0];
+        setSymbol((prev) => prev ?? initial);
+      });
   }, []);
 
-  // Keep `?symbol=` in sync so a page refresh (or a shared/bookmarked link)
-  // resumes the same chart. `replaceState` avoids piling up history entries.
+  // Keep `?symbol=` and `tb.lastSymbol` in sync so a refresh (or a
+  // bookmarked/bare link) resumes the same chart even if the query string
+  // gets dropped.
   useEffect(() => {
+    if (!symbol) return;
     const url = new URL(window.location.href);
     url.searchParams.set(SYMBOL_QUERY_KEY, symbol);
     window.history.replaceState(null, "", url);
+    try {
+      localStorage.setItem(LAST_SYMBOL_KEY, symbol);
+    } catch {
+      // Ignore blocked localStorage.
+    }
   }, [symbol]);
 
   const configuredSymbols = config?.symbols ?? DEFAULT_SYMBOLS;
 
   function addExtraSymbol(sym: string) {
-    if (configuredSymbols.includes(sym) || extraSymbols.includes(sym)) {
+    if (favoriteSymbols.includes(sym) || extraSymbols.includes(sym)) {
       setSymbol(sym);
       return;
     }
     const updated = [...extraSymbols, sym];
     setExtraSymbols(updated);
-    localStorage.setItem(EXTRA_SYMBOLS_KEY, JSON.stringify(updated));
+    writeJsonList(EXTRA_SYMBOLS_KEY, updated);
     setSymbol(sym);
   }
 
   function removeExtraSymbol(sym: string) {
     const updated = extraSymbols.filter((s) => s !== sym);
     setExtraSymbols(updated);
-    localStorage.setItem(EXTRA_SYMBOLS_KEY, JSON.stringify(updated));
-    if (symbol === sym) setSymbol(configuredSymbols[0]);
+    writeJsonList(EXTRA_SYMBOLS_KEY, updated);
+    if (symbol === sym) setSymbol(favoriteSymbols[0] ?? configuredSymbols[0]);
+  }
+
+  function toggleFavorite(sym: string) {
+    if (favoriteSymbols.includes(sym)) {
+      const updated = favoriteSymbols.filter((s) => s !== sym);
+      setFavoriteSymbols(updated);
+      writeJsonList(FAVORITE_SYMBOLS_KEY, updated);
+      // Unfavoriting the symbol currently on screen shouldn't make its chip
+      // disappear outright — keep it around as a browsed/transient extra.
+      if (symbol === sym && !extraSymbols.includes(sym)) {
+        const updatedExtras = [...extraSymbols, sym];
+        setExtraSymbols(updatedExtras);
+        writeJsonList(EXTRA_SYMBOLS_KEY, updatedExtras);
+      }
+    } else {
+      const updated = [...favoriteSymbols, sym];
+      setFavoriteSymbols(updated);
+      writeJsonList(FAVORITE_SYMBOLS_KEY, updated);
+      // Favorited symbols are shown via the favorites chip list — drop the
+      // duplicate from the transient extras list, if it was there.
+      if (extraSymbols.includes(sym)) {
+        const updatedExtras = extraSymbols.filter((s) => s !== sym);
+        setExtraSymbols(updatedExtras);
+        writeJsonList(EXTRA_SYMBOLS_KEY, updatedExtras);
+      }
+    }
   }
 
   return (
@@ -88,16 +185,34 @@ export default function Home() {
           </span>
         )}
         <nav className="flex items-center gap-1">
-          {configuredSymbols.map((s) => (
-            <button
+          {favoriteSymbols.map((s) => (
+            <span
               key={s}
-              className={`cursor-pointer rounded border px-3 py-1 ${
+              className={`flex items-center gap-1 rounded border px-2 py-1 ${
                 s === symbol ? "border-accent text-accent" : "border-line text-ink"
               }`}
-              onClick={() => setSymbol(s)}
+              title={
+                configuredSymbols.includes(s)
+                  ? "Engine-traded symbol (configs/app.yaml)"
+                  : "Favorited symbol"
+              }
             >
-              {s}
-            </button>
+              <button className="cursor-pointer" onClick={() => setSymbol(s)}>
+                {s}
+              </button>
+              {configuredSymbols.includes(s) && (
+                <span className="text-[10px] text-accent" title="Traded live by the engine">
+                  ●
+                </span>
+              )}
+              <button
+                className="cursor-pointer text-accent hover:text-ink-muted"
+                onClick={() => toggleFavorite(s)}
+                title={`Unpin ${s}`}
+              >
+                ★
+              </button>
+            </span>
           ))}
           {extraSymbols.map((s) => (
             <span
@@ -105,10 +220,17 @@ export default function Home() {
               className={`flex items-center gap-1 rounded border px-2 py-1 ${
                 s === symbol ? "border-accent text-accent" : "border-line text-ink-muted"
               }`}
-              title="Browsed from the broker's catalog — not a configured trading symbol"
+              title="Browsed from the broker's catalog — not pinned to the nav bar"
             >
               <button className="cursor-pointer" onClick={() => setSymbol(s)}>
                 {s}
+              </button>
+              <button
+                className="cursor-pointer text-ink-muted hover:text-accent"
+                onClick={() => toggleFavorite(s)}
+                title={`Pin ${s}`}
+              >
+                ☆
               </button>
               <button
                 className="cursor-pointer text-ink-muted hover:text-err"
@@ -119,7 +241,11 @@ export default function Home() {
               </button>
             </span>
           ))}
-          <SymbolPicker onAdd={addExtraSymbol} />
+          <SymbolPicker
+            onAdd={addExtraSymbol}
+            favorites={favoriteSymbols}
+            onToggleFavorite={toggleFavorite}
+          />
         </nav>
         <Link href="/strategies" className="ml-auto text-sm text-ink-muted hover:text-accent">
           Strategies
@@ -146,12 +272,23 @@ export default function Home() {
       </header>
 
       <main className="flex min-h-0 flex-1">
-        <ChartPanel symbol={symbol} />
+        {symbol ? (
+          <ChartPanel symbol={symbol} trading={trading} />
+        ) : (
+          <div className="flex flex-1 items-center justify-center rounded-md border border-line bg-panel text-sm text-ink-muted">
+            Loading chart…
+          </div>
+        )}
         <aside className="flex w-[300px] flex-col gap-2 overflow-y-auto border-l border-line p-2">
           <AccountPanel />
           <Panel>
             <EngineControlPanel />
           </Panel>
+          {symbol && (
+            <Panel>
+              <TradePanel symbol={symbol} trading={trading} />
+            </Panel>
+          )}
           <Panel>Journal (Phase 3)</Panel>
           <Panel>
             <Link href="/strategies" className="text-accent hover:underline">

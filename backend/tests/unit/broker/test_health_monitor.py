@@ -39,7 +39,9 @@ async def test_first_check_only_establishes_baseline_no_event_no_action():
     event_bus = EventBus()
     published, handler = _collector()
     event_bus.subscribe(GatewayHealthChanged, handler)
-    monitor = GatewayHealthMonitor(account=account, reconciliation=reconciliation, event_bus=event_bus)
+    monitor = GatewayHealthMonitor(
+        account=account, reconciliation=reconciliation, event_bus=event_bus
+    )
 
     await monitor._check_once()
 
@@ -59,7 +61,9 @@ async def test_down_to_up_transition_reconnects_and_reconciles_once():
     event_bus = EventBus()
     published, handler = _collector()
     event_bus.subscribe(GatewayHealthChanged, handler)
-    monitor = GatewayHealthMonitor(account=account, reconciliation=reconciliation, event_bus=event_bus)
+    monitor = GatewayHealthMonitor(
+        account=account, reconciliation=reconciliation, event_bus=event_bus
+    )
 
     await monitor._check_once()  # baseline: down
     await monitor._check_once()  # transition: down -> up
@@ -82,7 +86,9 @@ async def test_repeated_up_polls_do_not_repeat_reconnect_or_reconcile():
     event_bus = EventBus()
     published, handler = _collector()
     event_bus.subscribe(GatewayHealthChanged, handler)
-    monitor = GatewayHealthMonitor(account=account, reconciliation=reconciliation, event_bus=event_bus)
+    monitor = GatewayHealthMonitor(
+        account=account, reconciliation=reconciliation, event_bus=event_bus
+    )
 
     await monitor._check_once()
     await monitor._check_once()
@@ -104,7 +110,9 @@ async def test_up_to_down_transition_publishes_event_but_does_not_reconnect():
     event_bus = EventBus()
     published, handler = _collector()
     event_bus.subscribe(GatewayHealthChanged, handler)
-    monitor = GatewayHealthMonitor(account=account, reconciliation=reconciliation, event_bus=event_bus)
+    monitor = GatewayHealthMonitor(
+        account=account, reconciliation=reconciliation, event_bus=event_bus
+    )
 
     await monitor._check_once()
     await monitor._check_once()

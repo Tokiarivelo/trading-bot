@@ -92,9 +92,7 @@ async def test_no_match_means_no_active_window():
 async def test_active_window_only_within_before_after_bounds():
     event = NewsEvent(name="Non-Farm Payrolls", time=NOW, impact=ImpactLevel.HIGH)
     tracked = (TrackedEvent(name="Non-Farm Payrolls", impact=ImpactLevel.HIGH, skill="nfp"),)
-    specs = {
-        "nfp": WindowSpec(skill_name="nfp", before_min=30, after_min=60, symbols=("XAUUSD",))
-    }
+    specs = {"nfp": WindowSpec(skill_name="nfp", before_min=30, after_min=60, symbols=("XAUUSD",))}
     service = make_service([event], tracked, specs)
     await service.refresh(NOW)
 

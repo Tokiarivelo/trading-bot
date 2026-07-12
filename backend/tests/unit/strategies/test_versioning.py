@@ -10,7 +10,11 @@ from sqlalchemy.orm import sessionmaker
 
 from src.shared.db.base import Base
 from src.strategies.adapters.repository import StrategyVersionRepository
-from src.strategies.application.versioning import StrategyValidationError, StrategyVersionService
+from src.strategies.application.versioning import (
+    StrategyNameConflictError,
+    StrategyValidationError,
+    StrategyVersionService,
+)
 from src.strategies.domain.versioning import CodeSource, VersionStatus
 from src.strategies.registry import StrategyRegistry
 
@@ -99,6 +103,94 @@ def test_activate_unknown_version_raises(service):
     svc, _ = service
     with pytest.raises(ValueError, match="no strategy version"):
         svc.activate_version("does-not-exist")
+
+
+def test_duplicate_version_forks_into_new_family(service):
+    svc, _ = service
+    v1 = svc.save_generated_code(name="sample", code=VALID_CODE, source=CodeSource.AI_GENERATED)
+    dup = svc.duplicate_version(v1.id, new_name="sample_fork")
+    assert dup.name == "sample_fork"
+    assert dup.version == 1
+    assert dup.parent_version_id is None
+    assert dup.id != v1.id
+    assert svc.get_code(dup) == VALID_CODE
+    # The original is untouched — duplicate is a fork, not a supersession.
+    assert svc.get_version(v1.id).name == "sample"
+
+
+def test_duplicate_version_rejects_name_already_in_use(service):
+    svc, _ = service
+    v1 = svc.save_generated_code(name="sample", code=VALID_CODE, source=CodeSource.AI_GENERATED)
+    with pytest.raises(StrategyNameConflictError):
+        svc.duplicate_version(v1.id, new_name="sample")
+
+
+def test_duplicate_version_unknown_version_raises(service):
+    svc, _ = service
+    with pytest.raises(ValueError, match="no strategy version"):
+        svc.duplicate_version("does-not-exist", new_name="sample_fork")
+
+
+def test_duplicate_version_with_symbols_override_rewrites_and_revalidates(service):
+    svc, _ = service
+    v1 = svc.save_generated_code(name="sample", code=VALID_CODE, source=CodeSource.AI_GENERATED)
+    dup = svc.duplicate_version(v1.id, new_name="sample_fork", symbols=("BTCUSD", "XAGUSD"))
+    assert 'symbols=("BTCUSD", "XAGUSD")' in svc.get_code(dup)
+
+
+NO_SYMBOLS_LITERAL_CODE = """
+from src.strategies.domain.models import Direction, MarketContext, Signal, StrategySpec
+
+SYMBOLS = ("XAUUSD",)
+
+
+class Sample:
+    def __init__(self):
+        self.spec = StrategySpec(
+            name="sample", version=1, symbols=SYMBOLS, entry_timeframe="M5",
+            confirmation_timeframes=(), params={},
+        )
+
+    def evaluate(self, ctx: MarketContext):
+        return None
+"""
+
+
+def test_duplicate_version_symbols_override_fails_without_literal(service):
+    svc, _ = service
+    v1 = svc.save_generated_code(
+        name="sample", code=NO_SYMBOLS_LITERAL_CODE, source=CodeSource.AI_GENERATED
+    )
+    with pytest.raises(StrategyValidationError):
+        svc.duplicate_version(v1.id, new_name="sample_fork", symbols=("BTCUSD",))
+
+
+def test_rename_family_updates_every_version(service):
+    svc, _ = service
+    v1 = svc.save_generated_code(name="sample", code=VALID_CODE, source=CodeSource.AI_GENERATED)
+    svc.activate_version(v1.id)
+    v2 = svc.save_generated_code(name="sample", code=VALID_CODE, source=CodeSource.AI_GENERATED)
+
+    renamed = svc.rename_family(v1.id, "renamed_sample")
+    assert renamed.name == "renamed_sample"
+    assert svc.get_version(v1.id).name == "renamed_sample"
+    assert svc.get_version(v2.id).name == "renamed_sample"
+    # get_code must still resolve from the stored file_path, not the new name.
+    assert svc.get_code(svc.get_version(v1.id)) == VALID_CODE
+
+
+def test_rename_family_rejects_name_already_in_use(service):
+    svc, _ = service
+    v1 = svc.save_generated_code(name="sample", code=VALID_CODE, source=CodeSource.AI_GENERATED)
+    svc.save_generated_code(name="other", code=VALID_CODE, source=CodeSource.AI_GENERATED)
+    with pytest.raises(StrategyNameConflictError):
+        svc.rename_family(v1.id, "other")
+
+
+def test_rename_family_unknown_version_raises(service):
+    svc, _ = service
+    with pytest.raises(ValueError, match="no strategy version"):
+        svc.rename_family("does-not-exist", "renamed")
 
 
 def test_load_active_into_registry_restores_after_restart(service, tmp_path):

@@ -88,6 +88,7 @@ export const api = {
   patch: <T>(path: string, body: unknown) =>
     request<T>(path, { method: "PATCH", body: JSON.stringify(body) }),
   postForm: <T>(path: string, form: FormData) => requestForm<T>(path, "POST", form),
+  delete: <T>(path: string) => request<T>(path, { method: "DELETE" }),
 };
 
 // ── Auth (§11) ───────────────────────────────────────────────────────────────
@@ -367,6 +368,21 @@ export const getStrategyVersion = (id: string) =>
   api.get<StrategyVersionDetail>(`/strategies/versions/${encodeURIComponent(id)}`);
 export const activateStrategyVersion = (id: string) =>
   api.post<StrategyVersionSummary>(`/strategies/versions/${encodeURIComponent(id)}/activate`);
+/** Clones a version's code into a new, independent strategy family (fork,
+ * not a new version of the same family). Pass `symbols` to also retarget
+ * the clone — rewrites the generated code's `StrategySpec(symbols=...)` and
+ * re-validates it in the sandbox; omit to keep the source's symbols. */
+export const duplicateStrategyVersion = (id: string, body: { name: string; symbols?: string[] }) =>
+  api.post<StrategyVersionSummary>(
+    `/strategies/versions/${encodeURIComponent(id)}/duplicate`,
+    body,
+  );
+/** Renames the display name shared by every version of this strategy
+ * family, not just this one. */
+export const renameStrategyVersion = (id: string, name: string) =>
+  api.patch<StrategyVersionSummary>(`/strategies/versions/${encodeURIComponent(id)}/rename`, {
+    name,
+  });
 
 // ── AI: 10-trade self-refinement loop (Phase 7, F5) ─────────────────────────
 
@@ -458,3 +474,92 @@ export interface EngineStatus {
 export const getEngineStatus = () => api.get<EngineStatus>("/engine/status");
 export const killSwitch = () => api.post<EngineStatus>("/engine/kill");
 export const resumeEngine = () => api.post<EngineStatus>("/engine/resume");
+
+// ── Broker: manual trading (chart buttons, click-to-trade, draggable SL/TP) ─
+
+export type OrderSide = "buy" | "sell";
+export type PendingOrderType = "limit" | "stop";
+
+export interface OpenOrderRequest {
+  symbol: string;
+  side: OrderSide;
+  volume: number;
+  sl?: number | null;
+  tp?: number | null;
+  comment?: string;
+}
+
+export interface ExecutionResultOut {
+  ticket: number;
+  symbol: string;
+  side: OrderSide;
+  volume: number;
+  price: number;
+  sl: number | null;
+  tp: number | null;
+  time: string;
+  spread_points: number;
+  comment: string;
+  profit: number | null;
+}
+
+export interface PositionOut {
+  ticket: number;
+  symbol: string;
+  side: OrderSide;
+  volume: number;
+  open_price: number;
+  sl: number | null;
+  tp: number | null;
+  open_time: string;
+  profit: number;
+  comment: string;
+}
+
+export interface PlacePendingOrderRequest {
+  symbol: string;
+  side: OrderSide;
+  order_type: PendingOrderType;
+  volume: number;
+  price: number;
+  sl?: number | null;
+  tp?: number | null;
+  comment?: string;
+}
+
+export interface PendingOrderOut {
+  ticket: number;
+  symbol: string;
+  side: OrderSide;
+  order_type: PendingOrderType;
+  volume: number;
+  price: number;
+  sl: number | null;
+  tp: number | null;
+  placed_time: string;
+  comment: string;
+}
+
+export const openOrder = (body: OpenOrderRequest) =>
+  api.post<ExecutionResultOut>("/broker/orders", body);
+export const closePosition = (ticket: number, volume?: number) =>
+  api.post<ExecutionResultOut>(`/broker/positions/${ticket}/close`, volume ? { volume } : undefined);
+export const modifyPosition = (ticket: number, sl: number | null, tp: number | null) =>
+  api.post<{ status: string }>(`/broker/positions/${ticket}/modify`, { sl, tp });
+export const getPositions = (symbol?: string) =>
+  api.get<PositionOut[]>(`/broker/positions${symbol ? `?symbol=${encodeURIComponent(symbol)}` : ""}`);
+
+export const placePendingOrder = (body: PlacePendingOrderRequest) =>
+  api.post<PendingOrderOut>("/broker/orders/pending", body);
+export const getPendingOrders = (symbol?: string) =>
+  api.get<PendingOrderOut[]>(
+    `/broker/orders/pending${symbol ? `?symbol=${encodeURIComponent(symbol)}` : ""}`,
+  );
+export const modifyPendingOrder = (
+  ticket: number,
+  price: number | null,
+  sl: number | null,
+  tp: number | null,
+) => api.post<{ status: string }>(`/broker/orders/pending/${ticket}/modify`, { price, sl, tp });
+export const cancelPendingOrder = (ticket: number) =>
+  api.delete<{ status: string }>(`/broker/orders/pending/${ticket}`);

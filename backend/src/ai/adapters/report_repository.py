@@ -53,9 +53,7 @@ class RefinementProposalRepository:
         return _proposal_to_domain(row) if row else None
 
     def list_by_report(self, report_id: str) -> list[RefinementProposal]:
-        query = select(RefinementProposalRow).where(
-            RefinementProposalRow.report_id == report_id
-        )
+        query = select(RefinementProposalRow).where(RefinementProposalRow.report_id == report_id)
         with self._session_factory() as session:
             rows = session.scalars(query).all()
         return [_proposal_to_domain(row) for row in rows]

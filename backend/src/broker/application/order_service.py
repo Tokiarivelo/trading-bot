@@ -11,7 +11,16 @@ import logging
 from datetime import datetime
 
 from src.broker.application.spread_gate import SpreadGate
-from src.broker.domain.trading import ExecutionResult, OrderRejected, OrderRequest, Position, Side
+from src.broker.domain.trading import (
+    ExecutionResult,
+    OrderRejected,
+    OrderRequest,
+    OrderType,
+    PendingOrder,
+    PendingOrderRequest,
+    Position,
+    Side,
+)
 from src.broker.ports.trading import BrokerPort
 from src.market_data.ports.market_data import MarketDataPort
 from src.shared.events.bus import EventBus
@@ -51,8 +60,8 @@ class OrderService:
         (`SkillDecision.max_spread_points`, §6.6)."""
         info = await self._market_data.get_symbol_info(symbol)
         reference_price = info.ask if side is Side.BUY else info.bid
-        sl_distance = abs(reference_price - sl) if sl is not None else 0.0
-        tp_distance = abs(tp - reference_price) if tp is not None else 0.0
+        sl_distance = abs(reference_price - sl) if sl is not None else None
+        tp_distance = abs(tp - reference_price) if tp is not None else None
 
         veto = self._spread_gate.check(
             symbol,
@@ -155,3 +164,55 @@ class OrderService:
 
     async def get_positions(self, symbol: str | None = None) -> list[Position]:
         return await self._broker.get_positions(symbol)
+
+    async def place_pending_order(
+        self,
+        symbol: str,
+        side: Side,
+        order_type: OrderType,
+        volume: float,
+        price: float,
+        sl: float | None = None,
+        tp: float | None = None,
+        comment: str = "",
+    ) -> PendingOrder:
+        order = PendingOrderRequest(
+            symbol=symbol,
+            side=side,
+            order_type=order_type,
+            volume=volume,
+            price=price,
+            sl=sl,
+            tp=tp,
+            comment=comment,
+        )
+        result = await self._broker.place_pending_order(order)
+        logger.info(
+            "pending order placed: ticket=%d %s %s %s %.2f lots @ %.5f sl=%s tp=%s",
+            result.ticket,
+            side.value,
+            order_type.value,
+            symbol,
+            volume,
+            price,
+            sl,
+            tp,
+        )
+        return result
+
+    async def cancel_pending_order(self, ticket: int) -> None:
+        await self._broker.cancel_pending_order(ticket)
+        logger.info("pending order cancelled: ticket=%d", ticket)
+
+    async def modify_pending_order(
+        self, ticket: int, price: float | None, sl: float | None, tp: float | None
+    ) -> None:
+        await self._broker.modify_pending_order(ticket, price, sl, tp)
+        logger.info("pending order modified: ticket=%d price=%s sl=%s tp=%s", ticket, price, sl, tp)
+
+    async def get_pending_orders(self, symbol: str | None = None) -> list[PendingOrder]:
+        return await self._broker.get_pending_orders(symbol)
+
+    @property
+    def simulates_pending_fills(self) -> bool:
+        return self._broker.simulates_pending_fills

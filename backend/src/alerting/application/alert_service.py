@@ -61,9 +61,7 @@ class AlertService:
         body = f"verdict={event.verdict}"
         if event.proposal_id:
             body += f" proposal={event.proposal_id}"
-        await self._port.send(
-            AlertMessage(title=f"AI review completed: {event.symbol}", body=body)
-        )
+        await self._port.send(AlertMessage(title=f"AI review completed: {event.symbol}", body=body))
 
     async def on_gateway_health_changed(self, event: GatewayHealthChanged) -> None:
         if not self._config.events.gateway_disconnect:
@@ -73,10 +71,7 @@ class AlertService:
                 AlertMessage(title="Gateway reconnected", body="MT5 terminal connected again.")
             )
         else:
+            body = f"gateway_up={event.gateway_up} terminal_connected={event.terminal_connected}"
             await self._port.send(
-                AlertMessage(
-                    title="Gateway disconnected",
-                    body=f"gateway_up={event.gateway_up} terminal_connected={event.terminal_connected}",
-                    level=AlertLevel.CRITICAL,
-                )
+                AlertMessage(title="Gateway disconnected", body=body, level=AlertLevel.CRITICAL)
             )

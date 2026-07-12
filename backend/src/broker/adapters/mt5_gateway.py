@@ -19,6 +19,9 @@ from src.broker.domain.trading import (
     ExecutionResult,
     OrderRejected,
     OrderRequest,
+    OrderType,
+    PendingOrder,
+    PendingOrderRequest,
     Position,
     Side,
 )
@@ -139,6 +142,55 @@ class GatewayBroker:
             profit=payload["profit"],
         )
 
+    async def place_pending_order(self, order: PendingOrderRequest) -> PendingOrder:
+        payload = await self._post(
+            "/orders/pending",
+            {
+                "symbol": order.symbol,
+                "side": order.side.value,
+                "order_type": order.order_type.value,
+                "volume": order.volume,
+                "price": order.price,
+                "sl": order.sl,
+                "tp": order.tp,
+                "comment": order.comment,
+            },
+        )
+        return _to_pending_order(payload)
+
+    async def cancel_pending_order(self, ticket: int) -> None:
+        try:
+            response = await self._client.delete(f"/orders/pending/{ticket}")
+        except httpx.HTTPError as exc:
+            raise BrokerUnavailable(f"gateway unreachable: {exc}") from exc
+        if response.status_code == 502:
+            raise OrderRejected(response.json().get("detail", "cancel rejected"))
+        if response.status_code != 200:
+            raise BrokerUnavailable(
+                f"gateway /orders/pending/{ticket} -> {response.status_code}: {response.text}"
+            )
+
+    async def modify_pending_order(
+        self, ticket: int, price: float | None, sl: float | None, tp: float | None
+    ) -> None:
+        await self._post(f"/orders/pending/{ticket}/modify", {"price": price, "sl": sl, "tp": tp})
+
+    async def get_pending_orders(self, symbol: str | None = None) -> list[PendingOrder]:
+        params = {"symbol": symbol} if symbol else {}
+        try:
+            response = await self._client.get("/orders/pending", params=params)
+        except httpx.HTTPError as exc:
+            raise BrokerUnavailable(f"gateway unreachable: {exc}") from exc
+        if response.status_code != 200:
+            raise BrokerUnavailable(
+                f"gateway /orders/pending -> {response.status_code}: {response.text}"
+            )
+        return [_to_pending_order(o) for o in response.json()]
+
+    @property
+    def simulates_pending_fills(self) -> bool:
+        return False
+
     async def _post(self, path: str, json: dict[str, Any]) -> dict[str, Any]:
         try:
             response = await self._client.post(path, json=json)
@@ -164,4 +216,19 @@ def _to_execution_result(payload: dict[str, Any]) -> ExecutionResult:
         spread_points=payload["spread_points"],
         comment=payload["comment"],
         profit=payload["profit"],
+    )
+
+
+def _to_pending_order(payload: dict[str, Any]) -> PendingOrder:
+    return PendingOrder(
+        ticket=payload["ticket"],
+        symbol=payload["symbol"],
+        side=Side(payload["side"]),
+        order_type=OrderType(payload["order_type"]),
+        volume=payload["volume"],
+        price=payload["price"],
+        sl=payload["sl"],
+        tp=payload["tp"],
+        placed_time=datetime.fromtimestamp(payload["placed_time"], tz=UTC),
+        comment=payload["comment"],
     )

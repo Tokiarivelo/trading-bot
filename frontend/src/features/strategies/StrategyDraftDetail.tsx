@@ -7,20 +7,23 @@ import {
   approveStrategyDraft,
   generateStrategyCode,
   getStrategyDraft,
+  getStrategyVersions,
   rejectStrategyDraft,
   updateStrategyDraftSpec,
   type ExtractedStrategySpec,
   type GeneratedCode,
   type StrategyDraft,
 } from "@/shared/api/client";
+import { RenameVersionInline } from "./RenameVersionInline";
 import { StatusBadge } from "./StatusBadge";
 import { StrategyVersionList } from "./StrategyVersionList";
+import { SymbolMultiSelect } from "./SymbolMultiSelect";
 
 const EDITABLE_STATUSES = new Set(["pending_review", "approved"]);
 
 interface SpecFormState {
   name: string;
-  symbols: string;
+  symbols: string[];
   entry_timeframe: string;
   confirmation_timeframes: string;
   indicators: string;
@@ -39,6 +42,10 @@ export function StrategyDraftDetail({ draftId }: { draftId: string }) {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [generated, setGenerated] = useState<GeneratedCode | null>(null);
+  // Once code is generated, the "current name" lives on the strategy version
+  // record (renamable independently of this draft) rather than the spec —
+  // resolved lazily below so the header's rename pencil targets the right id.
+  const [latestVersion, setLatestVersion] = useState<{ id: string; name: string } | null>(null);
 
   useEffect(() => {
     getStrategyDraft(draftId)
@@ -48,6 +55,15 @@ export function StrategyDraftDetail({ draftId }: { draftId: string }) {
       })
       .catch(() => setError("draft not found"));
   }, [draftId]);
+
+  useEffect(() => {
+    if (draft?.status !== "code_generated") return;
+    getStrategyVersions(draft.effective_spec.name)
+      .then((versions) => {
+        if (versions.length > 0) setLatestVersion({ id: versions[0].id, name: versions[0].name });
+      })
+      .catch(() => {});
+  }, [draft?.status, draft?.effective_spec.name]);
 
   if (error && draft === null) return <p className="p-4 text-sm text-err">{error}</p>;
   if (draft === null || form === null) {
@@ -108,7 +124,14 @@ export function StrategyDraftDetail({ draftId }: { draftId: string }) {
           ← All strategies
         </Link>
         <div className="mt-1 flex items-center gap-2">
-          <h2 className="text-lg font-semibold">{draft.effective_spec.name}</h2>
+          <h2 className="text-lg font-semibold">{latestVersion?.name ?? draft.effective_spec.name}</h2>
+          {latestVersion && (
+            <RenameVersionInline
+              versionId={latestVersion.id}
+              name={latestVersion.name}
+              onRenamed={(newName) => setLatestVersion({ ...latestVersion, name: newName })}
+            />
+          )}
           <StatusBadge status={draft.status} />
         </div>
         <p className="text-sm text-ink-muted">from {draft.source_filename}</p>
@@ -124,13 +147,16 @@ export function StrategyDraftDetail({ draftId }: { draftId: string }) {
           />
         </Field>
         <div className="grid gap-3 sm:grid-cols-2">
-          <Field label="Symbols (comma-separated)">
-            <input
-              className={inputCls}
+          <Field label="Symbols">
+            <SymbolMultiSelect
               value={form.symbols}
+              onChange={(symbols) => setForm({ ...form, symbols })}
               disabled={!editable}
-              onChange={(e) => setForm({ ...form, symbols: e.target.value })}
             />
+            <p className="text-xs text-ink-muted">
+              Independent from configs/app.yaml — generating a bot for a new symbol doesn&apos;t
+              make the engine trade it live; adding it there is a separate, human-confirmed step.
+            </p>
           </Field>
           <Field label="Confirmation timeframes (comma-separated)">
             <input
@@ -271,7 +297,7 @@ export function StrategyDraftDetail({ draftId }: { draftId: string }) {
 function toFormState(spec: ExtractedStrategySpec): SpecFormState {
   return {
     name: spec.name,
-    symbols: spec.symbols.join(", "),
+    symbols: spec.symbols,
     entry_timeframe: spec.entry_timeframe,
     confirmation_timeframes: spec.confirmation_timeframes.join(", "),
     indicators: spec.indicators.join(", "),
@@ -291,7 +317,7 @@ function fromFormState(form: SpecFormState): ExtractedStrategySpec | null {
   }
   return {
     name: form.name.trim(),
-    symbols: splitList(form.symbols),
+    symbols: form.symbols,
     entry_timeframe: form.entry_timeframe.trim(),
     confirmation_timeframes: splitList(form.confirmation_timeframes),
     indicators: splitList(form.indicators),

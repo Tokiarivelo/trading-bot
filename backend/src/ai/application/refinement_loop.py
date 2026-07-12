@@ -186,9 +186,7 @@ class RefinementLoopService:
         )
         await self._publish_completed(event.symbol, report.verdict.value, proposal.id)
 
-    async def _publish_completed(
-        self, symbol: str, verdict: str, proposal_id: str | None
-    ) -> None:
+    async def _publish_completed(self, symbol: str, verdict: str, proposal_id: str | None) -> None:
         if self._event_bus is None:
             return
         await self._event_bus.publish(

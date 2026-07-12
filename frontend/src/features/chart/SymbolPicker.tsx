@@ -15,7 +15,15 @@ const DEBOUNCE_MS = 250;
 const MIN_QUERY_LENGTH = 2;
 const PAGE_SIZE = 20;
 
-export function SymbolPicker({ onAdd }: { onAdd: (symbol: string) => void }) {
+export function SymbolPicker({
+  onAdd,
+  favorites,
+  onToggleFavorite,
+}: {
+  onAdd: (symbol: string) => void;
+  favorites: string[];
+  onToggleFavorite: (symbol: string) => void;
+}) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [page, setPage] = useState(0);
@@ -131,21 +139,34 @@ export function SymbolPicker({ onAdd }: { onAdd: (symbol: string) => void }) {
               <p className="px-1 py-1 text-xs text-ink-muted">No matching symbols.</p>
             ) : (
               <ul className="flex flex-col">
-                {results.map((s) => (
-                  <li key={s.name}>
-                    <button
-                      className="w-full cursor-pointer rounded px-2 py-1.5 text-left text-sm hover:bg-bg"
-                      onClick={() => select(s)}
-                      type="button"
-                    >
-                      <div className="flex items-center justify-between gap-2">
-                        <span className="font-medium">{s.name}</span>
-                        <span className="text-xs text-ink-muted">{s.path}</span>
-                      </div>
-                      <div className="truncate text-xs text-ink-muted">{s.description}</div>
-                    </button>
-                  </li>
-                ))}
+                {results.map((s) => {
+                  const isFavorite = favorites.includes(s.name);
+                  return (
+                    <li key={s.name} className="flex items-center gap-1 rounded hover:bg-bg">
+                      <button
+                        className="flex-1 cursor-pointer rounded px-2 py-1.5 text-left text-sm"
+                        onClick={() => select(s)}
+                        type="button"
+                      >
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="font-medium">{s.name}</span>
+                          <span className="text-xs text-ink-muted">{s.path}</span>
+                        </div>
+                        <div className="truncate text-xs text-ink-muted">{s.description}</div>
+                      </button>
+                      <button
+                        className={`cursor-pointer px-1.5 text-sm ${
+                          isFavorite ? "text-accent" : "text-ink-muted hover:text-accent"
+                        }`}
+                        onClick={() => onToggleFavorite(s.name)}
+                        type="button"
+                        title={isFavorite ? `Unpin ${s.name}` : `Pin ${s.name}`}
+                      >
+                        {isFavorite ? "★" : "☆"}
+                      </button>
+                    </li>
+                  );
+                })}
               </ul>
             )}
           </div>

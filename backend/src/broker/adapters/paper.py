@@ -13,6 +13,9 @@ from src.broker.domain.trading import (
     ExecutionResult,
     OrderRejected,
     OrderRequest,
+    OrderType,
+    PendingOrder,
+    PendingOrderRequest,
     Position,
     Side,
 )
@@ -38,6 +41,7 @@ class PaperBroker:
     def __init__(self, market_data: MarketDataPort) -> None:
         self._market_data = market_data
         self._positions: dict[int, _OpenPosition] = {}
+        self._pending: dict[int, PendingOrder] = {}
         self._tickets = itertools.count(1)
 
     async def open_position(self, order: OrderRequest) -> ExecutionResult:
@@ -187,3 +191,75 @@ class PaperBroker:
         # closing them behind our back, so reconciliation never needs this
         # in paper mode (live GatewayBroker is the only adapter it matters for).
         return None
+
+    async def place_pending_order(self, order: PendingOrderRequest) -> PendingOrder:
+        info = await self._market_data.get_symbol_info(order.symbol)
+        if not _valid_pending_side(order.side, order.order_type, order.price, info.bid, info.ask):
+            raise OrderRejected(
+                f"invalid stops: {order.side.value} {order.order_type.value} at {order.price} "
+                f"is on the wrong side of the current market (bid={info.bid} ask={info.ask})"
+            )
+        ticket = next(self._tickets)
+        pending = PendingOrder(
+            ticket=ticket,
+            symbol=order.symbol,
+            side=order.side,
+            order_type=order.order_type,
+            volume=order.volume,
+            price=order.price,
+            sl=order.sl,
+            tp=order.tp,
+            placed_time=datetime.now(UTC),
+            comment=order.comment,
+        )
+        self._pending[ticket] = pending
+        logger.info(
+            "paper pending order placed: ticket=%d %s %s %s %.2f lots @ %.5f sl=%s tp=%s",
+            ticket,
+            order.side.value,
+            order.order_type.value,
+            order.symbol,
+            order.volume,
+            order.price,
+            order.sl,
+            order.tp,
+        )
+        return pending
+
+    async def cancel_pending_order(self, ticket: int) -> None:
+        if ticket not in self._pending:
+            raise OrderRejected(f"no pending paper order with ticket {ticket}")
+        del self._pending[ticket]
+        logger.info("paper pending order cancelled: ticket=%d", ticket)
+
+    async def modify_pending_order(
+        self, ticket: int, price: float | None, sl: float | None, tp: float | None
+    ) -> None:
+        pending = self._pending.get(ticket)
+        if pending is None:
+            raise OrderRejected(f"no pending paper order with ticket {ticket}")
+        self._pending[ticket] = replace(
+            pending,
+            price=price if price is not None else pending.price,
+            sl=sl if sl is not None else pending.sl,
+            tp=tp if tp is not None else pending.tp,
+        )
+
+    async def get_pending_orders(self, symbol: str | None = None) -> list[PendingOrder]:
+        return [p for p in self._pending.values() if symbol is None or p.symbol == symbol]
+
+    @property
+    def simulates_pending_fills(self) -> bool:
+        return True
+
+
+def _valid_pending_side(
+    side: Side, order_type: OrderType, price: float, bid: float, ask: float
+) -> bool:
+    if side is Side.BUY and order_type is OrderType.LIMIT:
+        return price < ask
+    if side is Side.SELL and order_type is OrderType.LIMIT:
+        return price > bid
+    if side is Side.BUY and order_type is OrderType.STOP:
+        return price > ask
+    return price < bid  # SELL + STOP

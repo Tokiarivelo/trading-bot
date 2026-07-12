@@ -161,9 +161,7 @@ class TradeEngine:
         timeframes = (self._entry_timeframe, *self._confirmation_timeframes)
         try:
             candles_by_tf = {
-                tf: await self._market_data.get_candles(
-                    symbol, Timeframe(tf), self._context_bars
-                )
+                tf: await self._market_data.get_candles(symbol, Timeframe(tf), self._context_bars)
                 for tf in timeframes
             }
             info = await self._market_data.get_symbol_info(symbol)
