@@ -11,8 +11,22 @@
   --color-accent: #2962ff;
   --color-ok: #26a69a;
   --color-err: #ef5350;
+  /* Distinct from --color-ok/--color-err (reserved for TP/SL) so a running
+     position's entry line reads as its own thing on the chart. */
+  --color-buy: #42a5f5;
+  --color-sell: #ff9800;
 }
 
 :root {
   color-scheme: dark;
+  --color-bg: #131722;
+  --color-panel: #1e222d;
+  --color-line: #2a2e39;
+  --color-ink: #d1d4dc;
+  --color-ink-muted: #5d606b;
+  --color-accent: #2962ff;
+  --color-ok: #26a69a;
+  --color-err: #ef5350;
+  --color-buy: #42a5f5;
+  --color-sell: #ff9800;
 }

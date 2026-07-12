@@ -3,12 +3,21 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from typing import Literal
 
-from sqlalchemy import func, select
+from sqlalchemy import ColumnElement, func, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from src.journal.adapters.orm import TradeRow
 from src.journal.domain.models import CandleSnapshot, TradeRecord
+
+Outcome = Literal["win", "loss", "breakeven", "open"]
+OrderField = Literal["open_time", "close_time", "profit"]
+_ORDER_COLUMNS: dict[OrderField, ColumnElement] = {
+    "open_time": TradeRow.open_time,
+    "close_time": TradeRow.close_time,
+    "profit": TradeRow.profit,
+}
 
 
 class JournalRepository:
@@ -78,6 +87,62 @@ class JournalRepository:
         )
         with self._session_factory() as session:
             return session.scalar(query) or 0
+
+    def search(
+        self,
+        *,
+        symbol: str | None = None,
+        side: str | None = None,
+        strategy_version: str | None = None,
+        skill: str | None = None,
+        outcome: Outcome | None = None,
+        open_from: int | None = None,
+        open_to: int | None = None,
+        close_from: int | None = None,
+        close_to: int | None = None,
+        order_by: OrderField = "open_time",
+        order_dir: Literal["asc", "desc"] = "desc",
+        limit: int = 50,
+        offset: int = 0,
+    ) -> tuple[list[TradeRecord], int]:
+        """Filterable, paginated trade history query (any symbol, any field
+        combination) — backs `GET /journal/history`."""
+        filters: list[ColumnElement] = []
+        if symbol is not None:
+            filters.append(TradeRow.symbol == symbol)
+        if side is not None:
+            filters.append(TradeRow.side == side)
+        if strategy_version is not None:
+            filters.append(TradeRow.strategy_version == strategy_version)
+        if skill is not None:
+            filters.append(TradeRow.skill == skill)
+        if outcome == "open":
+            filters.append(TradeRow.close_time.is_(None))
+        elif outcome == "win":
+            filters.extend([TradeRow.close_time.is_not(None), TradeRow.profit > 0])
+        elif outcome == "loss":
+            filters.extend([TradeRow.close_time.is_not(None), TradeRow.profit < 0])
+        elif outcome == "breakeven":
+            filters.extend([TradeRow.close_time.is_not(None), TradeRow.profit == 0])
+        if open_from is not None:
+            filters.append(TradeRow.open_time >= open_from)
+        if open_to is not None:
+            filters.append(TradeRow.open_time <= open_to)
+        if close_from is not None:
+            filters.append(TradeRow.close_time >= close_from)
+        if close_to is not None:
+            filters.append(TradeRow.close_time <= close_to)
+
+        count_query = select(func.count()).select_from(TradeRow).where(*filters)
+        order_column = _ORDER_COLUMNS[order_by]
+        order_clause = order_column.desc() if order_dir == "desc" else order_column.asc()
+        page_query = (
+            select(TradeRow).where(*filters).order_by(order_clause).limit(limit).offset(offset)
+        )
+        with self._session_factory() as session:
+            total = session.scalar(count_query) or 0
+            rows = session.scalars(page_query).all()
+        return [_to_domain(row) for row in rows], total
 
 
 def _snapshot_to_json(snapshot: tuple[CandleSnapshot, ...]) -> list[dict]:

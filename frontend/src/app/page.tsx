@@ -253,6 +253,9 @@ export default function Home() {
         <Link href="/backtest" className="text-sm text-ink-muted hover:text-accent">
           Backtests
         </Link>
+        <Link href="/history" className="text-sm text-ink-muted hover:text-accent">
+          History
+        </Link>
         <Link href="/ai-reports" className="text-sm text-ink-muted hover:text-accent">
           AI Reports
         </Link>

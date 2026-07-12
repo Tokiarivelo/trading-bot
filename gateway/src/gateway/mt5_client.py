@@ -29,6 +29,45 @@ class Mt5Error(Exception):
 
 _TIMEFRAME_SECONDS = {"M1": 60, "M5": 300, "H1": 3600, "H4": 14400, "D1": 86400}
 
+# MT5 trade-server return codes worth explaining in plain English — `_last_error()`
+# reports the last *IPC* error, which is frequently "[1] Success" even when the
+# trade itself was rejected (the rejection reason is the retcode alone), so a raw
+# number here is otherwise a dead end without looking it up.
+_RETCODE_MESSAGES = {
+    10004: "requote — price moved, resend the order",
+    10006: "request rejected by the dealer",
+    10013: "invalid request",
+    10014: "invalid volume",
+    10015: "invalid price",
+    10016: "invalid stops — sl/tp too close to price (see symbol's stops_level)",
+    10017: "trading disabled for this account/symbol",
+    10018: "market closed",
+    10019: "not enough money",
+    10020: "price changed — resend the order",
+    10021: "no quotes to process the request",
+    10024: "too many requests — rate limited",
+    10026: "autotrading disabled by the trade server",
+    10027: "autotrading disabled in the terminal — enable the 'AutoTrading' "
+    "button in MT5, or Tools > Options > Expert Advisors > Allow algorithmic trading",
+    10028: "account locked",
+    10030: "unsupported order filling mode",
+    10031: "no connection to the trade server",
+    10033: "pending-orders limit reached",
+    10034: "trading volume limit reached",
+    10040: "open-positions limit reached",
+    10042: "only long positions allowed for this symbol",
+    10043: "only short positions allowed for this symbol",
+    10044: "only closing existing positions is allowed for this symbol",
+    10046: "hedging prohibited — an opposite position already exists",
+}
+
+
+def _retcode_reason(code: int | None) -> str:
+    if code is None:
+        return ""
+    known = _RETCODE_MESSAGES.get(code)
+    return f" — {known}" if known else ""
+
 
 def _last_error() -> str:
     code, message = mt5.last_error()
@@ -190,6 +229,7 @@ class Mt5Client:
             raise Mt5Error(f"symbol_info_tick({symbol}) failed: {_last_error()}")
         order_type = mt5.ORDER_TYPE_BUY if side == "buy" else mt5.ORDER_TYPE_SELL
         price = tick.ask if side == "buy" else tick.bid
+        volume = self._normalize_volume(symbol, volume)
         request = {
             "action": mt5.TRADE_ACTION_DEAL,
             "symbol": symbol,
@@ -201,12 +241,15 @@ class Mt5Client:
             "deviation": 20,
             "comment": comment,
             "type_time": mt5.ORDER_TIME_GTC,
-            "type_filling": mt5.ORDER_FILLING_IOC,
+            "type_filling": self._filling_type(symbol),
         }
         result = mt5.order_send(request)
         if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
             code = result.retcode if result is not None else None
-            raise Mt5Error(f"order_send({symbol},{side}) rejected: retcode={code} {_last_error()}")
+            raise Mt5Error(
+                f"order_send({symbol},{side}) rejected: retcode={code}{_retcode_reason(code)} "
+                f"{_last_error()}"
+            )
         return {
             "ticket": int(result.order),
             "symbol": symbol,
@@ -241,7 +284,10 @@ class Mt5Client:
         result = mt5.order_send(request)
         if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
             code = result.retcode if result is not None else None
-            raise Mt5Error(f"position_modify({ticket}) rejected: retcode={code} {_last_error()}")
+            raise Mt5Error(
+                f"position_modify({ticket}) rejected: retcode={code}{_retcode_reason(code)} "
+                f"{_last_error()}"
+            )
 
     def position_close(self, ticket: int, volume: float | None = None) -> dict[str, Any]:
         self._require_connection()
@@ -260,7 +306,7 @@ class Mt5Client:
             "price": tick.bid if is_buy else tick.ask,
             "deviation": 20,
             "type_time": mt5.ORDER_TIME_GTC,
-            "type_filling": mt5.ORDER_FILLING_IOC,
+            "type_filling": self._filling_type(position.symbol),
         }
         # Realized profit isn't returned by order_send; approximate it from the
         # position's floating profit at the moment of the close request.
@@ -268,7 +314,10 @@ class Mt5Client:
         result = mt5.order_send(request)
         if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
             code = result.retcode if result is not None else None
-            raise Mt5Error(f"position_close({ticket}) rejected: retcode={code} {_last_error()}")
+            raise Mt5Error(
+                f"position_close({ticket}) rejected: retcode={code}{_retcode_reason(code)} "
+                f"{_last_error()}"
+            )
         return {
             "ticket": ticket,
             "symbol": position.symbol,
@@ -332,6 +381,7 @@ class Mt5Client:
             ("buy", "stop"): mt5.ORDER_TYPE_BUY_STOP,
             ("sell", "stop"): mt5.ORDER_TYPE_SELL_STOP,
         }[(side, order_type)]
+        volume = self._normalize_volume(symbol, volume)
         request = {
             "action": mt5.TRADE_ACTION_PENDING,
             "symbol": symbol,
@@ -342,14 +392,14 @@ class Mt5Client:
             "tp": tp or 0.0,
             "comment": comment,
             "type_time": mt5.ORDER_TIME_GTC,
-            "type_filling": mt5.ORDER_FILLING_IOC,
+            "type_filling": self._filling_type(symbol),
         }
         result = mt5.order_send(request)
         if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
             code = result.retcode if result is not None else None
             raise Mt5Error(
                 f"place_pending_order({symbol},{side},{order_type}) rejected: "
-                f"retcode={code} {_last_error()}"
+                f"retcode={code}{_retcode_reason(code)} {_last_error()}"
             )
         return {
             "ticket": int(result.order),
@@ -378,13 +428,14 @@ class Mt5Client:
             "tp": tp if tp is not None else order.tp,
             "type": order.type,
             "type_time": mt5.ORDER_TIME_GTC,
-            "type_filling": mt5.ORDER_FILLING_IOC,
+            "type_filling": self._filling_type(order.symbol),
         }
         result = mt5.order_send(request)
         if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
             code = result.retcode if result is not None else None
             raise Mt5Error(
-                f"modify_pending_order({ticket}) rejected: retcode={code} {_last_error()}"
+                f"modify_pending_order({ticket}) rejected: retcode={code}{_retcode_reason(code)} "
+                f"{_last_error()}"
             )
 
     def cancel_pending_order(self, ticket: int) -> None:
@@ -394,7 +445,8 @@ class Mt5Client:
         if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
             code = result.retcode if result is not None else None
             raise Mt5Error(
-                f"cancel_pending_order({ticket}) rejected: retcode={code} {_last_error()}"
+                f"cancel_pending_order({ticket}) rejected: retcode={code}{_retcode_reason(code)} "
+                f"{_last_error()}"
             )
 
     def pending_orders(self, symbol: str | None = None) -> list[dict[str, Any]]:
@@ -430,6 +482,43 @@ class Mt5Client:
             "placed_time": int(o.time_setup),
             "comment": o.comment,
         }
+
+    # ENUM_SYMBOL_TRADE_EXECUTION filling-mode bitmask (MQL5 docs) — the
+    # MetaTrader5 Python package never wraps these as SYMBOL_FILLING_* module
+    # attributes (only the unrelated ORDER_FILLING_* enum), so referencing
+    # `mt5.SYMBOL_FILLING_FOK` raises AttributeError on every real terminal.
+    _SYMBOL_FILLING_FOK = 1
+    _SYMBOL_FILLING_IOC = 2
+
+    def _filling_type(self, symbol: str) -> int:
+        """The order-filling mode a symbol actually accepts. Hardcoding IOC
+        rejects with retcode=10030 (unsupported filling mode) on brokers/
+        symbols — commonly synthetic indices — that only support FOK or
+        neither, in which case RETURN (no explicit filling type, exchange-
+        style execution) is the only option left. `symbol_info().filling_mode`
+        is a bitmask of what's supported (`SYMBOL_FILLING_*`, distinct from
+        the `ORDER_FILLING_*` enum a request's `type_filling` expects)."""
+        info = mt5.symbol_info(symbol)
+        mode = info.filling_mode if info is not None else 0
+        if mode & self._SYMBOL_FILLING_FOK:
+            return mt5.ORDER_FILLING_FOK
+        if mode & self._SYMBOL_FILLING_IOC:
+            return mt5.ORDER_FILLING_IOC
+        return mt5.ORDER_FILLING_RETURN
+
+    def _normalize_volume(self, symbol: str, volume: float) -> float:
+        """Clamp/snap a requested lot size to what the symbol actually
+        accepts. Synthetic-index symbols (e.g. Deriv's Boom/Crash) commonly
+        have a `volume_min`/`volume_step` far from the 0.01 forex default —
+        sending a smaller or off-step volume gets retcode=10014 (invalid
+        volume) rather than an auto-adjustment, so callers that don't know a
+        symbol's step get bumped up to its minimum instead of rejected."""
+        info = mt5.symbol_info(symbol)
+        if info is None:
+            return volume
+        step = info.volume_step or volume
+        snapped = round(round(volume / step) * step, 8)
+        return min(max(snapped, info.volume_min), info.volume_max)
 
     def _get_pending_order(self, ticket: int) -> Any:
         rows = mt5.orders_get(ticket=ticket)

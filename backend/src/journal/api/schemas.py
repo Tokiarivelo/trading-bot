@@ -31,3 +31,12 @@ class TradeRecordOut(BaseModel):
     skill: str | None = Field(
         default=None, description="Bot skill that selected this trade, e.g. 'normal/xauusd'."
     )
+
+
+class TradeHistoryPage(BaseModel):
+    """One page of the filtered trade history (`GET /journal/history`)."""
+
+    items: list[TradeRecordOut] = Field(description="Trades matching the filters, one page.")
+    total: int = Field(
+        description="Total number of trades matching the filters, across all pages."
+    )

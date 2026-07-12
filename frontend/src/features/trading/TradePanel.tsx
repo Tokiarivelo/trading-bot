@@ -202,6 +202,14 @@ export function TradePanel({ symbol, trading }: { symbol: string; trading: Tradi
     await run(() => trading.cancelPending(ticket));
   }
 
+  async function handleModifyPosition(ticket: number, sl: number | null, tp: number | null) {
+    await run(() => trading.modifyPositionSlTp(ticket, sl, tp));
+  }
+
+  async function handleModifyPending(ticket: number, sl: number | null, tp: number | null) {
+    await run(() => trading.modifyPending(ticket, null, sl, tp));
+  }
+
   return (
     <div className="flex flex-col gap-3 text-sm">
       {error && <p className="text-xs text-err">{error}</p>}
@@ -301,44 +309,33 @@ export function TradePanel({ symbol, trading }: { symbol: string; trading: Tradi
       </div>
 
       {trading.positions.length > 0 && (
-        <div className="flex flex-col gap-1 border-t border-line pt-2">
-          <span className="text-xs text-ink-muted">Open positions</span>
+        <div className="flex flex-col gap-2 border-t border-line pt-2">
+          <span className="text-xs text-ink-muted">
+            Open positions — drag SL/TP lines on the chart or set them here
+          </span>
           {trading.positions.map((p) => (
-            <div key={p.ticket} className="flex items-center justify-between gap-1 text-xs">
-              <span className={p.side === "buy" ? "text-ok" : "text-err"}>
-                {p.side} {p.volume} @ {p.open_price}
-              </span>
-              <span className={p.profit >= 0 ? "text-ok" : "text-err"}>{p.profit.toFixed(2)}</span>
-              <button
-                onClick={() => handleClose(p.ticket)}
-                disabled={busy}
-                className="cursor-pointer text-ink-muted hover:text-err"
-                title={`Close #${p.ticket}`}
-              >
-                ×
-              </button>
-            </div>
+            <PositionRow
+              key={p.ticket}
+              position={p}
+              busy={busy}
+              onModify={(sl, tp) => handleModifyPosition(p.ticket, sl, tp)}
+              onClose={() => handleClose(p.ticket)}
+            />
           ))}
         </div>
       )}
 
       {trading.pendingOrders.length > 0 && (
-        <div className="flex flex-col gap-1 border-t border-line pt-2">
+        <div className="flex flex-col gap-2 border-t border-line pt-2">
           <span className="text-xs text-ink-muted">Pending orders</span>
           {trading.pendingOrders.map((o) => (
-            <div key={o.ticket} className="flex items-center justify-between gap-1 text-xs">
-              <span className={o.side === "buy" ? "text-ok" : "text-err"}>
-                {o.side} {o.order_type} {o.volume} @ {o.price}
-              </span>
-              <button
-                onClick={() => handleCancel(o.ticket)}
-                disabled={busy}
-                className="cursor-pointer text-ink-muted hover:text-err"
-                title={`Cancel #${o.ticket}`}
-              >
-                ×
-              </button>
-            </div>
+            <PendingOrderRow
+              key={o.ticket}
+              order={o}
+              busy={busy}
+              onModify={(sl, tp) => handleModifyPending(o.ticket, sl, tp)}
+              onCancel={() => handleCancel(o.ticket)}
+            />
           ))}
         </div>
       )}

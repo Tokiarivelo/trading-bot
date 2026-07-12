@@ -60,7 +60,14 @@ Portes individuelles : `make lint`, `make test`, `make build-frontend` — voir
 
 ## Modèle de sécurité (à ne jamais affaiblir)
 
-- Tout démarre en **mode papier** (`configs/app.yaml : mode: paper`).
+- Tout démarre en **mode papier** (`configs/app.yaml : mode: paper`) — les
+  ordres sont simulés en mémoire et n'atteignent jamais MT5. Passer à
+  `mode: live` envoie de vrais ordres via la passerelle vers votre compte
+  réel ; avant cela, le bouton **AutoTrading** du terminal MT5 (barre
+  d'outils, ou Outils → Options → Expert Advisors → « Autoriser le trading
+  algorithmique ») doit être activé, sinon chaque ordre est rejeté avec le
+  code retour `10027` — voir
+  [`gateway/README.fr.md`](gateway/README.fr.md#configuration-du-terminal-les-deux-options).
 - Les plafonds de risque vivent dans `configs/risk.yaml` et appartiennent à
   l'utilisateur — l'IA et le code généré ne les modifient jamais.
 - Les stratégies générées par IA tournent en sandbox : pas d'E/S, pas de

@@ -56,7 +56,13 @@ Individual gates: `make lint`, `make test`, `make build-frontend` — see `make 
 
 ## Safety model (do not weaken)
 
-- Everything starts in **paper mode** (`configs/app.yaml: mode: paper`).
+- Everything starts in **paper mode** (`configs/app.yaml: mode: paper`) —
+  orders are simulated in-memory and never reach MT5. Switching to
+  `mode: live` sends real orders through the gateway to your real account;
+  before doing that, the MT5 terminal's **AutoTrading** button (toolbar, or
+  Tools → Options → Expert Advisors → "Allow algorithmic trading") must be
+  enabled, or every order is rejected with retcode `10027` — see
+  [`gateway/README.md`](gateway/README.md#terminal-configuration-both-options).
 - Risk caps live in `configs/risk.yaml` and are user-owned — AI/generated code
   never writes them.
 - AI-generated strategies run sandboxed: no I/O, no network, no broker access.

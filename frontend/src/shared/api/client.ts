@@ -237,6 +237,62 @@ export interface TradeMarker {
 export const getTradeMarkers = (symbol: string) =>
   api.get<TradeMarker[]>(`/journal/markers?symbol=${encodeURIComponent(symbol)}`);
 
+// ── Journal (trade history, filterable/paginated) ───────────────────────────
+
+export interface TradeHistoryItem {
+  id: string;
+  symbol: string;
+  side: "buy" | "sell";
+  volume: number;
+  open_price: number;
+  open_time: number; // epoch seconds UTC
+  sl: number | null;
+  tp: number | null;
+  close_price: number | null;
+  close_time: number | null; // epoch seconds UTC, null while open
+  profit: number | null;
+  comment: string;
+  strategy_version: string | null;
+  skill: string | null;
+}
+
+export interface TradeHistoryPage {
+  items: TradeHistoryItem[];
+  total: number; // count matching the filters, before limit/offset
+}
+
+export type TradeOutcome = "win" | "loss" | "breakeven" | "open";
+export type TradeHistoryOrderBy = "open_time" | "close_time" | "profit";
+export type SortDir = "asc" | "desc";
+
+export interface TradeHistoryFilters {
+  symbol?: string;
+  side?: OrderSide;
+  strategy_version?: string;
+  skill?: string;
+  outcome?: TradeOutcome;
+  open_from?: number; // epoch seconds UTC
+  open_to?: number;
+  close_from?: number;
+  close_to?: number;
+  order_by?: TradeHistoryOrderBy;
+  order_dir?: SortDir;
+  limit?: number;
+  offset?: number;
+}
+
+/** Filtered, paginated trade history across any symbol — backs the trade
+ * history page's filter and group-by controls. Unlike `getTradeMarkers`
+ * (single symbol, chart overlay only), this supports the full filter set. */
+export const getTradeHistory = (filters: TradeHistoryFilters = {}) => {
+  const params = new URLSearchParams();
+  for (const [key, value] of Object.entries(filters)) {
+    if (value !== undefined && value !== "") params.set(key, String(value));
+  }
+  const qs = params.toString();
+  return api.get<TradeHistoryPage>(`/journal/history${qs ? `?${qs}` : ""}`);
+};
+
 // ── Backtest (Phase 5 reports) ──────────────────────────────────────────────
 
 export interface BacktestTrade {

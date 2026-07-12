@@ -175,6 +175,19 @@ def test_order_opens_a_position(api):
     assert positions[0]["sl"] == 2390.0
 
 
+def test_order_bumps_volume_up_to_symbol_minimum(api, fake_mt5):
+    # A synthetic index (e.g. Deriv's Boom/Crash) with a coarser minimum
+    # than the forex-sized default rejected with retcode=10014 (invalid
+    # volume) before order_send clamped/snapped to what the symbol accepts.
+    fake_mt5.volume_min = 0.2
+    fake_mt5.volume_max = 50.0
+    fake_mt5.volume_step = 0.2
+    _login(api)
+    response = api.post("/order", json={"symbol": "Boom 1000 Index", "side": "buy", "volume": 0.01})
+    assert response.status_code == 200
+    assert response.json()["volume"] == 0.2
+
+
 def test_order_rejects_unknown_side(api):
     _login(api)
     response = api.post("/order", json={"symbol": "XAUUSD", "side": "long", "volume": 0.1})
@@ -186,6 +199,9 @@ def test_order_maps_rejection_to_502(api, fake_mt5):
     fake_mt5.reject_order = True
     response = api.post("/order", json={"symbol": "XAUUSD", "side": "buy", "volume": 0.1})
     assert response.status_code == 502
+    # FakeMt5.reject_order returns retcode=10004 (requote) — the message
+    # should decode it in plain English, not just the bare number.
+    assert "requote" in response.json()["detail"]
 
 
 def test_close_position_returns_realized_profit(api):

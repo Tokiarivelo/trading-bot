@@ -10,8 +10,9 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import replace
+from typing import Literal
 
-from src.journal.adapters.repository import JournalRepository
+from src.journal.adapters.repository import JournalRepository, OrderField, Outcome
 from src.journal.domain.models import TradeRecord
 from src.journal.ports.market_context import MarketContextPort
 from src.shared.events.bus import EventBus
@@ -110,3 +111,37 @@ class TradeJournalService:
 
     async def get_open_trades(self, symbol: str | None = None) -> list[TradeRecord]:
         return await asyncio.to_thread(self._repository.get_open, symbol)
+
+    async def search_trades(
+        self,
+        *,
+        symbol: str | None = None,
+        side: str | None = None,
+        strategy_version: str | None = None,
+        skill: str | None = None,
+        outcome: Outcome | None = None,
+        open_from: int | None = None,
+        open_to: int | None = None,
+        close_from: int | None = None,
+        close_to: int | None = None,
+        order_by: OrderField = "open_time",
+        order_dir: Literal["asc", "desc"] = "desc",
+        limit: int = 50,
+        offset: int = 0,
+    ) -> tuple[list[TradeRecord], int]:
+        return await asyncio.to_thread(
+            self._repository.search,
+            symbol=symbol,
+            side=side,
+            strategy_version=strategy_version,
+            skill=skill,
+            outcome=outcome,
+            open_from=open_from,
+            open_to=open_to,
+            close_from=close_from,
+            close_to=close_to,
+            order_by=order_by,
+            order_dir=order_dir,
+            limit=limit,
+            offset=offset,
+        )

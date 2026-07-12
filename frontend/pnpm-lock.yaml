@@ -11,6 +11,9 @@ importers:
       lightweight-charts:
         specifier: ^5.2.0
         version: 5.2.0
+      lightweight-charts-drawing:
+        specifier: ^0.1.1
+        version: 0.1.1(lightweight-charts@5.2.0)
       next:
         specifier: ^16.2.10
         version: 16.2.10(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
@@ -632,6 +635,11 @@ packages:
     resolution: {integrity: sha512-NXYBzinNrblfraPGyrbPoD19C1h9lfI/1mzgWYvXUTe414Gz/X1FD2XBZSZM7rRTrMA8JL3OtAaGifrIKhQ5yQ==}
     engines: {node: '>= 12.0.0'}
 
+  lightweight-charts-drawing@0.1.1:
+    resolution: {integrity: sha512-lS5s94QnMA6mkXAbOCdLdux1rgzdlJn5vIxQSBNj+1pFtuMHaAlV+ciElSI0wNTzLNM1LQo8JN7j83GpApTcgQ==}
+    peerDependencies:
+      lightweight-charts: ^5.0.0
+
   lightweight-charts@5.2.0:
     resolution: {integrity: sha512-ey3Vas8UhV06ni+LT9TA1nEe4y8So4Mi6CL/oarNHFMyTktz/xy8e8+oh04Q//eO3t6etvFXgayz2fClyFQb5w==}
 
@@ -1153,6 +1161,11 @@ snapshots:
       lightningcss-linux-x64-musl: 1.32.0
       lightningcss-win32-arm64-msvc: 1.32.0
       lightningcss-win32-x64-msvc: 1.32.0
+
+  lightweight-charts-drawing@0.1.1(lightweight-charts@5.2.0):
+    dependencies:
+      fancy-canvas: 2.1.0
+      lightweight-charts: 5.2.0
 
   lightweight-charts@5.2.0:
     dependencies:

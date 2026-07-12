@@ -1,9 +1,11 @@
-"use client";
+'use client';
 
 /**
  * Chart feature (Phase 2+3): lightweight-charts candlesticks + volume, live WS
  * updates, timeframe switcher, spread indicator, and trade markers (F7) from
  * the journal — entry arrows + exit circles, refreshed alongside the spread.
+ * Drawing tools (F-draw): lightweight-charts-drawing DrawingManager attached to
+ * the candleSeries — toolbar in DrawingToolbar.tsx, persistence in localStorage.
  */
 
 import {
@@ -19,8 +21,20 @@ import {
   type SeriesMarker,
   type Time,
   type UTCTimestamp,
-} from "lightweight-charts";
-import { useEffect, useRef, useState } from "react";
+} from 'lightweight-charts';
+import {
+  DrawingManager,
+  type IDrawing,
+  type SerializedDrawing,
+  TrendLine,
+  ExtendedLine,
+  HorizontalLine,
+  VerticalLine,
+  Rectangle,
+  FibRetracement,
+  ParallelChannel,
+} from 'lightweight-charts-drawing';
+import { useEffect, useRef, useState } from 'react';
 import {
   getActiveNewsWindows,
   getCandles,
@@ -28,12 +42,25 @@ import {
   getTradeMarkers,
   type Candle,
   type NewsWindow,
+  type PositionOut,
   type TradeMarker,
-} from "@/shared/api/client";
-import { subscribeRoom } from "@/shared/api/ws";
-import type { Trading } from "@/features/trading/useTrading";
+} from '@/shared/api/client';
+import { subscribeRoom } from '@/shared/api/ws';
+import type { Trading } from '@/features/trading/useTrading';
+import { DrawingToolbar } from './DrawingToolbar';
+import { DrawingsList } from './DrawingsList';
 
-const TIMEFRAMES: Candle["timeframe"][] = ["M1", "M5", "H1", "H4", "D1"];
+/** Tool type strings accepted by DrawingManager.setActiveTool() */
+export type DrawingToolType =
+  | 'trend-line'
+  | 'extended-line'
+  | 'horizontal-line'
+  | 'vertical-line'
+  | 'rectangle'
+  | 'fib-retracement'
+  | 'parallel-channel';
+
+const TIMEFRAMES: Candle['timeframe'][] = ['M1', 'M5', 'H1', 'H4', 'D1'];
 const CANDLE_COUNT = 300;
 const SPREAD_POLL_MS = 3000;
 const MARKERS_POLL_MS = 5000;
@@ -45,12 +72,40 @@ const NEWS_POLL_MS = 30_000;
 // before the user actually scrolls past the end of the data.
 const LOAD_MORE_THRESHOLD = 50;
 
+/** Number of anchor clicks needed to complete each drawing tool. */
+const REQUIRED_ANCHORS: Record<DrawingToolType, number> = {
+  'trend-line': 2,
+  'extended-line': 2,
+  'horizontal-line': 1,
+  'vertical-line': 1,
+  rectangle: 2,
+  'fib-retracement': 2,
+  'parallel-channel': 3,
+};
+
 function cssVar(name: string): string {
-  return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  const val = getComputedStyle(document.documentElement)
+    .getPropertyValue(name)
+    .trim();
+  if (val) return val;
+  // Fallbacks in case the document stylesheets haven't parsed yet:
+  switch (name) {
+    case "--color-bg":        return "#131722";
+    case "--color-panel":     return "#1e222d";
+    case "--color-line":      return "#2a2e39";
+    case "--color-ink":       return "#d1d4dc";
+    case "--color-ink-muted": return "#5d606b";
+    case "--color-accent":    return "#2962ff";
+    case "--color-ok":        return "#26a69a";
+    case "--color-err":       return "#ef5350";
+    case "--color-buy":       return "#42a5f5";
+    case "--color-sell":      return "#ff9800";
+    default:                  return "";
+  }
 }
 
 function hexToRgba(hex: string, alpha: number): string {
-  const clean = hex.replace("#", "");
+  const clean = hex.replace('#', '');
   const value = parseInt(clean, 16);
   const r = (value >> 16) & 255;
   const g = (value >> 8) & 255;
@@ -63,7 +118,47 @@ interface NewsBand {
   left: number;
   width: number;
   label: string;
-  phase: "pre" | "post";
+  phase: 'pre' | 'post';
+}
+
+/**
+ * Restores saved drawings for `symbol` from localStorage into `manager`.
+ * Uses a minimal factory that maps the serialised `type` string back to
+ * the appropriate Drawing subclass — only the tools we expose in the toolbar
+ * are covered; unknown types are silently skipped so old/unknown data can
+ * never crash the chart.
+ */
+function loadDrawingsFromStorage(
+  manager: DrawingManager,
+  symbol: string,
+): void {
+  try {
+    const raw = localStorage.getItem(`chart-drawings:${symbol}`);
+    if (!raw) return;
+    const data: SerializedDrawing[] = JSON.parse(raw);
+    manager.importDrawings(data, (type, d) => {
+      switch (type) {
+        case 'trend-line':
+          return new TrendLine(d.id, d.anchors, d.style, d.options);
+        case 'extended-line':
+          return new ExtendedLine(d.id, d.anchors, d.style, d.options);
+        case 'horizontal-line':
+          return new HorizontalLine(d.id, d.anchors, d.style, d.options);
+        case 'vertical-line':
+          return new VerticalLine(d.id, d.anchors, d.style, d.options);
+        case 'rectangle':
+          return new Rectangle(d.id, d.anchors, d.style, d.options);
+        case 'fib-retracement':
+          return new FibRetracement(d.id, d.anchors, d.style, d.options);
+        case 'parallel-channel':
+          return new ParallelChannel(d.id, d.anchors, d.style, d.options);
+        default:
+          return null;
+      }
+    });
+  } catch {
+    // Corrupt or missing localStorage data is silently ignored.
+  }
 }
 
 interface PriceLineSpec {
@@ -80,6 +175,93 @@ interface PriceLineSpec {
 // synthetic index vs. BTC), so scale it off the reference price instead.
 function defaultOffset(referencePrice: number): number {
   return Math.abs(referencePrice) * 0.005 || 1;
+}
+
+function numOrNull(value: string): number | null {
+  if (value.trim() === '') return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+interface EntryLineSpec {
+  key: string;
+  position: PositionOut;
+  color: string;
+  label: string;
+}
+
+/** Double-click editor for a running position's entry line: SL/TP fields
+ * plus a close button, positioned at the entry line's current pixel row. */
+function PositionEditPopover({
+  position,
+  top,
+  busy,
+  onClose,
+  onSave,
+  onClosePosition,
+}: {
+  position: PositionOut;
+  top: number;
+  busy: boolean;
+  onClose: () => void;
+  onSave: (sl: number | null, tp: number | null) => void;
+  onClosePosition: () => void;
+}) {
+  const [sl, setSl] = useState(position.sl === null ? '' : String(position.sl));
+  const [tp, setTp] = useState(position.tp === null ? '' : String(position.tp));
+  const sideClass = position.side === 'buy' ? 'text-buy' : 'text-sell';
+
+  return (
+    <div
+      className='pointer-events-auto absolute right-2 z-10 flex w-40 -translate-y-1/2 flex-col gap-1 rounded border border-line bg-panel p-2 text-xs shadow-lg'
+      style={{ top: `${top}px` }}
+      onMouseDown={(e) => e.stopPropagation()}
+      onDoubleClick={(e) => e.stopPropagation()}
+    >
+      <div className='flex items-center justify-between'>
+        <span className={`font-bold ${sideClass}`}>
+          #{position.ticket} {position.side.toUpperCase()}
+        </span>
+        <button
+          onClick={onClose}
+          className='cursor-pointer text-ink-muted hover:text-ink'
+          title='Cancel'
+        >
+          ×
+        </button>
+      </div>
+      <div className='flex gap-1'>
+        <input
+          className='w-1/2 rounded border border-line bg-transparent px-1 py-0.5'
+          value={sl}
+          onChange={(e) => setSl(e.target.value)}
+          placeholder='SL'
+        />
+        <input
+          className='w-1/2 rounded border border-line bg-transparent px-1 py-0.5'
+          value={tp}
+          onChange={(e) => setTp(e.target.value)}
+          placeholder='TP'
+        />
+      </div>
+      <div className='flex gap-1'>
+        <button
+          onClick={() => onSave(numOrNull(sl), numOrNull(tp))}
+          disabled={busy}
+          className='flex-1 cursor-pointer rounded border border-accent px-1 py-0.5 text-accent disabled:opacity-50'
+        >
+          Save
+        </button>
+        <button
+          onClick={onClosePosition}
+          disabled={busy}
+          className='flex-1 cursor-pointer rounded border border-err px-1 py-0.5 text-err disabled:opacity-50'
+        >
+          Close
+        </button>
+      </div>
+    </div>
+  );
 }
 
 function toBar(candle: Candle) {
@@ -102,9 +284,9 @@ function toVolumeBar(candle: Candle, upColor: string, downColor: string) {
 
 function isCandleMessage(
   message: unknown,
-): message is { type: "candle_closed" | "candle_update"; candle: Candle } {
+): message is { type: 'candle_closed' | 'candle_update'; candle: Candle } {
   const type = (message as { type?: unknown } | null)?.type;
-  return type === "candle_closed" || type === "candle_update";
+  return type === 'candle_closed' || type === 'candle_update';
 }
 
 function toSeriesMarkers(
@@ -115,18 +297,21 @@ function toSeriesMarkers(
   for (const t of trades) {
     markers.push({
       time: t.open_time as UTCTimestamp,
-      position: t.side === "buy" ? "belowBar" : "aboveBar",
-      color: t.side === "buy" ? colors.ok : colors.err,
-      shape: t.side === "buy" ? "arrowUp" : "arrowDown",
+      position: t.side === 'buy' ? 'belowBar' : 'aboveBar',
+      color: t.side === 'buy' ? colors.ok : colors.err,
+      shape: t.side === 'buy' ? 'arrowUp' : 'arrowDown',
       text: `${t.side.toUpperCase()} ${t.volume}`,
     });
     if (t.close_time !== null) {
       markers.push({
         time: t.close_time as UTCTimestamp,
-        position: "inBar",
+        position: 'inBar',
         color: (t.profit ?? 0) >= 0 ? colors.ok : colors.err,
-        shape: "circle",
-        text: t.profit !== null ? `${t.profit >= 0 ? "+" : ""}${t.profit.toFixed(2)}` : "close",
+        shape: 'circle',
+        text:
+          t.profit !== null
+            ? `${t.profit >= 0 ? '+' : ''}${t.profit.toFixed(2)}`
+            : 'close',
       });
     }
   }
@@ -134,12 +319,20 @@ function toSeriesMarkers(
   return markers.sort((a, b) => (a.time as number) - (b.time as number));
 }
 
-export function ChartPanel({ symbol, trading }: { symbol: string; trading: Trading }) {
+export function ChartPanel({
+  symbol,
+  trading,
+}: {
+  symbol: string;
+  trading: Trading;
+}) {
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
-  const candleSeriesRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
-  const volumeSeriesRef = useRef<ISeriesApi<"Histogram"> | null>(null);
+  const candleSeriesRef = useRef<ISeriesApi<'Candlestick'> | null>(null);
+  const volumeSeriesRef = useRef<ISeriesApi<'Histogram'> | null>(null);
   const seriesMarkersRef = useRef<ISeriesMarkersPluginApi<Time> | null>(null);
+  // Drawing tools: one manager instance, alive for the lifetime of the chart.
+  const drawingManagerRef = useRef<DrawingManager | null>(null);
   // Guards against applying a live WS update before the REST history load
   // for the current symbol/timeframe has landed — see the effect below.
   const historyLoadedRef = useRef(false);
@@ -150,18 +343,40 @@ export function ChartPanel({ symbol, trading }: { symbol: string; trading: Tradi
   const hasMoreHistoryRef = useRef(true);
   const loadingMoreRef = useRef(false);
 
-  const [timeframe, setTimeframe] = useState<Candle["timeframe"]>("M5");
+  const [timeframe, setTimeframe] = useState<Candle['timeframe']>('M5');
   const [spreadPoints, setSpreadPoints] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loadingMore, setLoadingMore] = useState(false);
   const [newsBands, setNewsBands] = useState<NewsBand[]>([]);
+  // Active drawing tool — null means normal pointer/pan mode.
+  const [drawingTool, setDrawingTool] = useState<DrawingToolType | null>(null);
+  // Mirror of manager.getAllDrawings() — kept in React state so the
+  // DrawingsList panel re-renders whenever drawings are added/removed.
+  const [drawingsList, setDrawingsList] = useState<IDrawing[]>([]);
+  const [showDrawingsList, setShowDrawingsList] = useState(false);
+  // How many anchor points the user has placed for the current in-progress
+  // drawing (0 = none yet). Displayed as a hint in the header.
+  const [pendingAnchorCount, setPendingAnchorCount] = useState(0);
+
+  // Ticket of the running position whose entry line was double-clicked, if
+  // any — drives the SL/TP/close popover rendered below the price lines.
+  const [editingTicket, setEditingTicket] = useState<number | null>(null);
+  const [editBusy, setEditBusy] = useState(false);
+
+  // Stable references for symbol and symbol-switching state to avoid stale
+  // closures inside the chart-creation useEffect.
+  const symbolRef = useRef(symbol);
+  symbolRef.current = symbol;
+  const isSwitchingSymbolRef = useRef(false);
 
   // SL/TP/trigger-price draggable lines (F-manual-trading): dragging updates
   // this only for live visual feedback during the drag — the actual API
   // call fires once on mouseup, via `spec.commit`.
-  const [drag, setDrag] = useState<{ key: string; price: number; commit: (p: number) => void } | null>(
-    null,
-  );
+  const [drag, setDrag] = useState<{
+    key: string;
+    price: number;
+    commit: (p: number) => void;
+  } | null>(null);
   const dragRef = useRef(drag);
   dragRef.current = drag;
   // Forces a re-render (to recompute price->pixel positions) on pan/zoom/resize,
@@ -177,11 +392,11 @@ export function ChartPanel({ symbol, trading }: { symbol: string; trading: Tradi
     const container = containerRef.current;
     if (!container) return;
 
-    const line = cssVar("--color-line");
+    const line = cssVar('--color-line');
     const chart = createChart(container, {
       layout: {
-        background: { color: cssVar("--color-panel") },
-        textColor: cssVar("--color-ink"),
+        background: { color: cssVar('--color-panel') },
+        textColor: cssVar('--color-ink'),
         // Required by lightweight-charts' free-tier license — do not hide or
         // replace this mark. Explicit `true` (not the implicit default) so
         // the license condition is visible here in code.
@@ -191,43 +406,100 @@ export function ChartPanel({ symbol, trading }: { symbol: string; trading: Tradi
         vertLines: { color: line },
         horzLines: { color: line },
       },
-      timeScale: { timeVisible: true, secondsVisible: false, borderColor: line },
+      timeScale: {
+        timeVisible: true,
+        secondsVisible: false,
+        borderColor: line,
+      },
       rightPriceScale: { borderColor: line },
     });
 
     const candleSeries = chart.addSeries(CandlestickSeries, {
-      upColor: cssVar("--color-ok"),
-      downColor: cssVar("--color-err"),
+      upColor: cssVar('--color-ok'),
+      downColor: cssVar('--color-err'),
       borderVisible: false,
-      wickUpColor: cssVar("--color-ok"),
-      wickDownColor: cssVar("--color-err"),
+      wickUpColor: cssVar('--color-ok'),
+      wickDownColor: cssVar('--color-err'),
     });
 
     const volumeSeries = chart.addSeries(HistogramSeries, {
-      priceFormat: { type: "volume" },
-      priceScaleId: "volume",
+      priceFormat: { type: 'volume' },
+      priceScaleId: 'volume',
     });
-    volumeSeries.priceScale().applyOptions({ scaleMargins: { top: 0.8, bottom: 0 } });
+    volumeSeries
+      .priceScale()
+      .applyOptions({ scaleMargins: { top: 0.8, bottom: 0 } });
 
     chartRef.current = chart;
     candleSeriesRef.current = candleSeries;
     volumeSeriesRef.current = volumeSeries;
     seriesMarkersRef.current = createSeriesMarkers(candleSeries, []);
 
-    const resize = () => chart.applyOptions({ width: container.clientWidth, height: container.clientHeight });
+    // Attach the drawing manager to the chart and its primary series so the
+    // drawing tools can convert pixel ↔ price/time coordinates and register
+    // their mouse-event handlers on the container element.
+    const manager = new DrawingManager();
+    manager.attach(chart, candleSeries, container);
+    drawingManagerRef.current = manager;
+
+    // Persist drawings + keep the drawings-list panel in sync whenever any
+    // drawing mutation happens.
+    const syncList = () => setDrawingsList(manager.getAllDrawings());
+    const saveAndSync = () => {
+      if (isSwitchingSymbolRef.current) {
+        syncList();
+        return;
+      }
+      try {
+        const data = manager.exportDrawings();
+        localStorage.setItem(
+          `chart-drawings:${symbolRef.current}`,
+          JSON.stringify(data),
+        );
+      } catch {
+        // localStorage quota or serialisation errors are non-fatal.
+      }
+      syncList();
+    };
+    const unsubAdd = manager.on('drawing:added', saveAndSync);
+    const unsubRemove = manager.on('drawing:removed', saveAndSync);
+    const unsubClear = manager.on('drawing:cleared', saveAndSync);
+    const unsubUpdate = manager.on('drawing:updated', saveAndSync);
+
+    // Restore any previously saved drawings for the initial symbol.
+    loadDrawingsFromStorage(manager, symbolRef.current);
+    // Initialise the drawings-list panel state.
+    syncList();
+
+    const resize = () =>
+      chart.applyOptions({
+        width: container.clientWidth,
+        height: container.clientHeight,
+      });
     resize();
     const observer = new ResizeObserver(resize);
     observer.observe(container);
 
+    const bump = () => bumpLines((t) => t + 1);
+    container.addEventListener('mousemove', bump, { capture: true });
+
     return () => {
       observer.disconnect();
+      container.removeEventListener('mousemove', bump, { capture: true });
+      unsubAdd();
+      unsubRemove();
+      unsubClear();
+      unsubUpdate();
       seriesMarkersRef.current?.detach();
+      manager.detach();
+      drawingManagerRef.current = null;
       chart.remove();
       chartRef.current = null;
       candleSeriesRef.current = null;
       volumeSeriesRef.current = null;
       seriesMarkersRef.current = null;
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Load history + subscribe to live updates whenever symbol/timeframe changes.
@@ -250,26 +522,38 @@ export function ChartPanel({ symbol, trading }: { symbol: string; trading: Tradi
     const chart = chartRef.current;
 
     function render() {
-      const upColor = cssVar("--color-ok");
-      const downColor = cssVar("--color-err");
+      const upColor = cssVar('--color-ok');
+      const downColor = cssVar('--color-err');
       candleSeriesRef.current?.setData(candlesRef.current.map(toBar));
       volumeSeriesRef.current?.setData(
         candlesRef.current.map((c) => toVolumeBar(c, upColor, downColor)),
       );
+      setTimeout(() => {
+        if (!cancelled) bumpLines((t) => t + 1);
+      }, 50);
     }
 
     // Fetches the next page of older bars once the user pans near the left
     // edge of what's loaded — the chart's "fetch more" is this auto-trigger
     // plus the `loadingMore` indicator rendered below, not a manual button.
     async function loadMore() {
-      if (loadingMoreRef.current || !hasMoreHistoryRef.current || candlesRef.current.length === 0) {
+      if (
+        loadingMoreRef.current ||
+        !hasMoreHistoryRef.current ||
+        candlesRef.current.length === 0
+      ) {
         return;
       }
       loadingMoreRef.current = true;
       setLoadingMore(true);
       const oldest = candlesRef.current[0];
       try {
-        const older = await getCandles(symbol, timeframe, CANDLE_COUNT, oldest.time);
+        const older = await getCandles(
+          symbol,
+          timeframe,
+          CANDLE_COUNT,
+          oldest.time,
+        );
         if (cancelled) return;
         if (older.length === 0) {
           hasMoreHistoryRef.current = false;
@@ -280,12 +564,20 @@ export function ChartPanel({ symbol, trading }: { symbol: string; trading: Tradi
           // the number of new bars, so the visible window must shift with
           // it or the chart jumps — lightweight-charts has no "prepend"
           // primitive, this is the documented workaround for setData().
+          // We snapshot the range *before* setData, call setData, then restore
+          // via requestAnimationFrame so the adjustment runs after the new
+          // layout pass — applying it synchronously can land before the bars
+          // are actually committed and produce an off-by-N shift.
           const range = chart?.timeScale().getVisibleLogicalRange();
           render();
           if (range) {
-            chart?.timeScale().setVisibleLogicalRange({
-              from: range.from + older.length,
-              to: range.to + older.length,
+            requestAnimationFrame(() => {
+              if (!cancelled) {
+                chart?.timeScale().setVisibleLogicalRange({
+                  from: range.from + older.length,
+                  to: range.to + older.length,
+                });
+              }
             });
           }
         }
@@ -320,9 +612,12 @@ export function ChartPanel({ symbol, trading }: { symbol: string; trading: Tradi
         // `fitContent()` plus forcing `autoScale` back on fixes both.
         candleSeriesRef.current?.priceScale().applyOptions({ autoScale: true });
         chart?.timeScale().fitContent();
+        setTimeout(() => {
+          if (!cancelled) bumpLines((t) => t + 1);
+        }, 50);
       })
       .catch(() => {
-        if (!cancelled) setError("failed to load candles");
+        if (!cancelled) setError('failed to load candles');
       });
 
     // `candle_update` streams the in-progress bar every ~1.5s so the
@@ -331,7 +626,7 @@ export function ChartPanel({ symbol, trading }: { symbol: string; trading: Tradi
     // identically here — lightweight-charts' `update()` amends the last bar
     // in place when the timestamp matches, or appends a new one otherwise.
     const unsubscribe = subscribeRoom(
-      ["candle_closed", "candle_update"],
+      ['candle_closed', 'candle_update'],
       { symbol, timeframe },
       (message) => {
         if (!isCandleMessage(message)) return;
@@ -346,13 +641,16 @@ export function ChartPanel({ symbol, trading }: { symbol: string; trading: Tradi
         try {
           candleSeriesRef.current?.update(toBar(candle));
           volumeSeriesRef.current?.update(
-            toVolumeBar(candle, cssVar("--color-ok"), cssVar("--color-err")),
+            toVolumeBar(candle, cssVar('--color-ok'), cssVar('--color-err')),
           );
+          setTimeout(() => {
+            if (!cancelled) bumpLines((t) => t + 1);
+          }, 50);
         } catch (err) {
           // Defensive: lightweight-charts throws if a live update's time
           // is older than what's on the chart. Shouldn't happen once
           // gated by historyLoadedRef, but a dropped frame beats a crash.
-          console.warn("chart: dropped out-of-order live update", err);
+          console.warn('chart: dropped out-of-order live update', err);
         }
       },
     );
@@ -360,10 +658,128 @@ export function ChartPanel({ symbol, trading }: { symbol: string; trading: Tradi
     return () => {
       cancelled = true;
       historyLoadedRef.current = false;
-      chart?.timeScale().unsubscribeVisibleLogicalRangeChange(onVisibleRangeChange);
+      chart
+        ?.timeScale()
+        .unsubscribeVisibleLogicalRangeChange(onVisibleRangeChange);
       unsubscribe();
     };
   }, [symbol, timeframe]);
+
+  // When the symbol changes, save the current symbol's drawings and load the
+  // new symbol's drawings. The chart-creation effect only handles the initial
+  // symbol; this effect keeps things in sync on subsequent symbol switches.
+  useEffect(() => {
+    const manager = drawingManagerRef.current;
+    if (!manager) return;
+    isSwitchingSymbolRef.current = true;
+    manager.clearAll();
+    loadDrawingsFromStorage(manager, symbol);
+    isSwitchingSymbolRef.current = false;
+  }, [symbol]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Interactive drawing placement.
+  //
+  // DrawingManager.setActiveTool() is a stub in v0.1.1 — its handleClick
+  // does nothing when a tool is active. We implement the anchor-collection
+  // workflow ourselves:
+  //   1. Disable chart panning so mouse events reach our handler.
+  //   2. Subscribe to chart.subscribeClick to collect price+time anchors.
+  //   3. Once the required number of anchors is placed, instantiate the
+  //      concrete Drawing subclass and hand it to the manager.
+  //
+  // Required anchor counts per tool:
+  //   1 anchor : horizontal-line, vertical-line
+  //   2 anchors: trend-line, extended-line, rectangle, fib-retracement
+  //   3 anchors: parallel-channel
+  useEffect(() => {
+    const manager = drawingManagerRef.current;
+    const chart = chartRef.current;
+    const container = containerRef.current;
+    if (!chart) return;
+
+    if (!drawingTool) {
+      chart.applyOptions({ handleScroll: true, handleScale: true });
+      if (container) container.style.cursor = '';
+      setPendingAnchorCount(0);
+      return;
+    }
+
+    // Freeze chart interaction so clicks are not consumed as pans.
+    chart.applyOptions({ handleScroll: false, handleScale: false });
+    if (container) container.style.cursor = 'crosshair';
+
+    const REQUIRED: Record<DrawingToolType, number> = REQUIRED_ANCHORS;
+
+    const required = REQUIRED[drawingTool];
+    // Mutable accumulator — not React state because we don't need a re-render
+    // for each click, only when the drawing is complete.
+    const pendingAnchors: Array<{ price: number; time: UTCTimestamp }> = [];
+
+    const handleClick = (param: MouseEventParams) => {
+      if (!param.point) return;
+      const candleSeries = candleSeriesRef.current;
+      if (!candleSeries || !manager) return;
+
+      const time = chart.timeScale().coordinateToTime(param.point.x);
+      const price = candleSeries.coordinateToPrice(param.point.y);
+      if (time === null || price === null) return;
+
+      pendingAnchors.push({ price, time: time as UTCTimestamp });
+      setPendingAnchorCount(pendingAnchors.length);
+
+      if (pendingAnchors.length < required) return; // wait for more clicks
+
+      // All anchors collected — create and register the drawing.
+      const id = `d-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+      const style = {
+        lineColor: cssVar('--color-accent'),
+        lineWidth: 2,
+        showLabels: true,
+        labelColor: cssVar('--color-ink'),
+      };
+
+      let drawing: IDrawing | null = null;
+      switch (drawingTool) {
+        case 'trend-line':
+          drawing = new TrendLine(id, pendingAnchors, style);
+          break;
+        case 'extended-line':
+          drawing = new ExtendedLine(id, pendingAnchors, style);
+          break;
+        case 'horizontal-line':
+          drawing = new HorizontalLine(id, pendingAnchors, style);
+          break;
+        case 'vertical-line':
+          drawing = new VerticalLine(id, pendingAnchors, style);
+          break;
+        case 'rectangle':
+          drawing = new Rectangle(id, pendingAnchors, style);
+          break;
+        case 'fib-retracement':
+          drawing = new FibRetracement(id, pendingAnchors, style);
+          break;
+        case 'parallel-channel':
+          drawing = new ParallelChannel(id, pendingAnchors, style);
+          break;
+      }
+
+      if (drawing) manager.addDrawing(drawing);
+
+      // Reset — the drawing:added listener (in the chart-creation effect)
+      // handles saving + updating the list panel.
+      setDrawingTool(null);
+      setPendingAnchorCount(0);
+    };
+
+    chart.subscribeClick(handleClick);
+
+    return () => {
+      chart.unsubscribeClick(handleClick);
+      chart.applyOptions({ handleScroll: true, handleScale: true });
+      if (container) container.style.cursor = '';
+      setPendingAnchorCount(0);
+    };
+  }, [drawingTool]);
 
   // Poll live spread for the header indicator.
   useEffect(() => {
@@ -395,7 +811,10 @@ export function ChartPanel({ symbol, trading }: { symbol: string; trading: Tradi
       getTradeMarkers(symbol)
         .then((trades) => {
           if (cancelled) return;
-          const colors = { ok: cssVar("--color-ok"), err: cssVar("--color-err") };
+          const colors = {
+            ok: cssVar('--color-ok'),
+            err: cssVar('--color-err'),
+          };
           seriesMarkersRef.current?.setMarkers(toSeriesMarkers(trades, colors));
         })
         .catch(() => {
@@ -440,7 +859,9 @@ export function ChartPanel({ symbol, trading }: { symbol: string; trading: Tradi
         const x1 = chart
           .timeScale()
           .timeToCoordinate(Math.max(from, w.window_start) as UTCTimestamp);
-        const x2 = chart.timeScale().timeToCoordinate(Math.min(to, w.window_end) as UTCTimestamp);
+        const x2 = chart
+          .timeScale()
+          .timeToCoordinate(Math.min(to, w.window_end) as UTCTimestamp);
         if (x1 === null || x2 === null) continue;
         bands.push({
           key: `${w.event.name}-${w.window_start}`,
@@ -530,22 +951,22 @@ export function ChartPanel({ symbol, trading }: { symbol: string; trading: Tradi
       if (current) current.commit(current.price);
       setDrag(null);
     }
-    window.addEventListener("mousemove", onMove);
-    window.addEventListener("mouseup", onUp);
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
     return () => {
-      window.removeEventListener("mousemove", onMove);
-      window.removeEventListener("mouseup", onUp);
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
     };
   }, []);
 
   function buildPriceLines(): PriceLineSpec[] {
-    const okColor = cssVar("--color-ok");
-    const errColor = cssVar("--color-err");
-    const accentColor = cssVar("--color-accent");
+    const okColor = cssVar('--color-ok');
+    const errColor = cssVar('--color-err');
+    const accentColor = cssVar('--color-accent');
     const specs: PriceLineSpec[] = [];
     for (const p of trading.positions) {
       const offset = defaultOffset(p.open_price);
-      const direction = p.side === "buy" ? 1 : -1;
+      const direction = p.side === 'buy' ? 1 : -1;
       if (p.sl !== null) {
         specs.push({
           key: `pos-${p.ticket}-sl`,
@@ -559,7 +980,7 @@ export function ChartPanel({ symbol, trading }: { symbol: string; trading: Tradi
           key: `pos-${p.ticket}-sl`,
           price: p.open_price - direction * offset,
           color: errColor,
-          label: "+ SL",
+          label: '+ SL',
           placeholder: true,
           commit: (np) => trading.modifyPositionSlTp(p.ticket, np, p.tp),
         });
@@ -577,7 +998,7 @@ export function ChartPanel({ symbol, trading }: { symbol: string; trading: Tradi
           key: `pos-${p.ticket}-tp`,
           price: p.open_price + direction * offset,
           color: okColor,
-          label: "+ TP",
+          label: '+ TP',
           placeholder: true,
           commit: (np) => trading.modifyPositionSlTp(p.ticket, p.sl, np),
         });
@@ -585,7 +1006,7 @@ export function ChartPanel({ symbol, trading }: { symbol: string; trading: Tradi
     }
     for (const o of trading.pendingOrders) {
       const offset = defaultOffset(o.price);
-      const direction = o.side === "buy" ? 1 : -1;
+      const direction = o.side === 'buy' ? 1 : -1;
       specs.push({
         key: `pend-${o.ticket}-price`,
         price: o.price,
@@ -606,7 +1027,7 @@ export function ChartPanel({ symbol, trading }: { symbol: string; trading: Tradi
           key: `pend-${o.ticket}-sl`,
           price: o.price - direction * offset,
           color: errColor,
-          label: "+ SL",
+          label: '+ SL',
           placeholder: true,
           commit: (np) => trading.modifyPending(o.ticket, null, np, o.tp),
         });
@@ -624,7 +1045,7 @@ export function ChartPanel({ symbol, trading }: { symbol: string; trading: Tradi
           key: `pend-${o.ticket}-tp`,
           price: o.price + direction * offset,
           color: okColor,
-          label: "+ TP",
+          label: '+ TP',
           placeholder: true,
           commit: (np) => trading.modifyPending(o.ticket, null, o.sl, np),
         });
@@ -633,16 +1054,58 @@ export function ChartPanel({ symbol, trading }: { symbol: string; trading: Tradi
     return specs;
   }
 
+  // One dashed line per running position at its entry (open) price — separate
+  // from the SL/TP lines above so it reads as "this is where the trade is
+  // running from", not a modifiable trigger. Color is by side (buy/sell), not
+  // ok/err, since those are already reserved for TP/SL regardless of side.
+  function buildEntryLines(): EntryLineSpec[] {
+    const buyColor = cssVar('--color-buy');
+    const sellColor = cssVar('--color-sell');
+    return trading.positions.map((p) => ({
+      key: `entry-${p.ticket}`,
+      position: p,
+      color: p.side === 'buy' ? buyColor : sellColor,
+      label: `${p.side.toUpperCase()} ${p.volume} @ ${p.open_price}`,
+    }));
+  }
+
+  async function handleSaveEdit(
+    ticket: number,
+    sl: number | null,
+    tp: number | null,
+  ) {
+    setEditBusy(true);
+    try {
+      await trading.modifyPositionSlTp(ticket, sl, tp);
+      setEditingTicket(null);
+    } finally {
+      setEditBusy(false);
+    }
+  }
+
+  async function handleCloseFromEdit(ticket: number) {
+    if (!window.confirm(`Close position #${ticket}?`)) return;
+    setEditBusy(true);
+    try {
+      await trading.close(ticket);
+      setEditingTicket(null);
+    } finally {
+      setEditBusy(false);
+    }
+  }
+
   return (
-    <section className="flex flex-1 flex-col rounded-md border border-line bg-panel">
-      <header className="flex items-center gap-3 border-b border-line px-4 py-2">
+    <section className='flex flex-1 flex-col rounded-md border border-line bg-panel'>
+      <header className='flex items-center gap-3 border-b border-line px-4 py-2'>
         <strong>{symbol}</strong>
-        <nav className="flex gap-1">
+        <nav className='flex gap-1'>
           {TIMEFRAMES.map((tf) => (
             <button
               key={tf}
               className={`cursor-pointer rounded border px-2 py-0.5 text-xs ${
-                tf === timeframe ? "border-accent text-accent" : "border-line text-ink-muted"
+                tf === timeframe
+                  ? 'border-accent text-accent'
+                  : 'border-line text-ink-muted'
               }`}
               onClick={() => setTimeframe(tf)}
             >
@@ -650,33 +1113,75 @@ export function ChartPanel({ symbol, trading }: { symbol: string; trading: Tradi
             </button>
           ))}
         </nav>
-        <div className="flex gap-1">
+        <div className='flex gap-1'>
           <button
-            className="cursor-pointer rounded border border-line px-2 py-0.5 text-xs text-ink-muted"
+            className='cursor-pointer rounded border border-line px-2 py-0.5 text-xs text-ink-muted'
             onClick={() => chartRef.current?.timeScale().scrollToRealTime()}
           >
             Latest
           </button>
           <button
-            className="cursor-pointer rounded border border-line px-2 py-0.5 text-xs text-ink-muted"
+            className='cursor-pointer rounded border border-line px-2 py-0.5 text-xs text-ink-muted'
             onClick={() => chartRef.current?.timeScale().resetTimeScale()}
           >
             Reset zoom
           </button>
         </div>
-        <span className="ml-auto text-xs text-ink-muted">
-          spread: {spreadPoints === null ? "—" : `${spreadPoints} pts`}
+        {/* Drawings list toggle + placement hint */}
+        <button
+          className={`cursor-pointer rounded border px-2 py-0.5 text-xs ${
+            showDrawingsList
+              ? 'border-accent text-accent'
+              : 'border-line text-ink-muted'
+          }`}
+          onClick={() => setShowDrawingsList((v) => !v)}
+          title='Show / hide drawings list'
+        >
+          Drawings {drawingsList.length > 0 && `(${drawingsList.length})`}
+        </button>
+        <span className='ml-auto text-xs text-ink-muted'>
+          {drawingTool && pendingAnchorCount > 0 && (
+            <span className='mr-3 text-accent'>
+              Click {REQUIRED_ANCHORS[drawingTool] - pendingAnchorCount} more
+              point
+              {REQUIRED_ANCHORS[drawingTool] - pendingAnchorCount !== 1
+                ? 's'
+                : ''}
+            </span>
+          )}
+          spread: {spreadPoints === null ? '—' : `${spreadPoints} pts`}
         </span>
       </header>
-      {error && <p className="px-4 py-1 text-xs text-err">{error}</p>}
-      <div className="relative min-h-0 flex-1">
-        <div ref={containerRef} className="h-full w-full" />
+      {error && <p className='px-4 py-1 text-xs text-err'>{error}</p>}
+      {/* Drawings list panel — shown when the toggle is active */}
+      {showDrawingsList && (
+        <DrawingsList
+          drawings={drawingsList}
+          onRemove={(id) => drawingManagerRef.current?.removeDrawing(id)}
+          onToggleVisible={(id) => {
+            const d = drawingManagerRef.current?.getDrawing(id);
+            if (d) d.updateOptions({ visible: !d.options.visible });
+          }}
+        />
+      )}
+      <div className='relative min-h-0 flex-1'>
+        <div ref={containerRef} className='h-full w-full' />
+        {/* Drawing toolbar — floats on the left edge of the chart canvas */}
+        <DrawingToolbar
+          activeTool={drawingTool}
+          onToolSelect={setDrawingTool}
+          onClearAll={() => {
+            drawingManagerRef.current?.clearAll();
+          }}
+        />
         {newsBands.map((b) => {
-          const color = cssVar(b.phase === "pre" ? "--color-err" : "--color-accent");
+          const color = cssVar(
+            b.phase === 'pre' ? '--color-err' : '--color-accent',
+          );
           return (
             <div
               key={b.key}
-              className="pointer-events-none absolute top-0 h-full border-x border-dashed"
+              className='pointer-events-none absolute top-0 h-full border-x border-dashed'
               style={{
                 left: b.left,
                 width: b.width,
@@ -688,7 +1193,7 @@ export function ChartPanel({ symbol, trading }: { symbol: string; trading: Tradi
           );
         })}
         {loadingMore && (
-          <div className="pointer-events-none absolute left-2 top-2 rounded border border-line bg-panel px-2 py-1 text-xs text-ink-muted">
+          <div className='pointer-events-none absolute left-2 top-2 rounded border border-line bg-panel px-2 py-1 text-xs text-ink-muted'>
             Loading history…
           </div>
         )}
@@ -704,27 +1209,89 @@ export function ChartPanel({ symbol, trading }: { symbol: string; trading: Tradi
           return (
             <div
               key={spec.key}
-              className="pointer-events-none absolute left-0 right-0 border-t border-dashed"
-              style={{ top, borderColor: spec.color, opacity: faint ? 0.45 : 1 }}
+              className='pointer-events-auto absolute left-0 right-0 h-4 -translate-y-1/2 cursor-ns-resize z-10 flex items-center select-none'
+              style={{
+                top: `${top}px`,
+                opacity: faint ? 0.45 : 1,
+              }}
+              onMouseDown={(e) => {
+                e.preventDefault();
+                setDrag({
+                  key: spec.key,
+                  price: spec.price,
+                  commit: spec.commit,
+                });
+              }}
             >
               <div
-                className="pointer-events-auto absolute right-2 -translate-y-1/2 cursor-ns-resize select-none rounded px-1 text-[10px] font-bold"
+                className='w-full border-t border-dashed'
+                style={{ borderColor: spec.color }}
+              />
+              <div
+                className='absolute right-2 top-1/2 -translate-y-1/2 rounded px-1 text-[10px] font-bold'
                 style={{
                   backgroundColor: spec.color,
-                  color: "#04211e",
+                  color: '#04211e',
                   opacity: faint ? 0.7 : 1,
                 }}
-                title={spec.placeholder ? "Drag to set — not saved yet" : "Drag to modify"}
-                onMouseDown={(e) => {
-                  e.preventDefault();
-                  setDrag({ key: spec.key, price: spec.price, commit: spec.commit });
-                }}
+                title={
+                  spec.placeholder
+                    ? 'Drag to set — not saved yet'
+                    : 'Drag to modify'
+                }
               >
                 {dragging ? price.toFixed(5) : spec.label}
               </div>
             </div>
           );
         })}
+        {buildEntryLines().map((spec) => {
+          const top = candleSeriesRef.current?.priceToCoordinate(
+            spec.position.open_price,
+          );
+          if (top === null || top === undefined) return null;
+          return (
+            <div
+              key={spec.key}
+              className='pointer-events-auto absolute left-0 right-0 h-4 -translate-y-1/2 cursor-pointer z-10 flex items-center select-none'
+              style={{ top: `${top}px` }}
+              onDoubleClick={() => setEditingTicket(spec.position.ticket)}
+            >
+              <div
+                className='w-full border-t-2 border-dashed'
+                style={{ borderColor: spec.color }}
+              />
+              <div
+                className='absolute left-2 top-1/2 -translate-y-1/2 rounded px-1 text-[10px] font-bold'
+                style={{ backgroundColor: spec.color, color: '#04211e' }}
+                title='Double-click to modify this position'
+              >
+                {spec.label}
+              </div>
+            </div>
+          );
+        })}
+        {editingTicket !== null &&
+          (() => {
+            const position = trading.positions.find(
+              (p) => p.ticket === editingTicket,
+            );
+            if (!position) return null;
+            const top = candleSeriesRef.current?.priceToCoordinate(
+              position.open_price,
+            );
+            if (top === null || top === undefined) return null;
+            return (
+              <PositionEditPopover
+                position={position}
+                top={top}
+                busy={editBusy}
+                onClose={() => setEditingTicket(null)}
+                onSave={(sl, tp) => handleSaveEdit(position.ticket, sl, tp)}
+                onClosePosition={() => handleCloseFromEdit(position.ticket)}
+              />
+            );
+          })()}
       </div>
     </section>
   );

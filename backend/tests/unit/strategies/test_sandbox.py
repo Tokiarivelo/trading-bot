@@ -163,7 +163,7 @@ from src.strategies.domain.models import MarketContext, StrategySpec
 class Infinite:
     def __init__(self):
         self.spec = StrategySpec(
-            name="infinite", version=1, symbols=(), entry_timeframe="M5",
+            name="infinite", version=1, symbols=("XAUUSD",), entry_timeframe="M5",
             confirmation_timeframes=(), params={},
         )
 
@@ -174,3 +174,23 @@ class Infinite:
     instance, errors = validate_and_load(code)
     assert instance is None
     assert any("did not return within" in e for e in errors)
+
+
+def test_empty_symbols_rejected_before_smoke_test():
+    code = """
+from src.strategies.domain.models import MarketContext, StrategySpec
+
+
+class NoSymbols:
+    def __init__(self):
+        self.spec = StrategySpec(
+            name="no_symbols", version=1, symbols=(), entry_timeframe="M5",
+            confirmation_timeframes=(), params={},
+        )
+
+    def evaluate(self, ctx):
+        return None
+"""
+    instance, errors = validate_and_load(code)
+    assert instance is None
+    assert any("no symbols configured" in e for e in errors)

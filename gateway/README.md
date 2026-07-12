@@ -183,6 +183,7 @@ logging `candle closed …` lines on M5 boundaries.
 | `/candles` returns very few bars | Terminal hasn't downloaded that history — open the chart & scroll back (see History depth above) |
 | `401 bad or missing X-Gateway-Secret` | `TB_GATEWAY_SHARED_SECRET` (backend) ≠ `GATEWAY_SHARED_SECRET` (gateway) |
 | Order calls fail with retcode `10027` (Phase 3+) | Algo Trading disabled in the terminal — see Terminal configuration step 2 |
+| Order calls fail with retcode `10030` ("unsupported filling mode") | The gateway asks the symbol which fill mode it supports (`symbol_info().filling_mode`) and picks FOK/IOC/RETURN accordingly — it should never hardcode one. If you still hit this, the symbol's broker-reported filling mode itself is wrong/missing; check the symbol's Trading tab in MT5's Symbols window |
 | Wine terminal loses connection when laptop sleeps | Disable suspend, or move to the VPS option |
 
 ## API (implemented in Phase 1)

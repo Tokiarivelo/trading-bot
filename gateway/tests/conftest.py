@@ -43,7 +43,11 @@ class FakeMt5:
     TRADE_ACTION_DEAL = 1
     TRADE_ACTION_SLTP = 2
     ORDER_TIME_GTC = 0
+    ORDER_FILLING_FOK = 0
     ORDER_FILLING_IOC = 1
+    ORDER_FILLING_RETURN = 2
+    SYMBOL_FILLING_FOK = 1
+    SYMBOL_FILLING_IOC = 2
     TRADE_RETCODE_DONE = 10009
 
     def __init__(self) -> None:
@@ -52,6 +56,16 @@ class FakeMt5:
         self.reject_order = False
         self._next_ticket = 1000
         self._positions: dict[int, FakePosition] = {}
+        # Bitmask a symbol reports as supported filling modes — defaults to
+        # IOC (matches the old hardcoded behavior other tests rely on).
+        # Tests exercising `_filling_type`'s fallback set this directly.
+        self.filling_mode = self.SYMBOL_FILLING_IOC
+        # A symbol's lot-size constraints — defaults match the old hardcoded
+        # forex assumption. Tests exercising `_normalize_volume` (e.g. a
+        # synthetic index with a coarser step) set these directly.
+        self.volume_min = 0.01
+        self.volume_max = 100.0
+        self.volume_step = 0.01
 
     def initialize(self) -> bool:
         return True
@@ -146,9 +160,10 @@ class FakeMt5:
             digits=2,
             trade_stops_level=10,
             trade_contract_size=100.0,
-            volume_min=0.01,
-            volume_max=100.0,
-            volume_step=0.01,
+            filling_mode=self.filling_mode,
+            volume_min=self.volume_min,
+            volume_max=self.volume_max,
+            volume_step=self.volume_step,
         )
 
     def order_send(self, request):

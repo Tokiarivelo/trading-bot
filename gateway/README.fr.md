@@ -198,6 +198,7 @@ M5.
 | `/candles` renvoie très peu de barres | Le terminal n'a pas téléchargé cet historique — ouvrez le graphique et remontez le temps (voir Profondeur d'historique) |
 | `401 bad or missing X-Gateway-Secret` | `TB_GATEWAY_SHARED_SECRET` (backend) ≠ `GATEWAY_SHARED_SECRET` (passerelle) |
 | Les ordres échouent avec le code `10027` (phase 3+) | Trading algo désactivé dans le terminal — voir Configuration du terminal, étape 2 |
+| Les ordres échouent avec le code `10030` (« mode d'exécution non supporté ») | La passerelle demande au symbole le mode d'exécution qu'il supporte (`symbol_info().filling_mode`) et choisit FOK/IOC/RETURN en conséquence — elle ne doit jamais en imposer un. Si le problème persiste, c'est le mode d'exécution rapporté par le courtier pour ce symbole qui est erroné/manquant — vérifiez l'onglet Trading du symbole dans la fenêtre Symboles de MT5 |
 | Le terminal sous Wine perd la connexion quand le portable se met en veille | Désactivez la veille, ou passez à l'option VPS |
 
 ## API (implémentée en phase 1)

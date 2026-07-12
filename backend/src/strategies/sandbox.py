@@ -171,6 +171,9 @@ def _find_strategy_class(module_globals: dict[str, object]) -> type | None:
 
 
 def _smoke_test(instance: Strategy) -> tuple[str, ...]:
+    if not getattr(instance.spec, "symbols", None):
+        return ("strategy spec has no symbols configured",)
+
     ctx = _synthetic_context(instance.spec)
     outcome: dict[str, object] = {}
 
@@ -196,7 +199,10 @@ def _smoke_test(instance: Strategy) -> tuple[str, ...]:
 
 
 def _synthetic_context(spec: object) -> MarketContext:
-    symbols = getattr(spec, "symbols", None) or ("XAUUSD",)
+    # Caller (`_smoke_test`) already guarantees `spec.symbols` is non-empty —
+    # no fallback symbol here, since that would let a spec-less-of-symbols
+    # strategy silently validate against an arbitrary instrument.
+    symbols = spec.symbols
     confirmation_tfs = getattr(spec, "confirmation_timeframes", ())
     timeframes = {getattr(spec, "entry_timeframe", "M5"), *confirmation_tfs}
     return MarketContext(

@@ -3,6 +3,6 @@
 # READ-ONLY. Only the human user edits it. See CLAUDE.md.
 risk_per_trade_pct: 0.5
 daily_loss_limit_pct: 2.0
-max_open_positions: 2
+max_open_positions: 100
 max_trades_per_day: 8
-consecutive_loss_pause: 5     # circuit breaker: pause engine + notify after N straight losses
+consecutive_loss_pause: 10 # circuit breaker: pause engine + notify after N straight losses

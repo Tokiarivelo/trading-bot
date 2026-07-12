@@ -18,6 +18,11 @@ const TONE: Record<string, string> = {
   low: "border-ink-muted text-ink-muted",
   medium: "border-accent text-accent",
   high: "border-err text-err",
+  // Trade history outcome (F7 history view)
+  win: "border-ok text-ok",
+  loss: "border-err text-err",
+  breakeven: "border-ink-muted text-ink-muted",
+  open: "border-accent text-accent",
 };
 
 /** Small status pill shared by draft and version lists/detail pages. */
