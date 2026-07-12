@@ -27,6 +27,9 @@ def _event_out(event: Any, skill: str | None) -> NewsEventOut:
         impact=event.impact.value,
         currency=event.currency,
         skill=skill,
+        forecast=event.forecast,
+        previous=event.previous,
+        actual=event.actual,
     )
 
 

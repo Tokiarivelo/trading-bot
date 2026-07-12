@@ -197,8 +197,10 @@ class StrategyVersionService:
         assert renamed_anchor is not None
         return renamed_anchor
 
-    def list_versions(self, name: str | None = None) -> list[StrategyVersion]:
-        return self._repository.list_all(name)
+    def list_versions(
+        self, name: str | None = None, status: VersionStatus | None = None
+    ) -> list[StrategyVersion]:
+        return self._repository.list_all(name, status)
 
     def get_version(self, version_id: str) -> StrategyVersion | None:
         return self._repository.get(version_id)

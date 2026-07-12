@@ -17,12 +17,36 @@ class LLMMessage:
     user: str
 
 
+#: Provider ids the settings page (AI_PROVIDER_SETTINGS_PLAN.md) and
+#: `LLMRouter` know how to build an adapter for. "Hermes Agent" is not a
+#: separate id — it's a `hermes3:*` model preset on top of "ollama" (see
+#: plan §2.2). "openclaw" ships as an explicitly unverified integration
+#: (plan §2.4/§9.4) until its real API contract is confirmed. "openai",
+#: "mistral", "groq", "deepseek", and "xai" all speak the same
+#: OpenAI-compatible chat-completions wire format as "openclaw"
+#: (`adapters/openai_compatible.py`); "gemini" has its own wire contract
+#: (`adapters/gemini.py`).
+KNOWN_PROVIDERS = (
+    "claude",
+    "openai",
+    "gemini",
+    "mistral",
+    "groq",
+    "deepseek",
+    "xai",
+    "claude_code",
+    "openclaw",
+    "ollama",
+)
+
+
 @dataclass(frozen=True)
 class ProviderSpec:
-    """One `configs/ai.yaml: provider_per_task` entry — which adapter and
-    model to use for a named AI task (e.g. "pdf_extraction")."""
+    """One `configs/ai.yaml: provider_per_task` entry (or a settings-page
+    override) — which adapter and model to use for a named AI task
+    (e.g. "pdf_extraction")."""
 
-    provider: str  # "claude" | "ollama"
+    provider: str  # one of KNOWN_PROVIDERS
     model: str
 
 

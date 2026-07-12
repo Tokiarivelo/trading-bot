@@ -11,12 +11,20 @@ from src.news.domain.models import ImpactLevel, NewsCalendarUnavailable
 NOW = datetime.now(UTC)
 
 
-def _row(offset_days: float, impact: str = "High", title: str = "Non-Farm Payrolls") -> dict:
+def _row(
+    offset_days: float,
+    impact: str = "High",
+    title: str = "Non-Farm Payrolls",
+    forecast: str = "",
+    previous: str = "",
+) -> dict:
     return {
         "title": title,
         "country": "USD",
         "date": (NOW + timedelta(days=offset_days)).isoformat(),
         "impact": impact,
+        "forecast": forecast,
+        "previous": previous,
     }
 
 
@@ -36,6 +44,18 @@ async def test_fetch_upcoming_parses_wire_format():
     assert event.impact == ImpactLevel.HIGH
     assert event.currency == "USD"
     assert event.time.tzinfo is UTC
+    assert event.forecast is None  # "" from the feed normalizes to None
+    assert event.previous is None
+    assert event.actual is None  # the weekly feed never carries this
+
+
+async def test_fetch_upcoming_parses_forecast_and_previous():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=[_row(1, forecast="8.5%", previous="8.6%")])
+
+    (event,) = await adapter_with(handler).fetch_upcoming(7)
+    assert event.forecast == "8.5%"
+    assert event.previous == "8.6%"
 
 
 async def test_fetch_upcoming_filters_events_outside_days_ahead():

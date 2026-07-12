@@ -19,6 +19,20 @@ class NewsEventOut(BaseModel):
         description="Matched news skill name from `configs/news.yaml: tracked_events`, "
         "if any — null means this event never activates a news window.",
     )
+    forecast: str | None = Field(
+        default=None,
+        description="Consensus estimate, formatted as the source publishes it "
+        "(e.g. '8.5%', '1950B'). Null if the source doesn't provide one.",
+    )
+    previous: str | None = Field(
+        default=None, description="Prior period's reading, same formatting caveat as `forecast`."
+    )
+    actual: str | None = Field(
+        default=None,
+        description="Released value, if the event has already happened and the source "
+        "reports it. ForexFactory's calendar never populates this; Finnhub does once "
+        "released.",
+    )
 
 
 class NewsWindowOut(BaseModel):

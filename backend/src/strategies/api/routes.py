@@ -20,10 +20,18 @@ from src.strategies.application.versioning import (
     StrategyValidationError,
     StrategyVersionService,
 )
+from src.strategies.domain.versioning import VersionStatus
 
 router = APIRouter(prefix="/strategies", tags=["strategies"])
 
 _VERSION_NOT_FOUND = {404: {"description": "No strategy version with that id."}}
+
+# Module-level singleton, not a call in the argument default — ruff's B008
+# check doesn't special-case `Query()` for non-primitive annotations
+# (VersionStatus is a StrEnum) the way it does for str/int/Literal.
+_STATUS_QUERY = Query(
+    default=None, description="Restrict to this lifecycle stage: validated, active, archived."
+)
 
 
 def _service(request: Request) -> StrategyVersionService:
@@ -35,13 +43,15 @@ def _service(request: Request) -> StrategyVersionService:
     response_model=list[StrategyVersionOut],
     summary="List strategy versions",
     description="Every recorded strategy version, newest first per name. Filter to one "
-    "strategy family with `name`.",
+    "strategy family with `name`, or to one lifecycle stage with `status` (e.g. `status=active` "
+    "to fetch only what's currently live, without pulling every historical version).",
 )
 async def list_versions(
     request: Request,
     name: str | None = Query(default=None, description="Restrict to this strategy family name."),
+    status: VersionStatus | None = _STATUS_QUERY,
 ) -> list[StrategyVersionOut]:
-    versions = _service(request).list_versions(name)
+    versions = _service(request).list_versions(name, status)
     return [StrategyVersionOut.from_domain(v) for v in versions]
 
 

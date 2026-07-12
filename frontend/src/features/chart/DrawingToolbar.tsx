@@ -10,7 +10,18 @@
  * Pressing the same active button again deactivates drawing mode (toggles off).
  */
 
+import { useState } from "react";
 import type { DrawingToolType } from "./ChartPanel";
+
+const PRESET_COLORS = [
+  "#2962ff", // Blue
+  "#26a69a", // Green
+  "#ef5350", // Red
+  "#ff9800", // Orange
+  "#9c27b0", // Purple
+  "#ffffff", // White
+];
+
 
 interface ToolDef {
   type: DrawingToolType;
@@ -112,9 +123,19 @@ interface Props {
   activeTool: DrawingToolType | null;
   onToolSelect: (tool: DrawingToolType | null) => void;
   onClearAll: () => void;
+  activeColor: string;
+  onColorChange: (color: string) => void;
 }
 
-export function DrawingToolbar({ activeTool, onToolSelect, onClearAll }: Props) {
+export function DrawingToolbar({
+  activeTool,
+  onToolSelect,
+  onClearAll,
+  activeColor,
+  onColorChange,
+}: Props) {
+  const [showColorPicker, setShowColorPicker] = useState(false);
+
   function handleClick(type: DrawingToolType) {
     // Toggle: clicking the active tool again deactivates drawing mode
     onToolSelect(activeTool === type ? null : type);
@@ -205,6 +226,81 @@ export function DrawingToolbar({ activeTool, onToolSelect, onClearAll }: Props) 
           <line x1="10" y1="8" x2="10" y2="11" />
         </svg>
       </button>
+
+      {/* Divider */}
+      <div style={{ height: 1, backgroundColor: "var(--color-line)", margin: "2px 0" }} />
+
+      {/* Active Color Picker */}
+      <div className="relative flex justify-center">
+        <button
+          title="Choose Drawing Color"
+          onClick={() => setShowColorPicker(!showColorPicker)}
+          className="cursor-pointer rounded transition-all duration-100"
+          style={{
+            width: 28,
+            height: 28,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            backgroundColor: showColorPicker ? "var(--color-line)" : "transparent",
+            border: "1px solid transparent",
+          }}
+          onMouseEnter={(e) => {
+            if (!showColorPicker) {
+              (e.currentTarget as HTMLButtonElement).style.backgroundColor = "var(--color-line)";
+            }
+          }}
+          onMouseLeave={(e) => {
+            if (!showColorPicker) {
+              (e.currentTarget as HTMLButtonElement).style.backgroundColor = "transparent";
+            }
+          }}
+        >
+          <div
+            style={{
+              width: 14,
+              height: 14,
+              borderRadius: "50%",
+              backgroundColor: activeColor,
+              border: "1.5px solid var(--color-ink)",
+              boxShadow: "0 0 2px rgba(0,0,0,0.5)",
+            }}
+          />
+        </button>
+
+        {showColorPicker && (
+          <div
+            className="absolute left-9 top-0 z-30 flex items-center gap-1.5 rounded border border-line bg-panel p-2 shadow-2xl"
+            style={{ whiteSpace: "nowrap" }}
+          >
+            {PRESET_COLORS.map((c) => (
+              <button
+                key={c}
+                onClick={() => {
+                  onColorChange(c);
+                  setShowColorPicker(false);
+                }}
+                className="cursor-pointer rounded-full border border-line hover:scale-110 transition-transform"
+                style={{
+                  width: 18,
+                  height: 18,
+                  backgroundColor: c,
+                }}
+                title={c}
+              />
+            ))}
+            <div style={{ width: 1, height: 18, backgroundColor: "var(--color-line)", margin: "0 2px" }} />
+            <input
+              type="color"
+              value={activeColor}
+              onChange={(e) => onColorChange(e.target.value)}
+              className="color-picker-input"
+              style={{ width: 18, height: 18 }}
+              title="Custom color"
+            />
+          </div>
+        )}
+      </div>
 
       {/* Deactivate / cursor mode */}
       {activeTool !== null && (

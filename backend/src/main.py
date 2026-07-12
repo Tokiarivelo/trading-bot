@@ -24,6 +24,7 @@ from pydantic import BaseModel, Field
 
 from src.ai.api.routes import router as ai_router
 from src.ai.api.routes_refinement import router as ai_refinement_router
+from src.ai.api.routes_settings import router as ai_settings_router
 from src.backtest.api.routes import router as backtest_router
 from src.broker.api.routes import router as account_router
 from src.broker.api.trading_routes import router as trading_router
@@ -111,6 +112,13 @@ OPENAPI_TAGS = [
         "'auto' and its backtest threshold is met. See the `strategies` tag for activation.",
     },
     {
+        "name": "ai-settings",
+        "description": "Per-task AI provider selection (Claude Code, Hermes Agent via Ollama, "
+        "Ollama, OpenClaw) for document analysis, strategy generation, and trade-review/"
+        "refinement. Changes apply without a backend restart — see the `ai` tag for the "
+        "tasks themselves.",
+    },
+    {
         "name": "strategies",
         "description": "Strategy version history and activation. Activation registers a "
         "version live in the engine's `StrategyRegistry`; it never changes "
@@ -167,6 +175,7 @@ app.include_router(engine_router, dependencies=_SESSION_REQUIRED)
 app.include_router(backtest_router, dependencies=_SESSION_REQUIRED)
 app.include_router(ai_router, dependencies=_SESSION_REQUIRED)
 app.include_router(ai_refinement_router, dependencies=_SESSION_REQUIRED)
+app.include_router(ai_settings_router, dependencies=_SESSION_REQUIRED)
 app.include_router(strategies_router, dependencies=_SESSION_REQUIRED)
 app.include_router(news_router, dependencies=_SESSION_REQUIRED)
 

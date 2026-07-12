@@ -9,11 +9,45 @@ another module's internals (see CLAUDE.md "Architecture").
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from pydantic import BaseModel, Field
 
 from src.strategies.domain.versioning import CodeSource, StrategyVersion, VersionStatus
+
+# Recognizes the old pre-structured indicator shape ("EMA200", "RSI(14)") so
+# `StrategyVersion.spec` rows written before indicators became structured
+# objects still deserialize instead of 500ing GET /strategies/versions. Kept
+# as an independent copy of `ai/domain/models.py`'s equivalent regex — this
+# module never imports from `ai/` (see module docstring above).
+_LEGACY_INDICATOR_TOKEN_RE = re.compile(r"^(EMA|SMA|RSI)\s*\(?(\d+)\)?$", re.IGNORECASE)
+
+
+class IndicatorSpecOut(BaseModel):
+    """One indicator recognized into a plottable family (ema/sma/rsi/macd/
+    bollinger) — mirrors `ai/api/schemas.py: IndicatorSpecSchema`."""
+
+    type: str = Field(description="One of: ema, sma, rsi, macd, bollinger.")
+    period: int = Field(
+        description="Primary lookback — EMA/SMA/RSI span, Bollinger's SMA period, or MACD's "
+        "fast period."
+    )
+    label: str = Field(description="The indicator as written in the source text, e.g. 'EMA200'.")
+    source: str = Field(default="close", description="Candle field the indicator is computed on.")
+    params: dict[str, float] = Field(
+        default_factory=dict,
+        description="Family-specific extra knobs — macd: {slow, signal}; bollinger: {std_dev}.",
+    )
+
+
+class PriceLevelAnnotationOut(BaseModel):
+    """An explicit numeric price level the source text states outright —
+    mirrors `ai/api/schemas.py: PriceLevelAnnotationSchema`."""
+
+    type: str = Field(description="One of: support, resistance, level.")
+    price: float = Field(description="The literal price level from the text.")
+    label: str = Field(description="The level as written in the source text.")
 
 
 class StrategySpecSnapshotOut(BaseModel):
@@ -21,11 +55,49 @@ class StrategySpecSnapshotOut(BaseModel):
     symbols: list[str] = Field(description="Symbols this method applies to.")
     entry_timeframe: str = Field(description="Entry timeframe — always 'M5' for this project.")
     confirmation_timeframes: list[str] = Field(description="Higher timeframes used to confirm.")
-    indicators: list[str] = Field(description="Indicator names used.")
+    indicators: list[IndicatorSpecOut] = Field(
+        description="Indicators recognized into one of the 5 plottable families."
+    )
     entry_rules: str = Field(description="Plain-English entry logic.")
     exit_rules: str = Field(description="Plain-English exit logic.")
     risk_notes: str = Field(description="Informational only — real caps live in risk.yaml.")
     params: dict[str, Any] = Field(default_factory=dict, description="Numeric parameters.")
+    unrecognized_indicators: list[str] = Field(
+        default_factory=list,
+        description="Indicator names that don't map onto one of the 5 plottable families — "
+        "display/audit only, never rendered on the chart.",
+    )
+    price_levels: list[PriceLevelAnnotationOut] = Field(
+        default_factory=list,
+        description="Explicit numeric support/resistance/pivot levels — rendered as locked "
+        "horizontal lines on the chart.",
+    )
+    chart_notes: list[str] = Field(
+        default_factory=list,
+        description="Other charting/drawing-tool mentions with no explicit number attached — "
+        "informational only, never rendered as geometry.",
+    )
+
+
+def _coerce_legacy_spec_dict(raw: dict[str, Any]) -> dict[str, Any]:
+    """Upgrade a `StrategyVersion.spec` dict written before indicators were
+    structured (plain `indicators: list[str]`, no `unrecognized_indicators`/
+    `price_levels`/`chart_notes`) so it still validates against the current
+    `StrategySpecSnapshotOut`. Specs already in the new shape pass through
+    unchanged (each `indicators` entry is already a dict)."""
+    indicators = raw.get("indicators", [])
+    if indicators and all(isinstance(entry, str) for entry in indicators):
+        parsed: list[dict[str, Any]] = []
+        unrecognized: list[str] = list(raw.get("unrecognized_indicators", []))
+        for token in indicators:
+            match = _LEGACY_INDICATOR_TOKEN_RE.match(str(token).strip())
+            if match:
+                family, period = match.group(1).lower(), int(match.group(2))
+                parsed.append({"type": family, "period": period, "label": token})
+            else:
+                unrecognized.append(str(token))
+        return {**raw, "indicators": parsed, "unrecognized_indicators": unrecognized}
+    return raw
 
 
 class StrategyVersionOut(BaseModel):
@@ -70,7 +142,11 @@ class StrategyVersionOut(BaseModel):
             created_at=int(version.created_at.timestamp()),
             parent_version_id=version.parent_version_id,
             draft_id=version.draft_id,
-            spec=StrategySpecSnapshotOut(**version.spec) if version.spec else None,
+            spec=(
+                StrategySpecSnapshotOut(**_coerce_legacy_spec_dict(version.spec))
+                if version.spec
+                else None
+            ),
             backtest_report_id=version.backtest_report_id,
         )
 

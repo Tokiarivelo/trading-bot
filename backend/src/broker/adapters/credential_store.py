@@ -14,20 +14,13 @@ from pathlib import Path
 from cryptography.fernet import Fernet, InvalidToken
 
 from src.broker.domain.account import Mt5Credentials
+from src.shared.security.keyring_store import (
+    KEYRING_KEY_NAME,
+    KEYRING_SERVICE,
+    keyring_key_provider,
+)
 
-KEYRING_SERVICE = "trading-bot"
-KEYRING_KEY_NAME = "credential-encryption-key"
-
-
-def keyring_key_provider() -> bytes:
-    """Fetch (or create once) the encryption key from the OS keyring."""
-    import keyring
-
-    key = keyring.get_password(KEYRING_SERVICE, KEYRING_KEY_NAME)
-    if key is None:
-        key = Fernet.generate_key().decode()
-        keyring.set_password(KEYRING_SERVICE, KEYRING_KEY_NAME, key)
-    return key.encode()
+__all__ = ["KEYRING_KEY_NAME", "KEYRING_SERVICE", "FernetCredentialStore", "keyring_key_provider"]
 
 
 class FernetCredentialStore:

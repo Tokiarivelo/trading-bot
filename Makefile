@@ -118,8 +118,9 @@ dev-frontend: ## Run the Next.js dev server (default http://localhost:3000)
 	cd $(FRONTEND_DIR) && $(PNPM) dev --port $(FRONTEND_PORT)
 
 # Wine Python used by the gateway (override: make dev-gateway WINE_PYTHON=/path/to/python.exe)
-# Default path matches the WINEPREFIX=~/.mt5 setup from gateway/README.md.
-WINE_PYTHON ?= $(WINEPREFIX)/drive_c/Python312/python.exe
+# The Windows Python installer run with InstallAllUsers=0 (see gateway/README.md)
+# lands under the per-user AppData path, not C:\Python312.
+WINE_PYTHON ?= $(WINEPREFIX)/drive_c/users/$(shell whoami)/AppData/Local/Programs/Python/Python312/python.exe
 
 .PHONY: dev-gateway
 dev-gateway: ## Run the MT5 gateway under Wine (http://localhost:8787); auto-starts the MT5 terminal first

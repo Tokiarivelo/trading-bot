@@ -87,6 +87,8 @@ export const api = {
     request<T>(path, { method: "POST", body: body ? JSON.stringify(body) : undefined }),
   patch: <T>(path: string, body: unknown) =>
     request<T>(path, { method: "PATCH", body: JSON.stringify(body) }),
+  put: <T>(path: string, body: unknown) =>
+    request<T>(path, { method: "PUT", body: JSON.stringify(body) }),
   postForm: <T>(path: string, form: FormData) => requestForm<T>(path, "POST", form),
   delete: <T>(path: string) => request<T>(path, { method: "DELETE" }),
 };
@@ -339,16 +341,37 @@ export const getBacktestReport = (id: string) =>
 
 // ── AI: PDF -> StrategySpec pipeline (Phase 6, F4) ──────────────────────────
 
+export type IndicatorType = "ema" | "sma" | "rsi" | "macd" | "bollinger";
+
+export interface IndicatorSpec {
+  type: IndicatorType;
+  period: number;
+  label: string;
+  source: string;
+  params: Record<string, number>;
+}
+
+export type PriceLevelAnnotationType = "support" | "resistance" | "level";
+
+export interface PriceLevelAnnotation {
+  type: PriceLevelAnnotationType;
+  price: number;
+  label: string;
+}
+
 export interface ExtractedStrategySpec {
   name: string;
   symbols: string[];
   entry_timeframe: string;
   confirmation_timeframes: string[];
-  indicators: string[];
+  indicators: IndicatorSpec[];
   entry_rules: string;
   exit_rules: string;
   risk_notes: string;
   params: Record<string, unknown>;
+  unrecognized_indicators: string[];
+  price_levels: PriceLevelAnnotation[];
+  chart_notes: string[];
 }
 
 export type DraftStatus = "pending_review" | "approved" | "rejected" | "code_generated";
@@ -416,10 +439,13 @@ export interface StrategyVersionDetail extends StrategyVersionSummary {
   code: string;
 }
 
-export const getStrategyVersions = (name?: string) =>
-  api.get<StrategyVersionSummary[]>(
-    `/strategies/versions${name ? `?name=${encodeURIComponent(name)}` : ""}`,
-  );
+export const getStrategyVersions = (name?: string, status?: StrategyVersionStatus) => {
+  const params = new URLSearchParams();
+  if (name) params.set("name", name);
+  if (status) params.set("status", status);
+  const query = params.toString();
+  return api.get<StrategyVersionSummary[]>(`/strategies/versions${query ? `?${query}` : ""}`);
+};
 export const getStrategyVersion = (id: string) =>
   api.get<StrategyVersionDetail>(`/strategies/versions/${encodeURIComponent(id)}`);
 export const activateStrategyVersion = (id: string) =>
@@ -501,6 +527,9 @@ export interface NewsEvent {
   impact: ImpactLevel;
   currency: string;
   skill: string | null; // matched news skill, or null if this event never activates one
+  forecast: string | null; // consensus estimate, formatted as the source publishes it
+  previous: string | null; // prior period's reading
+  actual: string | null; // released value, once the event has happened (source-dependent)
 }
 
 export interface NewsWindow {
@@ -619,3 +648,76 @@ export const modifyPendingOrder = (
 ) => api.post<{ status: string }>(`/broker/orders/pending/${ticket}/modify`, { price, sl, tp });
 export const cancelPendingOrder = (ticket: number) =>
   api.delete<{ status: string }>(`/broker/orders/pending/${ticket}`);
+
+// ── AI: provider settings (per-task LLM selection, Phase 10.4) ─────────────
+export interface TaskProviderStatus {
+  task: string;
+  provider: string;
+  model: string;
+  source: "override" | "default";
+  configured: boolean;
+}
+
+export interface ProviderPresetModel {
+  label: string;
+  model: string;
+}
+
+export interface ProviderInfo {
+  id: string;
+  label: string;
+  description: string;
+  needsSecret: boolean;
+  configured: boolean;
+  presetModels?: ProviderPresetModel[];
+}
+
+export interface ProviderTestResult {
+  provider: string;
+  ok: boolean;
+  message: string | null;
+  reply: string | null;
+}
+
+export const listTaskProviders = () => api.get<TaskProviderStatus[]>("/ai/settings/tasks");
+export const setTaskProvider = (task: string, provider: string, model: string) =>
+  api.put<TaskProviderStatus>(`/ai/settings/tasks/${task}`, { provider, model });
+export const clearTaskProvider = (task: string) =>
+  api.delete<TaskProviderStatus>(`/ai/settings/tasks/${task}`);
+export const testProvider = (provider: string, message?: string) =>
+  api.post<ProviderTestResult>(
+    `/ai/settings/providers/${provider}/test`,
+    message ? { message } : undefined,
+  );
+interface ProviderInfoRaw {
+  id: string;
+  label: string;
+  description: string;
+  needs_secret: boolean;
+  configured: boolean;
+  preset_models: ProviderPresetModel[] | null;
+}
+
+function fromRawProviderInfo(p: ProviderInfoRaw): ProviderInfo {
+  return {
+    id: p.id,
+    label: p.label,
+    description: p.description,
+    needsSecret: p.needs_secret,
+    configured: p.configured,
+    presetModels: p.preset_models ?? undefined,
+  };
+}
+
+export const listProviders = () =>
+  api.get<ProviderInfoRaw[]>("/ai/settings/providers").then((raw) => raw.map(fromRawProviderInfo));
+
+/** Saves `provider`'s API key, encrypted at rest — takes effect immediately,
+ * no backend restart. The key is never returned by this or any other call. */
+export const setProviderKey = (provider: string, apiKey: string) =>
+  api
+    .put<ProviderInfoRaw>(`/ai/settings/providers/${provider}/key`, { api_key: apiKey })
+    .then(fromRawProviderInfo);
+
+export const clearProviderKey = (provider: string) =>
+  api.delete<ProviderInfoRaw>(`/ai/settings/providers/${provider}/key`).then(fromRawProviderInfo);

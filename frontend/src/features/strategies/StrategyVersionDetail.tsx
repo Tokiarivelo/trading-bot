@@ -107,7 +107,29 @@ export function StrategyVersionDetail({ versionId }: { versionId: string }) {
               label="Confirmation timeframes"
               value={version.spec.confirmation_timeframes.join(", ")}
             />
-            <Row label="Indicators" value={version.spec.indicators.join(", ")} />
+            <Row
+              label="Indicators"
+              value={
+                version.spec.indicators.map((i) => i.label).join(", ") || "—"
+              }
+            />
+            {version.spec.unrecognized_indicators.length > 0 && (
+              <Row
+                label="Other indicators (not charted)"
+                value={version.spec.unrecognized_indicators.join(", ")}
+              />
+            )}
+            {version.spec.price_levels.length > 0 && (
+              <Row
+                label="Price levels"
+                value={version.spec.price_levels
+                  .map((l) => `${l.type} @ ${l.price}`)
+                  .join(", ")}
+              />
+            )}
+            {version.spec.chart_notes.length > 0 && (
+              <Row label="Chart notes" value={version.spec.chart_notes.join(", ")} />
+            )}
           </dl>
           <p className="mt-2 whitespace-pre-wrap text-ink-muted">
             <strong className="text-ink">Entry:</strong> {version.spec.entry_rules}

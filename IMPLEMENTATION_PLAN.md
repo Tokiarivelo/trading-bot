@@ -2,8 +2,10 @@
 
 > An MT5-connected, AI-assisted trading bot specialized in **XAUUSD, XAGUSD, BTCUSD**.
 > Entries always on the **5-minute timeframe**, confirmed by higher timeframes.
-> Strategies are generated from **PDF documents analyzed by an AI** (Claude or Ollama),
-> and the bot **self-refines every 10 trades** based on AI analysis of its results.
+> Strategies are generated from **PDF documents analyzed by an AI** — pick a provider
+> per task (Claude API, Claude Code, Ollama/Hermes Agent, or OpenClaw; see
+> `AI_PROVIDERS_CONFIGURATION.md`) — and the bot **self-refines every 10 trades**
+> based on AI analysis of its results.
 
 ---
 
@@ -338,7 +340,22 @@ trading-bot/
 - `skill_selector` resolves priority: **news skill > symbol normal skill > global default**.
 
 ### 6.7 `ai/`
-- `LLMPort` with two adapters (Claude / Ollama), selectable in `configs/ai.yaml` per task — e.g., Claude for code generation, Ollama for routine trade commentary.
+- `LLMPort` with four adapters — `claude` (direct Anthropic API), `claude_code`
+  (headless Claude Code CLI, uses local subscription login instead of an API
+  key), `ollama` (local models, incl. the "Hermes Agent" Nous-Hermes preset),
+  and `openclaw` (unverified/beta) — each built by a `LLMRouter` factory
+  registry wired in `container.py`. Full setup per provider:
+  `AI_PROVIDERS_CONFIGURATION.md`; design/rationale (incl. measured Claude
+  Code per-call overhead): `AI_PROVIDER_SETTINGS_PLAN.md`.
+- Per-task provider selection is two-layered: `configs/ai.yaml`'s
+  `provider_per_task` is the versioned, git-tracked **default** (restart to
+  change); the **Settings** page (`/settings` in the frontend,
+  `GET/PUT/DELETE /ai/settings/tasks/*`) writes a per-task override to the
+  `ai_task_provider_override` DB table, which `LLMRouter` picks up on the
+  very next call to that task — no backend restart. Clearing an override in
+  the UI reverts the task to the YAML default. See
+  `AI_PROVIDER_SETTINGS_PLAN.md` §4.2/§10 for the resolution order and cache
+  semantics.
 - **PDF pipeline**: `pymupdf` extracts text+images → prompt `extract_method_from_pdf` → structured `StrategySpec` (JSON: entry rules, exit rules, TFs, indicators, risk notes) → user reviews spec in UI → prompt `generate_strategy_code` → file in `strategies/generated/` → **mandatory backtest** → user activates.
 - **10-trade review**: `journal` emits `TenTradesCompleted` → collect the 10 `TradeRecord`s incl. M5 + HTF candle snapshots around each trade → prompt `review_ten_trades` → `AnalysisReport` (what worked, what failed, hypothesis) → optionally `RefinementProposal` (param change or code diff) → **auto-backtest the proposal; apply only if it beats the current version; always keep the old version**. A config flag chooses `auto-apply` vs `ask-user`.
 
@@ -471,8 +488,14 @@ Each `SKILL.md` should contain: purpose, exact steps, files it may touch, valida
 | `configs/app.yaml` | mode (paper/live), enabled symbols, engine on/off, timezone | yes |
 | `configs/symbols/<sym>.yaml` | per-symbol trading params | yes |
 | `configs/risk.yaml` | user-owned risk caps (AI can never write) | yes |
-| `configs/ai.yaml` | provider selection, models, refinement mode | yes |
+| `configs/ai.yaml` | default provider selection per task, refinement mode | no (defaults only — see below) |
 | `configs/news.yaml` | calendar source, tracked events, default windows | yes |
+
+`configs/ai.yaml`'s `provider_per_task` needs a restart to take effect, same
+as the other YAML defaults in this table — it's reviewed, git-tracked
+config. The **live**, hot-reloadable path is the Settings page's per-task DB
+override (`ai_task_provider_override` table, §6.7), which `LLMRouter`
+resolves on every call with no restart and no file involved.
 
 ### 10.2 Examples
 
@@ -509,11 +532,15 @@ consecutive_loss_pause: 5     # circuit breaker
 
 ```yaml
 # configs/ai.yaml
+# provider: claude | ollama | claude_code | openclaw — see AI_PROVIDERS_CONFIGURATION.md
 provider_per_task:
   pdf_extraction:  { provider: claude, model: claude-sonnet-5 }
   code_generation: { provider: claude, model: claude-sonnet-5 }
   ten_trade_review:{ provider: claude, model: claude-haiku-4-5 }
-  # or provider: ollama, model: qwen2.5-coder:14b
+  # other providers, same shape:
+  #   { provider: ollama, model: "hermes3:8b" }   # "Hermes Agent" preset
+  #   { provider: claude_code, model: "sonnet" }  # local Claude Code login
+  #   { provider: openclaw, model: "<id>" }       # unverified/beta
 refinement:
   mode: suggest               # suggest | auto
   auto_apply_min_improvement_pct: 10
@@ -607,6 +634,19 @@ review_every_n_trades: 10
 - [x] Reconnect/resume logic (gateway drop, terminal restart, backend restart with open positions)
 - [x] Alerting (Telegram/email) for fills, circuit breakers, refinements
 - [ ] 30 days profitable+stable paper trading → smallest live size → scale slowly
+
+### Phase 10 — Multi-provider AI settings (design: `AI_PROVIDER_SETTINGS_PLAN.md`)
+- [x] **10.1** `LLMRouter` registry/factory refactor; `ClaudeCodeAdapter` and
+      `OpenClawAdapter` (unverified/beta) added alongside `claude`/`ollama`;
+      new `Settings`/`.env.example` fields; `container.py` rewired; unit
+      tests for router + both new adapters; `configs/ai.yaml` documented
+- [x] **10.2** DB-backed per-task provider overrides + `ProviderSettingsService`
+      (`ai_task_provider_override` table, migration `369b56f79a5d`)
+- [x] **10.3** Settings API (`GET/PUT/DELETE /ai/settings/tasks/*`, test-connection,
+      `GET /ai/settings/providers` catalog)
+- [x] **10.4** Settings page (frontend) — pick a provider per task at runtime, no
+      restart; verified end-to-end against a running backend
+- [x] **10.5** Docs pass confirming everything above matches shipped code
 
 ---
 

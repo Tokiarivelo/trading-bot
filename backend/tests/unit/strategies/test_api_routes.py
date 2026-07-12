@@ -192,3 +192,48 @@ async def test_rename_version_not_found(api):
         "/strategies/versions/does-not-exist/rename", json={"name": "renamed"}
     )
     assert response.status_code == 404
+
+
+async def test_list_versions_filters_by_status(api, service):
+    strategy_versions, _ = service
+    v1 = strategy_versions.save_generated_code(
+        name="sample", code=VALID_CODE, source=CodeSource.AI_GENERATED
+    )
+    strategy_versions.save_generated_code(
+        name="sample", code=VALID_CODE, source=CodeSource.AI_GENERATED
+    )
+    await api.post(f"/strategies/versions/{v1.id}/activate")
+
+    response = await api.get("/strategies/versions", params={"status": "active"})
+    assert response.status_code == 200
+    (summary,) = response.json()
+    assert summary["id"] == v1.id
+
+
+async def test_get_version_with_legacy_string_indicators_still_validates(api, service):
+    """`StrategyVersion.spec` rows written before indicators were structured
+    objects (plain `indicators: list[str]`) must still deserialize — this is
+    the backward-compat contract `_coerce_legacy_spec_dict` exists for."""
+    strategy_versions, _ = service
+    legacy_spec = {
+        "name": "sample",
+        "symbols": ["XAUUSD"],
+        "entry_timeframe": "M5",
+        "confirmation_timeframes": ["H1"],
+        "indicators": ["EMA200", "Ichimoku Cloud"],
+        "entry_rules": "",
+        "exit_rules": "",
+        "risk_notes": "",
+        "params": {},
+    }
+    v1 = strategy_versions.save_generated_code(
+        name="sample", code=VALID_CODE, source=CodeSource.AI_GENERATED, spec=legacy_spec
+    )
+
+    response = await api.get(f"/strategies/versions/{v1.id}")
+    assert response.status_code == 200
+    spec = response.json()["spec"]
+    assert spec["indicators"] == [
+        {"type": "ema", "period": 200, "label": "EMA200", "source": "close", "params": {}}
+    ]
+    assert spec["unrecognized_indicators"] == ["Ichimoku Cloud"]

@@ -1,11 +1,57 @@
-# AI provider selection per task, and refinement policy.
+# AI provider selection per task (default layer), and refinement policy.
+#
+# provider is one of:
+#   claude | openai | gemini | mistral | groq | deepseek | xai
+#   | claude_code | ollama | openclaw
+# (see AI_PROVIDERS_CONFIGURATION.md for full setup instructions per
+# provider, and AI_PROVIDER_SETTINGS_PLAN.md for the settings-page design).
+#
+# This file is the versioned, git-tracked DEFAULT — editing it needs a
+# backend restart. The Settings page (/settings in the frontend,
+# GET/PUT/DELETE /ai/settings/tasks/*) writes a live per-task override to
+# the `ai_task_provider_override` DB table instead; overrides take effect
+# on the next call with no restart, and fall back to the values below when
+# cleared. See AI_PROVIDER_SETTINGS_PLAN.md §4.2/§10 for the resolution
+# order.
+#
+#   claude       - direct Anthropic API (needs TB_ANTHROPIC_API_KEY, or a
+#                  key saved on the Settings page). Cheapest/fastest for
+#                  high-frequency tasks.
+#   openai       - direct OpenAI API (needs TB_OPENAI_API_KEY / Settings key).
+#   gemini       - Google's Generative Language API (needs TB_GEMINI_API_KEY
+#                  / Settings key).
+#   mistral      - Mistral's La Plateforme API (needs TB_MISTRAL_API_KEY /
+#                  Settings key).
+#   groq         - Groq's low-latency inference API (needs TB_GROQ_API_KEY /
+#                  Settings key).
+#   deepseek     - direct DeepSeek API (needs TB_DEEPSEEK_API_KEY / Settings
+#                  key).
+#   xai          - direct xAI (Grok) API (needs TB_XAI_API_KEY / Settings key).
+#   claude_code  - headless Claude Code CLI, uses your local `claude login`
+#                  subscription instead of an API key. Carries ~8.5k-11.8k
+#                  tokens of fixed per-call overhead (measured) — prefer it
+#                  for occasional, high-context tasks over frequent ones.
+#   ollama       - any locally pulled model (needs TB_OLLAMA_URL reachable).
+#                  "Hermes Agent" in the settings UI is just this provider
+#                  with a Nous-Hermes model preset (default: hermes3:8b) —
+#                  not a separate provider.
+#   openclaw     - UNVERIFIED integration (needs TB_OPENCLAW_URL and a key,
+#                  either TB_OPENCLAW_API_KEY or a Settings-page key). Treat
+#                  as beta until confirmed against a real OpenClaw instance.
+#
+# Every provider above except ollama/claude_code takes an API key, settable
+# either as the env var above or on the Settings page (Settings page always
+# wins, and is encrypted at rest — see AI_PROVIDER_SETTINGS_PLAN.md §6.5).
 provider_per_task:
   pdf_extraction:   { provider: claude, model: claude-sonnet-5 }
   code_generation:  { provider: claude, model: claude-sonnet-5 }
   ten_trade_review: { provider: claude, model: claude-haiku-4-5 }
   code_refinement:  { provider: claude, model: claude-sonnet-5 }
-  # Local alternative for any task:
-  #   { provider: ollama, model: "qwen2.5-coder:14b" }
+  # Other providers, same shape:
+  #   { provider: ollama, model: "hermes3:8b" }        # Hermes Agent preset
+  #   { provider: ollama, model: "qwen2.5-coder:14b" }  # any local model
+  #   { provider: claude_code, model: "sonnet" }
+  #   { provider: openclaw, model: "<openclaw-model-id>" }
 
 refinement:
   mode: suggest               # suggest | auto — keep "suggest" until you trust the loop

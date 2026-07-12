@@ -31,6 +31,21 @@ class FakePosition:
         self.comment = comment
 
 
+class FakePendingOrder:
+    def __init__(
+        self, ticket, symbol, type_, volume_current, price_open, sl, tp, time_setup, comment=""
+    ) -> None:
+        self.ticket = ticket
+        self.symbol = symbol
+        self.type = type_
+        self.volume_current = volume_current
+        self.price_open = price_open
+        self.sl = sl
+        self.tp = tp
+        self.time_setup = time_setup
+        self.comment = comment
+
+
 class FakeMt5:
     TIMEFRAME_M1 = 1
     TIMEFRAME_M5 = 5
@@ -40,8 +55,14 @@ class FakeMt5:
 
     ORDER_TYPE_BUY = 0
     ORDER_TYPE_SELL = 1
+    ORDER_TYPE_BUY_LIMIT = 2
+    ORDER_TYPE_SELL_LIMIT = 3
+    ORDER_TYPE_BUY_STOP = 4
+    ORDER_TYPE_SELL_STOP = 5
     TRADE_ACTION_DEAL = 1
     TRADE_ACTION_SLTP = 2
+    TRADE_ACTION_MODIFY = 7
+    TRADE_ACTION_REMOVE = 8
     ORDER_TIME_GTC = 0
     ORDER_FILLING_FOK = 0
     ORDER_FILLING_IOC = 1
@@ -49,13 +70,16 @@ class FakeMt5:
     SYMBOL_FILLING_FOK = 1
     SYMBOL_FILLING_IOC = 2
     TRADE_RETCODE_DONE = 10009
+    TRADE_RETCODE_NO_CHANGES = 10025
 
     def __init__(self) -> None:
         self.reject_login = False
         self.shutdown_called = False
         self.reject_order = False
+        self.reject_no_changes = False
         self._next_ticket = 1000
         self._positions: dict[int, FakePosition] = {}
+        self._pending_orders: dict[int, FakePendingOrder] = {}
         # Bitmask a symbol reports as supported filling modes — defaults to
         # IOC (matches the old hardcoded behavior other tests rely on).
         # Tests exercising `_filling_type`'s fallback set this directly.
@@ -170,12 +194,40 @@ class FakeMt5:
         if self.reject_order:
             return SimpleNamespace(retcode=10004, order=0, volume=0.0, price=0.0)
         if request["action"] == self.TRADE_ACTION_SLTP:
+            if self.reject_no_changes:
+                return SimpleNamespace(
+                    retcode=self.TRADE_RETCODE_NO_CHANGES,
+                    order=request["position"],
+                    volume=0.0,
+                    price=0.0,
+                )
             position = self._positions.get(request["position"])
             if position is not None:
                 position.sl = request.get("sl") or None
                 position.tp = request.get("tp") or None
             return SimpleNamespace(
                 retcode=self.TRADE_RETCODE_DONE, order=request["position"], volume=0.0, price=0.0
+            )
+        if request["action"] == self.TRADE_ACTION_MODIFY:
+            if self.reject_no_changes:
+                return SimpleNamespace(
+                    retcode=self.TRADE_RETCODE_NO_CHANGES,
+                    order=request["order"],
+                    volume=0.0,
+                    price=0.0,
+                )
+            order = self._pending_orders.get(request["order"])
+            if order is not None:
+                order.price_open = request["price"]
+                order.sl = request.get("sl") or None
+                order.tp = request.get("tp") or None
+            return SimpleNamespace(
+                retcode=self.TRADE_RETCODE_DONE, order=request["order"], volume=0.0, price=0.0
+            )
+        if request["action"] == self.TRADE_ACTION_REMOVE:
+            self._pending_orders.pop(request["order"], None)
+            return SimpleNamespace(
+                retcode=self.TRADE_RETCODE_DONE, order=request["order"], volume=0.0, price=0.0
             )
         if "position" in request:
             ticket = request["position"]
@@ -219,6 +271,17 @@ class FakeMt5:
             rows = [p for p in rows if p.ticket == ticket]
         if symbol is not None:
             rows = [p for p in rows if p.symbol == symbol]
+        return rows
+
+    def add_pending_order(self, order: FakePendingOrder) -> None:
+        self._pending_orders[order.ticket] = order
+
+    def orders_get(self, symbol=None, ticket=None):
+        rows = list(self._pending_orders.values())
+        if ticket is not None:
+            rows = [o for o in rows if o.ticket == ticket]
+        if symbol is not None:
+            rows = [o for o in rows if o.symbol == symbol]
         return rows
 
 

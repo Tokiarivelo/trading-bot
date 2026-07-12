@@ -25,6 +25,15 @@ class NewsEvent:
     time: datetime  # UTC, scheduled release time
     impact: ImpactLevel
     currency: str = ""
+    forecast: str | None = None
+    """Consensus estimate, as the source formats it (e.g. "8.5%", "1950B").
+    `None` when the source doesn't publish one for this event."""
+    previous: str | None = None
+    """Prior period's reading, same formatting caveat as `forecast`."""
+    actual: str | None = None
+    """Released value, if the event has already happened and the source
+    reports it — ForexFactory's weekly feed never populates this; Finnhub
+    does once released."""
 
 
 @dataclass(frozen=True, kw_only=True)

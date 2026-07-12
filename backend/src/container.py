@@ -7,17 +7,28 @@ adapters themselves.
 
 from __future__ import annotations
 
+import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import httpx
 import yaml
 
+from src.ai.adapters.claude import ClaudeAdapter
+from src.ai.adapters.claude_code import ClaudeCodeAdapter
+from src.ai.adapters.gemini import GeminiAdapter
+from src.ai.adapters.ollama import OllamaAdapter
+from src.ai.adapters.openai_compatible import OpenAICompatibleAdapter
+from src.ai.adapters.openclaw import OpenClawAdapter
+from src.ai.adapters.provider_config_repository import ProviderConfigRepository
+from src.ai.adapters.provider_secret_store import ProviderSecretStore
 from src.ai.adapters.report_repository import AnalysisReportRepository, RefinementProposalRepository
 from src.ai.adapters.repository import DraftRepository
-from src.ai.application.llm_router import LLMRouter
+from src.ai.application.llm_router import LLMProviderNotConfiguredError, LLMRouter, ProviderFactory
 from src.ai.application.pdf_to_strategy import PdfToStrategyService
+from src.ai.application.provider_settings import ProviderSettingsService
 from src.ai.application.refinement_loop import RefinementLoopService
+from src.ai.ports.llm import ProviderSpec
 from src.alerting.adapters.composite import CompositeAlertAdapter
 from src.alerting.adapters.email import EmailAlertAdapter
 from src.alerting.adapters.noop import NoopAlertAdapter
@@ -121,6 +132,7 @@ class Container:
     skill_selector: SkillSelectorPort
     pdf_to_strategy: PdfToStrategyService
     refinement_loop: RefinementLoopService
+    provider_settings: ProviderSettingsService
     news_client: httpx.AsyncClient
     news_window_service: NewsWindowService
 
@@ -265,10 +277,20 @@ def build_container(settings: Settings | None = None) -> Container:
     # (unlikely, but possible) wins, matching what the DB says is live.
     strategy_versions.load_active_into_registry()
 
+    provider_config_repository = ProviderConfigRepository(session_factory)
+    provider_secrets = ProviderSecretStore(Path("data/ai_provider_keys.enc"))
     llm_router = LLMRouter(
         load_llm_provider_config(settings.configs_dir),
-        anthropic_api_key=settings.anthropic_api_key,
-        ollama_url=settings.ollama_url,
+        _build_provider_factories(settings, provider_secrets),
+        overrides={
+            task: ProviderSpec(provider=override.provider, model=override.model)
+            for task, override in provider_config_repository.get_all().items()
+        },
+    )
+    provider_settings = ProviderSettingsService(
+        repository=provider_config_repository,
+        llm_router=llm_router,
+        provider_secrets=provider_secrets,
     )
     draft_repository = DraftRepository(session_factory)
     pdf_to_strategy = PdfToStrategyService(
@@ -373,10 +395,106 @@ def build_container(settings: Settings | None = None) -> Container:
         skill_selector=skill_selector,
         pdf_to_strategy=pdf_to_strategy,
         refinement_loop=refinement_loop,
+        provider_settings=provider_settings,
         news_client=news_client,
         news_window_service=news_window_service,
         alert_telegram_client=alert_telegram_client,
     )
+
+
+def _build_provider_factories(
+    settings: Settings, provider_secrets: ProviderSecretStore
+) -> dict[str, ProviderFactory]:
+    """One closure per `KNOWN_PROVIDERS` entry, each capturing only the one
+    credential/setting it needs from `Settings` — `LLMRouter` never sees a
+    raw secret (AI_PROVIDER_SETTINGS_PLAN.md §4.1). Adding a provider is a
+    new adapter class (or, for anything OpenAI-wire-compatible, just a new
+    `base_url`) plus one more entry here; `LLMRouter` itself doesn't change.
+
+    Every secret-needing provider resolves its key as
+    `provider_secrets.get(id) or settings.<x>_api_key` — a settings-page key
+    (`PUT /ai/settings/providers/{id}/key`) always wins over the `.env`
+    fallback, so switching providers in the UI never requires a restart.
+    """
+
+    def _key(provider: str, env_value: str) -> str:
+        return provider_secrets.get(provider) or env_value
+
+    def _require_key(provider: str, env_value: str, env_var: str) -> str:
+        api_key = _key(provider, env_value)
+        if not api_key:
+            raise LLMProviderNotConfiguredError(
+                f"provider {provider!r} selected but no API key is set — add one on the "
+                f"Settings page or set {env_var} in .env"
+            )
+        return api_key
+
+    def _claude(spec: ProviderSpec) -> ClaudeAdapter:
+        api_key = _require_key("claude", settings.anthropic_api_key, "TB_ANTHROPIC_API_KEY")
+        return ClaudeAdapter(api_key, spec.model)
+
+    def _openai(spec: ProviderSpec) -> OpenAICompatibleAdapter:
+        api_key = _require_key("openai", settings.openai_api_key, "TB_OPENAI_API_KEY")
+        return OpenAICompatibleAdapter("https://api.openai.com/v1", api_key, spec.model)
+
+    def _gemini(spec: ProviderSpec) -> GeminiAdapter:
+        api_key = _require_key("gemini", settings.gemini_api_key, "TB_GEMINI_API_KEY")
+        return GeminiAdapter(api_key, spec.model)
+
+    def _mistral(spec: ProviderSpec) -> OpenAICompatibleAdapter:
+        api_key = _require_key("mistral", settings.mistral_api_key, "TB_MISTRAL_API_KEY")
+        return OpenAICompatibleAdapter("https://api.mistral.ai/v1", api_key, spec.model)
+
+    def _groq(spec: ProviderSpec) -> OpenAICompatibleAdapter:
+        api_key = _require_key("groq", settings.groq_api_key, "TB_GROQ_API_KEY")
+        return OpenAICompatibleAdapter("https://api.groq.com/openai/v1", api_key, spec.model)
+
+    def _deepseek(spec: ProviderSpec) -> OpenAICompatibleAdapter:
+        api_key = _require_key("deepseek", settings.deepseek_api_key, "TB_DEEPSEEK_API_KEY")
+        return OpenAICompatibleAdapter("https://api.deepseek.com/v1", api_key, spec.model)
+
+    def _xai(spec: ProviderSpec) -> OpenAICompatibleAdapter:
+        api_key = _require_key("xai", settings.xai_api_key, "TB_XAI_API_KEY")
+        return OpenAICompatibleAdapter("https://api.x.ai/v1", api_key, spec.model)
+
+    def _ollama(spec: ProviderSpec) -> OllamaAdapter:
+        return OllamaAdapter(settings.ollama_url, spec.model)
+
+    def _claude_code(spec: ProviderSpec) -> ClaudeCodeAdapter:
+        if not shutil.which(settings.claude_code_binary):
+            raise LLMProviderNotConfiguredError(
+                f"provider 'claude_code' selected but {settings.claude_code_binary!r} "
+                "was not found on PATH — install the Claude Code CLI (see "
+                "AI_PROVIDERS_CONFIGURATION.md) or switch this task to another "
+                "provider in configs/ai.yaml"
+            )
+        return ClaudeCodeAdapter(
+            settings.claude_code_binary, spec.model, settings.claude_code_extra_args
+        )
+
+    def _openclaw(spec: ProviderSpec) -> OpenClawAdapter:
+        api_key = _key("openclaw", settings.openclaw_api_key)
+        if not settings.openclaw_url or not api_key:
+            raise LLMProviderNotConfiguredError(
+                "provider 'openclaw' selected but no URL/API key is set — set TB_OPENCLAW_URL "
+                "in .env and add a key on the Settings page (or TB_OPENCLAW_API_KEY in .env). "
+                "Note: OpenClaw's wire contract is unverified (AI_PROVIDER_SETTINGS_PLAN.md "
+                "§2.4) — treat this provider as beta."
+            )
+        return OpenClawAdapter(settings.openclaw_url, api_key, spec.model)
+
+    return {
+        "claude": _claude,
+        "openai": _openai,
+        "gemini": _gemini,
+        "mistral": _mistral,
+        "groq": _groq,
+        "deepseek": _deepseek,
+        "xai": _xai,
+        "ollama": _ollama,
+        "claude_code": _claude_code,
+        "openclaw": _openclaw,
+    }
 
 
 def _load_normal_skill(symbol: str) -> NormalSkill:

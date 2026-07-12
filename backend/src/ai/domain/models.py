@@ -9,6 +9,7 @@ for the wire; `strategies/domain/models.py` has the separate, narrower
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
@@ -22,6 +23,98 @@ class DraftStatus(StrEnum):
     CODE_GENERATED = "code_generated"
 
 
+class IndicatorType(StrEnum):
+    """The 5 indicator families the chart can actually plot. Anything the
+    PDF names outside this set stays in `ExtractedStrategySpec.
+    unrecognized_indicators` instead of being force-fit here."""
+
+    EMA = "ema"
+    SMA = "sma"
+    RSI = "rsi"
+    MACD = "macd"
+    BOLLINGER = "bollinger"
+
+
+@dataclass(frozen=True)
+class IndicatorSpec:
+    """One indicator the source text names, structured enough to actually
+    compute and plot. `period` is each family's primary lookback (EMA/SMA
+    span, RSI span, Bollinger's SMA period, or MACD's fast period); `params`
+    holds the remaining family-specific knobs (macd: slow/signal, bollinger:
+    std_dev). `label` keeps the PDF's own notation (e.g. "EMA200") for
+    display/audit regardless of how it was parsed.
+    """
+
+    type: IndicatorType
+    period: int
+    label: str
+    source: str = "close"
+    params: dict[str, float] = field(default_factory=dict)
+
+    @staticmethod
+    def from_dict(data: dict[str, Any]) -> IndicatorSpec:
+        return IndicatorSpec(
+            type=IndicatorType(data["type"]),
+            period=int(data["period"]),
+            label=str(data.get("label", data["type"])),
+            source=str(data.get("source", "close")),
+            params={k: float(v) for k, v in dict(data.get("params", {})).items()},
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "type": self.type.value,
+            "period": self.period,
+            "label": self.label,
+            "source": self.source,
+            "params": dict(self.params),
+        }
+
+
+class AnnotationType(StrEnum):
+    SUPPORT = "support"
+    RESISTANCE = "resistance"
+    LEVEL = "level"  # explicit numeric level with no clear support/resistance framing
+
+
+@dataclass(frozen=True)
+class PriceLevelAnnotation:
+    """An explicit numeric price level the text states outright (e.g.
+    "resistance at 2050") — the only kind of drawing-tool mention this
+    pipeline ever turns into chart geometry. Never inferred or estimated."""
+
+    type: AnnotationType
+    price: float
+    label: str
+
+    @staticmethod
+    def from_dict(data: dict[str, Any]) -> PriceLevelAnnotation:
+        return PriceLevelAnnotation(
+            type=AnnotationType(data["type"]),
+            price=float(data["price"]),
+            label=str(data.get("label", "")),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"type": self.type.value, "price": self.price, "label": self.label}
+
+
+_LEGACY_INDICATOR_TOKEN_RE = re.compile(r"^(EMA|SMA|RSI)\s*\(?(\d+)\)?$", re.IGNORECASE)
+
+
+def _legacy_indicator_from_token(token: str) -> IndicatorSpec | None:
+    """Best-effort upgrade of an old plain-string indicator (e.g. "EMA200",
+    "RSI(14)") — the shape written before indicators were structured —
+    into `IndicatorSpec`. Returns None for anything it can't confidently
+    parse; callers route those into `unrecognized_indicators` instead.
+    """
+    match = _LEGACY_INDICATOR_TOKEN_RE.match(token.strip())
+    if not match:
+        return None
+    family, period = match.group(1).upper(), int(match.group(2))
+    return IndicatorSpec(type=IndicatorType(family.lower()), period=period, label=token)
+
+
 @dataclass(frozen=True)
 class ExtractedStrategySpec:
     """What the `extract_method_from_pdf` prompt produces — the human-reviewable
@@ -32,24 +125,46 @@ class ExtractedStrategySpec:
     symbols: tuple[str, ...]
     entry_timeframe: str
     confirmation_timeframes: tuple[str, ...]
-    indicators: tuple[str, ...]
+    indicators: tuple[IndicatorSpec, ...]
     entry_rules: str
     exit_rules: str
     risk_notes: str
     params: dict[str, Any] = field(default_factory=dict)
+    unrecognized_indicators: tuple[str, ...] = ()
+    price_levels: tuple[PriceLevelAnnotation, ...] = ()
+    chart_notes: tuple[str, ...] = ()
 
     @staticmethod
     def from_dict(data: dict[str, Any]) -> ExtractedStrategySpec:
+        indicators: list[IndicatorSpec] = []
+        unrecognized: list[str] = list(data.get("unrecognized_indicators", []))
+        for entry in data.get("indicators", []):
+            if isinstance(entry, dict):
+                indicators.append(IndicatorSpec.from_dict(entry))
+                continue
+            # Legacy shape: a plain string like "EMA200" from before indicators
+            # were structured (old drafts/versions persisted this way).
+            parsed = _legacy_indicator_from_token(str(entry))
+            if parsed is not None:
+                indicators.append(parsed)
+            else:
+                unrecognized.append(str(entry))
+
         return ExtractedStrategySpec(
             name=str(data["name"]),
             symbols=tuple(data.get("symbols", [])),
             entry_timeframe=str(data.get("entry_timeframe", "M5")),
             confirmation_timeframes=tuple(data.get("confirmation_timeframes", [])),
-            indicators=tuple(data.get("indicators", [])),
+            indicators=tuple(indicators),
             entry_rules=str(data.get("entry_rules", "")),
             exit_rules=str(data.get("exit_rules", "")),
             risk_notes=str(data.get("risk_notes", "")),
             params=dict(data.get("params", {})),
+            unrecognized_indicators=tuple(unrecognized),
+            price_levels=tuple(
+                PriceLevelAnnotation.from_dict(level) for level in data.get("price_levels", [])
+            ),
+            chart_notes=tuple(data.get("chart_notes", [])),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -58,11 +173,14 @@ class ExtractedStrategySpec:
             "symbols": list(self.symbols),
             "entry_timeframe": self.entry_timeframe,
             "confirmation_timeframes": list(self.confirmation_timeframes),
-            "indicators": list(self.indicators),
+            "indicators": [i.to_dict() for i in self.indicators],
             "entry_rules": self.entry_rules,
             "exit_rules": self.exit_rules,
             "risk_notes": self.risk_notes,
             "params": dict(self.params),
+            "unrecognized_indicators": list(self.unrecognized_indicators),
+            "price_levels": [level.to_dict() for level in self.price_levels],
+            "chart_notes": list(self.chart_notes),
         }
 
 

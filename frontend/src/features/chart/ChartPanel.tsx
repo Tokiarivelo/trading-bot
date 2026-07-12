@@ -13,6 +13,7 @@ import {
   createChart,
   createSeriesMarkers,
   HistogramSeries,
+  LineSeries,
   type IChartApi,
   type ISeriesApi,
   type ISeriesMarkersPluginApi,
@@ -44,11 +45,20 @@ import {
   type NewsWindow,
   type PositionOut,
   type TradeMarker,
+  type OrderSide,
+  type PendingOrderType,
+  type StrategyVersionSummary,
 } from '@/shared/api/client';
 import { subscribeRoom } from '@/shared/api/ws';
 import type { Trading } from '@/features/trading/useTrading';
 import { DrawingToolbar } from './DrawingToolbar';
 import { DrawingsList } from './DrawingsList';
+import { bollinger, ema, macd, rsi, sma } from './indicators';
+
+// Prefix for drawings this component adds itself (from the active strategy's
+// PDF-derived price levels) so they can be told apart from the user's own —
+// never persisted to localStorage, never removed by "Clear All".
+const STRATEGY_DRAWING_PREFIX = 'strategy-derived:';
 
 /** Tool type strings accepted by DrawingManager.setActiveTool() */
 export type DrawingToolType =
@@ -158,6 +168,18 @@ function loadDrawingsFromStorage(
     });
   } catch {
     // Corrupt or missing localStorage data is silently ignored.
+  }
+}
+
+/** Removes every drawing except strategy-derived ones (see
+ * `STRATEGY_DRAWING_PREFIX`) — used in place of `manager.clearAll()`
+ * wherever the intent is "clear *my* drawings", not the strategy's
+ * auto-plotted price levels. */
+function clearUserDrawings(manager: DrawingManager): void {
+  for (const drawing of manager.getAllDrawings()) {
+    if (!drawing.id.startsWith(STRATEGY_DRAWING_PREFIX)) {
+      manager.removeDrawing(drawing.id);
+    }
   }
 }
 
@@ -319,12 +341,466 @@ function toSeriesMarkers(
   return markers.sort((a, b) => (a.time as number) - (b.time as number));
 }
 
+interface ChartContextMenuProps {
+  x: number;
+  y: number;
+  price: number;
+  containerWidth: number;
+  containerHeight: number;
+  onSelectOption: (side: OrderSide, type: PendingOrderType) => void;
+}
+
+function ChartContextMenu({
+  x,
+  y,
+  price,
+  containerWidth,
+  containerHeight,
+  onSelectOption,
+}: ChartContextMenuProps) {
+  const menuWidth = 160;
+  const menuHeight = 130;
+  const left = x + menuWidth > containerWidth ? x - menuWidth : x;
+  const top = y + menuHeight > containerHeight ? y - menuHeight : y;
+
+  return (
+    <div
+      id="chart-context-menu"
+      className="pointer-events-auto absolute z-30 flex w-40 flex-col rounded border border-line bg-panel py-1 text-xs shadow-xl backdrop-blur-sm bg-opacity-95"
+      style={{ left: `${left}px`, top: `${top}px` }}
+      onMouseDown={(e) => e.stopPropagation()}
+    >
+      <div className="border-b border-line px-2 py-1 text-[10px] font-semibold text-ink-muted">
+        Price: {price.toFixed(5)}
+      </div>
+      <button
+        onClick={() => onSelectOption("buy", "limit")}
+        className="w-full text-left px-2 py-1.5 hover:bg-line text-ok transition-colors font-semibold"
+      >
+        Buy Limit
+      </button>
+      <button
+        onClick={() => onSelectOption("buy", "stop")}
+        className="w-full text-left px-2 py-1.5 hover:bg-line text-ok transition-colors font-semibold"
+      >
+        Buy Stop
+      </button>
+      <button
+        onClick={() => onSelectOption("sell", "limit")}
+        className="w-full text-left px-2 py-1.5 hover:bg-line text-err transition-colors font-semibold"
+      >
+        Sell Limit
+      </button>
+      <button
+        onClick={() => onSelectOption("sell", "stop")}
+        className="w-full text-left px-2 py-1.5 hover:bg-line text-err transition-colors font-semibold"
+      >
+        Sell Stop
+      </button>
+    </div>
+  );
+}
+
+interface ChartOrderPopoverProps {
+  x: number;
+  y: number;
+  price: number;
+  side: OrderSide;
+  orderType: PendingOrderType;
+  containerWidth: number;
+  containerHeight: number;
+  busy: boolean;
+  onClose: () => void;
+  onPlace: (volume: number, price: number, sl: number | null, tp: number | null) => Promise<void>;
+}
+
+function ChartOrderPopover({
+  x,
+  y,
+  price: initialPrice,
+  side,
+  orderType,
+  containerWidth,
+  containerHeight,
+  busy: parentBusy,
+  onClose,
+  onPlace,
+}: ChartOrderPopoverProps) {
+  const [volume, setVolume] = useState(() => {
+    return localStorage.getItem("chart-last-volume") || "0.01";
+  });
+  const [priceStr, setPriceStr] = useState(initialPrice.toFixed(5));
+  const [sl, setSl] = useState("");
+  const [tp, setTp] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [localBusy, setLocalBusy] = useState(false);
+
+  const isBuy = side === "buy";
+  const sideColorClass = isBuy ? "text-ok" : "text-err";
+  const buttonBgClass = isBuy ? "bg-ok hover:bg-opacity-90" : "bg-err hover:bg-opacity-90";
+  const buttonTextClass = isBuy ? "text-[#04211e]" : "text-[#2b0808]";
+
+  const popoverWidth = 180;
+  const popoverHeight = 220;
+  const left = x + popoverWidth > containerWidth ? x - popoverWidth : x;
+  const top = y + popoverHeight > containerHeight ? y - popoverHeight : y;
+
+  const handlePlace = async () => {
+    const v = Number(volume);
+    const p = Number(priceStr);
+    if (!v || isNaN(v) || v <= 0) {
+      setError("Invalid volume");
+      return;
+    }
+    if (!p || isNaN(p) || p <= 0) {
+      setError("Invalid price");
+      return;
+    }
+    setError(null);
+    setLocalBusy(true);
+    try {
+      localStorage.setItem("chart-last-volume", volume);
+      await onPlace(v, p, numOrNull(sl), numOrNull(tp));
+      onClose();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Order placement failed");
+    } finally {
+      setLocalBusy(false);
+    }
+  };
+
+  const isBusy = parentBusy || localBusy;
+
+  return (
+    <div
+      id="chart-order-popover"
+      className="pointer-events-auto absolute z-30 flex w-44 flex-col gap-2 rounded border border-line bg-panel p-3 text-xs shadow-xl backdrop-blur-sm bg-opacity-95"
+      style={{ left: `${left}px`, top: `${top}px` }}
+      onMouseDown={(e) => e.stopPropagation()}
+    >
+      <div className="flex items-center justify-between border-b border-line pb-1">
+        <span className={`font-bold uppercase ${sideColorClass}`}>
+          {side} {orderType}
+        </span>
+        <button
+          onClick={onClose}
+          className="cursor-pointer text-ink-muted hover:text-ink text-sm font-bold"
+          title="Cancel"
+          disabled={isBusy}
+        >
+          ×
+        </button>
+      </div>
+
+      {error && <div className="text-[10px] text-err leading-tight">{error}</div>}
+
+      <div className="flex flex-col gap-1">
+        <label className="text-[10px] text-ink-muted">Volume (lots)</label>
+        <input
+          className="rounded border border-line bg-transparent px-1.5 py-0.5"
+          value={volume}
+          onChange={(e) => setVolume(e.target.value)}
+          placeholder="0.01"
+          disabled={isBusy}
+        />
+      </div>
+
+      <div className="flex flex-col gap-1">
+        <label className="text-[10px] text-ink-muted">Price</label>
+        <input
+          className="rounded border border-line bg-transparent px-1.5 py-0.5"
+          value={priceStr}
+          onChange={(e) => setPriceStr(e.target.value)}
+          placeholder="Price"
+          disabled={isBusy}
+        />
+      </div>
+
+      <div className="flex gap-2">
+        <div className="flex flex-1 flex-col gap-1">
+          <label className="text-[10px] text-ink-muted">SL (opt)</label>
+          <input
+            className="w-full rounded border border-line bg-transparent px-1.5 py-0.5"
+            value={sl}
+            onChange={(e) => setSl(e.target.value)}
+            placeholder="SL"
+            disabled={isBusy}
+          />
+        </div>
+        <div className="flex flex-1 flex-col gap-1">
+          <label className="text-[10px] text-ink-muted">TP (opt)</label>
+          <input
+            className="w-full rounded border border-line bg-transparent px-1.5 py-0.5"
+            value={tp}
+            onChange={(e) => setTp(e.target.value)}
+            placeholder="TP"
+            disabled={isBusy}
+          />
+        </div>
+      </div>
+
+      <button
+        onClick={handlePlace}
+        disabled={isBusy}
+        className={`mt-1 cursor-pointer rounded py-1 px-2 font-bold transition-opacity ${buttonBgClass} ${buttonTextClass} disabled:opacity-50`}
+      >
+        {isBusy ? "Placing..." : "Place Order"}
+      </button>
+    </div>
+  );
+}
+
+interface DrawingContextMenuProps {
+  x: number;
+  y: number;
+  drawingType: string;
+  containerWidth: number;
+  containerHeight: number;
+  onSelectEdit: () => void;
+  onDelete: () => void;
+}
+
+function DrawingContextMenu({
+  x,
+  y,
+  drawingType,
+  containerWidth,
+  containerHeight,
+  onSelectEdit,
+  onDelete,
+}: DrawingContextMenuProps) {
+  const menuWidth = 160;
+  const menuHeight = 100;
+  const left = x + menuWidth > containerWidth ? x - menuWidth : x;
+  const top = y + menuHeight > containerHeight ? y - menuHeight : y;
+
+  const typeLabels: Record<string, string> = {
+    'trend-line': 'Trend Line',
+    'extended-line': 'Extended Line',
+    'horizontal-line': 'Horizontal Line',
+    'vertical-line': 'Vertical Line',
+    'rectangle': 'Rectangle',
+    'fib-retracement': 'Fibonacci Retr.',
+    'parallel-channel': 'Parallel Channel',
+  };
+
+  return (
+    <div
+      id="drawing-context-menu"
+      className="pointer-events-auto absolute z-30 flex w-40 flex-col rounded border border-line bg-panel py-1 text-xs shadow-xl backdrop-blur-sm bg-opacity-95"
+      style={{ left: `${left}px`, top: `${top}px` }}
+      onMouseDown={(e) => e.stopPropagation()}
+    >
+      <div className="border-b border-line px-2 py-1 text-[10px] font-semibold text-ink-muted">
+        {typeLabels[drawingType] || drawingType}
+      </div>
+      <button
+        onClick={onSelectEdit}
+        className="w-full text-left px-2 py-1.5 hover:bg-line text-ink transition-colors font-semibold flex items-center gap-1.5 cursor-pointer"
+      >
+        <span>✏️</span> Edit Style
+      </button>
+      <button
+        onClick={onDelete}
+        className="w-full text-left px-2 py-1.5 hover:bg-line text-err transition-colors font-semibold flex items-center gap-1.5 cursor-pointer"
+      >
+        <span>🗑️</span> Delete
+      </button>
+    </div>
+  );
+}
+
+interface DrawingEditPopoverProps {
+  x: number;
+  y: number;
+  drawingId: string;
+  drawingType: string;
+  containerWidth: number;
+  containerHeight: number;
+  manager: DrawingManager | null;
+  originalStylesRef: React.MutableRefObject<Record<string, any>>;
+  onClose: () => void;
+  onSaveAndSync: () => void;
+  onColorChange: (id: string, color: string) => void;
+}
+
+function DrawingEditPopover({
+  x,
+  y,
+  drawingId,
+  drawingType,
+  containerWidth,
+  containerHeight,
+  manager,
+  originalStylesRef,
+  onClose,
+  onSaveAndSync,
+  onColorChange,
+}: DrawingEditPopoverProps) {
+  const popoverWidth = 180;
+  const popoverHeight = 160;
+  const left = x + popoverWidth > containerWidth ? x - popoverWidth : x;
+  const top = y + popoverHeight > containerHeight ? y - popoverHeight : y;
+
+  const drawing = manager?.getDrawing(drawingId);
+  const isLocked = drawing?.options?.locked === true;
+  const isVisible = drawing?.options?.visible !== false;
+
+  const backup = originalStylesRef.current[drawingId];
+  const activeColor = backup?.lineColor || drawing?.style?.lineColor || '#2962ff';
+  const activeWidth = backup?.lineWidth || drawing?.style?.lineWidth || 2;
+
+  const PRESET_COLORS = [
+    "#2962ff", // Blue
+    "#26a69a", // Green
+    "#ef5350", // Red
+    "#ff9800", // Orange
+    "#9c27b0", // Purple
+    "#ffffff", // White
+  ];
+
+  const handleLockToggle = () => {
+    if (drawing) {
+      const nextLocked = !isLocked;
+      drawing.updateOptions({ locked: nextLocked });
+      onSaveAndSync();
+    }
+  };
+
+  const handleVisibleToggle = () => {
+    if (drawing) {
+      const nextVisible = !isVisible;
+      drawing.updateOptions({ visible: nextVisible });
+      onSaveAndSync();
+    }
+  };
+
+  const handleWidthChange = (width: number) => {
+    if (drawing) {
+      if (originalStylesRef.current[drawingId]) {
+        originalStylesRef.current[drawingId].lineWidth = width;
+      } else {
+        drawing.updateStyle({ lineWidth: width });
+      }
+      onSaveAndSync();
+    }
+  };
+
+  const typeLabels: Record<string, string> = {
+    'trend-line': 'Trend Line',
+    'extended-line': 'Extended Line',
+    'horizontal-line': 'Horizontal Line',
+    'vertical-line': 'Vertical Line',
+    'rectangle': 'Rectangle',
+    'fib-retracement': 'Fibonacci Retr.',
+    'parallel-channel': 'Parallel Channel',
+  };
+
+  return (
+    <div
+      id="drawing-edit-popover"
+      className="pointer-events-auto absolute z-30 flex w-44 flex-col gap-2 rounded border border-line bg-panel p-3 text-xs shadow-xl backdrop-blur-sm bg-opacity-95"
+      style={{ left: `${left}px`, top: `${top}px` }}
+      onMouseDown={(e) => e.stopPropagation()}
+    >
+      <div className="flex items-center justify-between border-b border-line pb-1">
+        <span className="font-bold text-ink">
+          {typeLabels[drawingType] || 'Edit Drawing'}
+        </span>
+        <button
+          onClick={onClose}
+          className="cursor-pointer text-ink-muted hover:text-ink text-sm font-bold"
+          title="Close"
+        >
+          ×
+        </button>
+      </div>
+
+      <div className="flex flex-col gap-1">
+        <label className="text-[10px] text-ink-muted">Color</label>
+        <div className="flex items-center gap-1 flex-wrap">
+          {PRESET_COLORS.map((c) => (
+            <button
+              key={c}
+              onClick={() => onColorChange(drawingId, c)}
+              className={`cursor-pointer rounded-full border hover:scale-110 transition-transform ${
+                activeColor === c ? 'border-ink scale-105' : 'border-line'
+              }`}
+              style={{
+                width: 16,
+                height: 16,
+                backgroundColor: c,
+              }}
+              title={c}
+            />
+          ))}
+          <input
+            type="color"
+            value={activeColor}
+            onChange={(e) => onColorChange(drawingId, e.target.value)}
+            className="color-picker-input cursor-pointer"
+            style={{ width: 16, height: 16, border: 'none', padding: 0, background: 'none' }}
+            title="Custom color"
+          />
+        </div>
+      </div>
+
+      <div className="flex flex-col gap-1">
+        <label className="text-[10px] text-ink-muted">Thickness</label>
+        <div className="flex gap-1">
+          {[1, 2, 3, 4].map((w) => (
+            <button
+              key={w}
+              onClick={() => handleWidthChange(w)}
+              className={`flex-1 py-0.5 rounded border text-[10px] text-center transition-colors cursor-pointer ${
+                activeWidth === w
+                  ? 'border-accent text-accent font-bold bg-line'
+                  : 'border-line text-ink-muted hover:text-ink'
+              }`}
+            >
+              {w}px
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div className="flex items-center justify-between mt-1 border-t border-line pt-2">
+        <button
+          onClick={handleVisibleToggle}
+          className={`flex items-center gap-1.5 px-2 py-1 rounded border text-[10px] cursor-pointer transition-colors ${
+            isVisible
+              ? 'border-line text-ink hover:bg-line'
+              : 'border-err border-opacity-50 text-err hover:bg-err hover:bg-opacity-10'
+          }`}
+          title={isVisible ? 'Hide drawing' : 'Show drawing'}
+        >
+          <span>{isVisible ? '👁️ Visible' : '🚫 Hidden'}</span>
+        </button>
+
+        <button
+          onClick={handleLockToggle}
+          className={`flex items-center gap-1.5 px-2 py-1 rounded border text-[10px] cursor-pointer transition-colors ${
+            isLocked
+              ? 'border-err border-opacity-50 text-err hover:bg-err hover:bg-opacity-10'
+              : 'border-line text-ink hover:bg-line'
+          }`}
+          title={isLocked ? 'Unlock drawing' : 'Lock drawing'}
+        >
+          <span>{isLocked ? '🔒 Locked' : '🔓 Unlocked'}</span>
+        </button>
+      </div>
+    </div>
+  );
+}
+
 export function ChartPanel({
   symbol,
   trading,
+  activeStrategy,
 }: {
   symbol: string;
   trading: Trading;
+  activeStrategy: StrategyVersionSummary | null;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
@@ -333,6 +809,15 @@ export function ChartPanel({
   const seriesMarkersRef = useRef<ISeriesMarkersPluginApi<Time> | null>(null);
   // Drawing tools: one manager instance, alive for the lifetime of the chart.
   const drawingManagerRef = useRef<DrawingManager | null>(null);
+  // Series added for the active strategy's PDF-derived indicators (EMA/SMA/
+  // RSI/MACD/Bollinger) — replaced wholesale on every recompute.
+  const indicatorSeriesRef = useRef<ISeriesApi<'Line' | 'Histogram'>[]>([]);
+  const activeStrategyRef = useRef<StrategyVersionSummary | null>(activeStrategy);
+  activeStrategyRef.current = activeStrategy;
+  // Set inside the chart-creation effect (has access to `chart`/`manager`),
+  // invoked from the history/live-update effect below whenever new candle
+  // data lands, and from the activeStrategy-change effect.
+  const recomputeIndicatorsRef = useRef<() => void>(() => {});
   // Guards against applying a live WS update before the REST history load
   // for the current symbol/timeframe has landed — see the effect below.
   const historyLoadedRef = useRef(false);
@@ -358,16 +843,68 @@ export function ChartPanel({
   // drawing (0 = none yet). Displayed as a hint in the header.
   const [pendingAnchorCount, setPendingAnchorCount] = useState(0);
 
+  // Drawing color selection state
+  const [activeColor, setActiveColor] = useState<string>('#2962ff');
+  const activeColorRef = useRef(activeColor);
+  activeColorRef.current = activeColor;
+
+  // Stored original styles for drawings that are highlighted when selected
+  const originalStylesRef = useRef<Record<string, any>>({});
+
+  // Ref to invoke saveAndSync from outside the useEffect block
+  const saveAndSyncRef = useRef<() => void>(() => {});
+
+  // States for context menu and edit popover of drawings
+  const [drawingContextMenu, setDrawingContextMenu] = useState<{
+    x: number;
+    y: number;
+    drawingId: string;
+    drawingType: string;
+    containerWidth: number;
+    containerHeight: number;
+  } | null>(null);
+
+  const [drawingEditPopover, setDrawingEditPopover] = useState<{
+    x: number;
+    y: number;
+    drawingId: string;
+    drawingType: string;
+    containerWidth: number;
+    containerHeight: number;
+  } | null>(null);
+
   // Ticket of the running position whose entry line was double-clicked, if
   // any — drives the SL/TP/close popover rendered below the price lines.
   const [editingTicket, setEditingTicket] = useState<number | null>(null);
   const [editBusy, setEditBusy] = useState(false);
+
+  // States for context menu and order popover from right-click on chart
+  const [contextMenu, setContextMenu] = useState<{
+    x: number;
+    y: number;
+    price: number;
+    containerWidth: number;
+    containerHeight: number;
+  } | null>(null);
+
+  const [orderPopover, setOrderPopover] = useState<{
+    x: number;
+    y: number;
+    price: number;
+    side: OrderSide;
+    orderType: PendingOrderType;
+    containerWidth: number;
+    containerHeight: number;
+  } | null>(null);
 
   // Stable references for symbol and symbol-switching state to avoid stale
   // closures inside the chart-creation useEffect.
   const symbolRef = useRef(symbol);
   symbolRef.current = symbol;
   const isSwitchingSymbolRef = useRef(false);
+  const drawingToolRef = useRef(drawingTool);
+  drawingToolRef.current = drawingTool;
+
 
   // SL/TP/trigger-price draggable lines (F-manual-trading): dragging updates
   // this only for live visual feedback during the drag — the actual API
@@ -442,29 +979,267 @@ export function ChartPanel({
     manager.attach(chart, candleSeries, container);
     drawingManagerRef.current = manager;
 
+    // Recomputes every PDF-derived indicator overlay + price-level line for
+    // whatever strategy is currently active on this symbol. Cheap enough to
+    // call on every history load and every live tick (≤500 candles) — reads
+    // `activeStrategyRef`/`candlesRef` fresh each time so it never closes
+    // over stale props from the effect it's defined in.
+    const recomputeIndicators = () => {
+      for (const series of indicatorSeriesRef.current) {
+        try {
+          chart.removeSeries(series);
+        } catch {
+          // Series may already be gone if the chart is mid-teardown.
+        }
+      }
+      indicatorSeriesRef.current = [];
+      for (const drawing of manager.getAllDrawings()) {
+        if (drawing.id.startsWith(STRATEGY_DRAWING_PREFIX)) {
+          manager.removeDrawing(drawing.id);
+        }
+      }
+
+      const spec = activeStrategyRef.current?.spec;
+      const candles = candlesRef.current;
+      if (!spec || candles.length === 0) return;
+
+      let rsiScaleReady = false;
+      let macdScaleReady = false;
+
+      for (const indicator of spec.indicators) {
+        switch (indicator.type) {
+          case 'ema': {
+            const series = chart.addSeries(LineSeries, {
+              color: '#42a5f5',
+              lineWidth: 1,
+              priceLineVisible: false,
+              lastValueVisible: false,
+              title: indicator.label,
+            });
+            series.setData(ema(candles, indicator.period));
+            indicatorSeriesRef.current.push(series);
+            break;
+          }
+          case 'sma': {
+            const series = chart.addSeries(LineSeries, {
+              color: '#ffa726',
+              lineWidth: 1,
+              priceLineVisible: false,
+              lastValueVisible: false,
+              title: indicator.label,
+            });
+            series.setData(sma(candles, indicator.period));
+            indicatorSeriesRef.current.push(series);
+            break;
+          }
+          case 'rsi': {
+            const series = chart.addSeries(LineSeries, {
+              color: '#ab47bc',
+              lineWidth: 1,
+              priceScaleId: 'strategy-rsi',
+              priceLineVisible: false,
+              lastValueVisible: false,
+              title: indicator.label,
+              autoscaleInfoProvider: () => ({
+                priceRange: { minValue: 0, maxValue: 100 },
+              }),
+            });
+            if (!rsiScaleReady) {
+              // Own band above the volume series's band (top: 0.8, bottom: 0
+              // — see the volume series setup above) so the two don't overlap.
+              series.priceScale().applyOptions({ scaleMargins: { top: 0.55, bottom: 0.25 } });
+              rsiScaleReady = true;
+            }
+            series.setData(rsi(candles, indicator.period));
+            indicatorSeriesRef.current.push(series);
+            break;
+          }
+          case 'macd': {
+            const slow = indicator.params.slow ?? 26;
+            const signal = indicator.params.signal ?? 9;
+            const { macdLine, signalLine, histogram } = macd(
+              candles,
+              indicator.period,
+              slow,
+              signal,
+            );
+            const macdSeries = chart.addSeries(LineSeries, {
+              color: '#26a69a',
+              lineWidth: 1,
+              priceScaleId: 'strategy-macd',
+              priceLineVisible: false,
+              lastValueVisible: false,
+              title: `${indicator.label} macd`,
+            });
+            const signalSeries = chart.addSeries(LineSeries, {
+              color: '#ef5350',
+              lineWidth: 1,
+              priceScaleId: 'strategy-macd',
+              priceLineVisible: false,
+              lastValueVisible: false,
+              title: `${indicator.label} signal`,
+            });
+            const histSeries = chart.addSeries(HistogramSeries, {
+              priceScaleId: 'strategy-macd',
+              priceLineVisible: false,
+              lastValueVisible: false,
+              title: `${indicator.label} hist`,
+            });
+            if (!macdScaleReady) {
+              // Own band above RSI's (0.55-0.75) and volume's (0.8-1.0), so
+              // all three can coexist without overlapping.
+              macdSeries.priceScale().applyOptions({ scaleMargins: { top: 0.3, bottom: 0.5 } });
+              macdScaleReady = true;
+            }
+            macdSeries.setData(macdLine);
+            signalSeries.setData(signalLine);
+            histSeries.setData(histogram);
+            indicatorSeriesRef.current.push(macdSeries, signalSeries, histSeries);
+            break;
+          }
+          case 'bollinger': {
+            const stdDev = indicator.params.std_dev ?? 2;
+            const { upper, middle, lower } = bollinger(candles, indicator.period, stdDev);
+            for (const [data, opacity] of [
+              [upper, 1],
+              [middle, 0.6],
+              [lower, 1],
+            ] as const) {
+              const series = chart.addSeries(LineSeries, {
+                color: hexToRgba('#78909c', opacity),
+                lineWidth: 1,
+                priceLineVisible: false,
+                lastValueVisible: false,
+                title: indicator.label,
+              });
+              series.setData(data);
+              indicatorSeriesRef.current.push(series);
+            }
+            break;
+          }
+        }
+      }
+
+      const anchorTime = candles[0].time as UTCTimestamp;
+      spec.price_levels.forEach((level, i) => {
+        const color = level.type === 'support' ? '#26a69a' : '#ab47bc';
+        const drawing = HorizontalLine.create(
+          `${STRATEGY_DRAWING_PREFIX}${symbolRef.current}:${i}`,
+          level.price,
+          anchorTime,
+          { lineColor: color, lineWidth: 1, lineDash: [4, 4] },
+          { locked: true, showPrice: true, showLabel: true, labelText: level.label },
+        );
+        manager.addDrawing(drawing);
+      });
+    };
+    recomputeIndicatorsRef.current = recomputeIndicators;
+
+    const highlightDrawing = (drawing: IDrawing) => {
+      if (!originalStylesRef.current[drawing.id]) {
+        originalStylesRef.current[drawing.id] = {
+          lineColor: drawing.style.lineColor,
+          lineWidth: drawing.style.lineWidth,
+          lineDash: drawing.style.lineDash || [],
+          fillColor: drawing.style.fillColor,
+          showLabels: drawing.style.showLabels,
+          labelColor: drawing.style.labelColor,
+        };
+      }
+      drawing.updateStyle({
+        lineWidth: 4,
+        lineColor: '#00f0ff',
+        labelColor: '#00f0ff',
+        fillColor: hexToRgba('#00f0ff', 0.25),
+      });
+    };
+
+    const restoreDrawing = (drawingId: string) => {
+      const orig = originalStylesRef.current[drawingId];
+      if (orig) {
+        const drawing = manager.getDrawing(drawingId);
+        if (drawing) {
+          drawing.updateStyle(orig);
+        }
+        delete originalStylesRef.current[drawingId];
+      }
+    };
+
     // Persist drawings + keep the drawings-list panel in sync whenever any
     // drawing mutation happens.
-    const syncList = () => setDrawingsList(manager.getAllDrawings());
+    // Strategy-derived drawings are recomputed from the active spec on every
+    // candle tick — they're never user data, so they're excluded from both
+    // the persisted localStorage snapshot and the drawings-list panel.
+    const syncList = () =>
+      setDrawingsList(
+        manager.getAllDrawings().filter((d) => !d.id.startsWith(STRATEGY_DRAWING_PREFIX)),
+      );
     const saveAndSync = () => {
       if (isSwitchingSymbolRef.current) {
         syncList();
         return;
       }
       try {
-        const data = manager.exportDrawings();
+        const selected = manager.getSelectedDrawing();
+        let backup: any = null;
+        if (selected && originalStylesRef.current[selected.id]) {
+          backup = { ...selected.style };
+          selected.updateStyle(originalStylesRef.current[selected.id]);
+        }
+
+        const data = manager
+          .exportDrawings()
+          .filter((d) => !d.id.startsWith(STRATEGY_DRAWING_PREFIX));
         localStorage.setItem(
           `chart-drawings:${symbolRef.current}`,
           JSON.stringify(data),
         );
+
+        if (selected && backup) {
+          selected.updateStyle(backup);
+        }
       } catch {
         // localStorage quota or serialisation errors are non-fatal.
       }
       syncList();
     };
+    saveAndSyncRef.current = saveAndSync;
+    const syncSelectedColor = () => {
+      const selected = manager.getSelectedDrawing();
+      if (selected) {
+        const orig = originalStylesRef.current[selected.id];
+        if (orig && orig.lineColor) {
+          setActiveColor(orig.lineColor);
+        } else if (selected.style?.lineColor) {
+          setActiveColor(selected.style.lineColor);
+        }
+      }
+    };
     const unsubAdd = manager.on('drawing:added', saveAndSync);
-    const unsubRemove = manager.on('drawing:removed', saveAndSync);
-    const unsubClear = manager.on('drawing:cleared', saveAndSync);
+    const unsubRemove = manager.on('drawing:removed', (e) => {
+      if (e.drawingId) {
+        delete originalStylesRef.current[e.drawingId];
+      }
+      saveAndSync();
+    });
+    const unsubClear = manager.on('drawing:cleared', () => {
+      originalStylesRef.current = {};
+      saveAndSync();
+    });
     const unsubUpdate = manager.on('drawing:updated', saveAndSync);
+    const unsubSelect = manager.on('drawing:selected', (e) => {
+      if (e.drawing) {
+        highlightDrawing(e.drawing);
+      }
+      syncSelectedColor();
+      saveAndSync();
+    });
+    const unsubDeselect = manager.on('drawing:deselected', (e) => {
+      if (e.drawingId) {
+        restoreDrawing(e.drawingId);
+      }
+      saveAndSync();
+    });
 
     // Restore any previously saved drawings for the initial symbol.
     loadDrawingsFromStorage(manager, symbolRef.current);
@@ -480,16 +1255,196 @@ export function ChartPanel({
     const observer = new ResizeObserver(resize);
     observer.observe(container);
 
-    const bump = () => bumpLines((t) => t + 1);
-    container.addEventListener('mousemove', bump, { capture: true });
+    let isDraggingAnchor = false;
+    let dragStartPoint: { x: number; y: number } | null = null;
+    let dragDrawing: IDrawing | null = null;
+    let dragInitialPixels: Array<{ x: number; y: number } | null> = [];
+
+    // Event listener to lock chart panning/scaling when dragging/resizing a drawing
+    const handleDrawingDragStart = (e: MouseEvent) => {
+      if (!manager || !chart) return;
+      if (drawingToolRef.current) return;
+
+      const rect = container.getBoundingClientRect();
+      const point = {
+        x: e.clientX - rect.left,
+        y: e.clientY - rect.top,
+      };
+      
+      const anchorIndex = manager.hitTestAnchor(point);
+      if (anchorIndex !== null) {
+        isDraggingAnchor = true;
+        container.style.cursor = 'grabbing';
+        // Disable chart panning and zooming so the chart doesn't move during drag.
+        chart.applyOptions({ handleScroll: false, handleScale: false });
+        
+        // Listen to mouseup on window to re-enable chart scrolling/scaling.
+        const handleDragEnd = () => {
+          isDraggingAnchor = false;
+          container.style.cursor = '';
+          chart.applyOptions({ handleScroll: true, handleScale: true });
+          window.removeEventListener('mouseup', handleDragEnd);
+        };
+        window.addEventListener('mouseup', handleDragEnd);
+        return;
+      }
+
+      const hoveredDrawing = manager.hitTest(point);
+      if (hoveredDrawing !== null && !hoveredDrawing.options.locked) {
+        // Automatically select the hovered drawing if it wasn't selected
+        if (manager.getSelectedDrawing()?.id !== hoveredDrawing.id) {
+          manager.selectDrawing(hoveredDrawing.id);
+        }
+
+        dragStartPoint = { x: e.clientX, y: e.clientY };
+        dragDrawing = hoveredDrawing;
+        
+        const viewport = hoveredDrawing.getViewport();
+        if (viewport) {
+          dragInitialPixels = hoveredDrawing.anchors.map(a => (hoveredDrawing as any).anchorToPixel(a, viewport));
+        }
+
+        container.style.cursor = 'grabbing';
+        // Disable chart panning and zooming so the chart doesn't move during drag.
+        chart.applyOptions({ handleScroll: false, handleScale: false });
+
+        const handleBodyDrag = (moveEvent: MouseEvent) => {
+          if (!dragStartPoint || !dragDrawing || !viewport) return;
+          const dx = moveEvent.clientX - dragStartPoint.x;
+          const dy = moveEvent.clientY - dragStartPoint.y;
+
+          const newAnchors = dragDrawing.anchors.map((anchor, idx) => {
+            const pixel = dragInitialPixels[idx];
+            if (!pixel) return anchor;
+            const newPixel = { x: pixel.x + dx, y: pixel.y + dy };
+            const newAnchor = (dragDrawing as any).pixelToAnchor(newPixel, viewport);
+            return newAnchor || anchor;
+          });
+
+          dragDrawing.anchors = newAnchors;
+          (manager as any).emit('drawing:updated', { drawingId: dragDrawing.id, drawing: dragDrawing });
+        };
+
+        const handleBodyDragEnd = () => {
+          window.removeEventListener('mousemove', handleBodyDrag);
+          window.removeEventListener('mouseup', handleBodyDragEnd);
+          
+          dragStartPoint = null;
+          dragDrawing = null;
+          dragInitialPixels = [];
+          
+          container.style.cursor = '';
+          chart.applyOptions({ handleScroll: true, handleScale: true });
+          saveAndSync();
+        };
+
+        window.addEventListener('mousemove', handleBodyDrag);
+        window.addEventListener('mouseup', handleBodyDragEnd);
+      }
+    };
+    container.addEventListener('mousedown', handleDrawingDragStart, { capture: true });
+
+    const handleContextMenu = (e: MouseEvent) => {
+      if (drawingToolRef.current) {
+        setDrawingTool(null);
+        e.preventDefault();
+        return;
+      }
+
+      const rect = container.getBoundingClientRect();
+      const x = e.clientX - rect.left;
+      const y = e.clientY - rect.top;
+
+      const hoveredDrawing = manager.hitTest({ x, y });
+      if (hoveredDrawing !== null) {
+        e.preventDefault();
+        e.stopPropagation();
+
+        manager.selectDrawing(hoveredDrawing.id);
+
+        setOrderPopover(null);
+        setContextMenu(null);
+        setDrawingEditPopover(null);
+        setDrawingContextMenu({
+          x,
+          y,
+          drawingId: hoveredDrawing.id,
+          drawingType: hoveredDrawing.type,
+          containerWidth: container.clientWidth,
+          containerHeight: container.clientHeight,
+        });
+        return;
+      }
+
+      const candleSeries = candleSeriesRef.current;
+      if (!candleSeries) return;
+
+      const price = candleSeries.coordinateToPrice(y);
+      if (price === null) return;
+
+      e.preventDefault();
+      
+      setOrderPopover(null);
+      setDrawingContextMenu(null);
+      setDrawingEditPopover(null);
+      setContextMenu({
+        x,
+        y,
+        price,
+        containerWidth: container.clientWidth,
+        containerHeight: container.clientHeight,
+      });
+    };
+    container.addEventListener('contextmenu', handleContextMenu);
+
+    const handleMouseMoveCursor = (e: MouseEvent) => {
+      // Re-trigger layout updates for HTML overlays
+      bumpLines((t) => t + 1);
+
+      if (!manager || isDraggingAnchor) return;
+
+      // If we are currently in drawing tool placement mode, let that cursor (crosshair) stay.
+      if (drawingToolRef.current) {
+        container.style.cursor = 'crosshair';
+        return;
+      }
+
+      const rect = container.getBoundingClientRect();
+      const point = {
+        x: e.clientX - rect.left,
+        y: e.clientY - rect.top,
+      };
+
+      // Check if hovering over an anchor point of the selected drawing
+      const anchorIndex = manager.hitTestAnchor(point);
+      if (anchorIndex !== null) {
+        container.style.cursor = 'nwse-resize';
+        return;
+      }
+
+      // Check if hovering over any drawing body
+      const hoveredDrawing = manager.hitTest(point);
+      if (hoveredDrawing !== null) {
+        container.style.cursor = 'pointer';
+        return;
+      }
+
+      // Default: let chart cursor rule
+      container.style.cursor = '';
+    };
+    container.addEventListener('mousemove', handleMouseMoveCursor, { capture: true });
 
     return () => {
       observer.disconnect();
-      container.removeEventListener('mousemove', bump, { capture: true });
+      container.removeEventListener('contextmenu', handleContextMenu);
+      container.removeEventListener('mousemove', handleMouseMoveCursor, { capture: true });
+      container.removeEventListener('mousedown', handleDrawingDragStart, { capture: true });
       unsubAdd();
       unsubRemove();
       unsubClear();
       unsubUpdate();
+      unsubSelect();
+      unsubDeselect();
       seriesMarkersRef.current?.detach();
       manager.detach();
       drawingManagerRef.current = null;
@@ -507,6 +1462,10 @@ export function ChartPanel({
     let cancelled = false;
     setError(null);
     setLoadingMore(false);
+    setContextMenu(null);
+    setOrderPopover(null);
+    setDrawingContextMenu(null);
+    setDrawingEditPopover(null);
     // WS updates for the new room can start arriving before the REST
     // history call below resolves. Applying one to the still-stale
     // previous symbol/timeframe's data can move time backwards (e.g.
@@ -525,6 +1484,7 @@ export function ChartPanel({
       const upColor = cssVar('--color-ok');
       const downColor = cssVar('--color-err');
       candleSeriesRef.current?.setData(candlesRef.current.map(toBar));
+      recomputeIndicatorsRef.current();
       volumeSeriesRef.current?.setData(
         candlesRef.current.map((c) => toVolumeBar(c, upColor, downColor)),
       );
@@ -643,6 +1603,7 @@ export function ChartPanel({
           volumeSeriesRef.current?.update(
             toVolumeBar(candle, cssVar('--color-ok'), cssVar('--color-err')),
           );
+          recomputeIndicatorsRef.current();
           setTimeout(() => {
             if (!cancelled) bumpLines((t) => t + 1);
           }, 50);
@@ -665,6 +1626,13 @@ export function ChartPanel({
     };
   }, [symbol, timeframe]);
 
+  // Recompute overlays when the active strategy itself changes (activated,
+  // deactivated, or a different one picked up for this symbol) without
+  // waiting for the next candle to arrive.
+  useEffect(() => {
+    recomputeIndicatorsRef.current();
+  }, [activeStrategy]);
+
   // When the symbol changes, save the current symbol's drawings and load the
   // new symbol's drawings. The chart-creation effect only handles the initial
   // symbol; this effect keeps things in sync on subsequent symbol switches.
@@ -672,7 +1640,7 @@ export function ChartPanel({
     const manager = drawingManagerRef.current;
     if (!manager) return;
     isSwitchingSymbolRef.current = true;
-    manager.clearAll();
+    clearUserDrawings(manager);
     loadDrawingsFromStorage(manager, symbol);
     isSwitchingSymbolRef.current = false;
   }, [symbol]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -731,11 +1699,13 @@ export function ChartPanel({
 
       // All anchors collected — create and register the drawing.
       const id = `d-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+      const chosenColor = activeColorRef.current;
       const style = {
-        lineColor: cssVar('--color-accent'),
+        lineColor: chosenColor,
         lineWidth: 2,
         showLabels: true,
-        labelColor: cssVar('--color-ink'),
+        labelColor: chosenColor,
+        fillColor: hexToRgba(chosenColor, 0.15),
       };
 
       let drawing: IDrawing | null = null;
@@ -959,6 +1929,92 @@ export function ChartPanel({
     };
   }, []);
 
+  // Close context menu / popover on click outside
+  useEffect(() => {
+    if (!contextMenu && !orderPopover && !drawingContextMenu && !drawingEditPopover) return;
+    const handleMouseDownOutside = (e: MouseEvent) => {
+      const menuEl = document.getElementById('chart-context-menu');
+      const popoverEl = document.getElementById('chart-order-popover');
+      const drawingMenuEl = document.getElementById('drawing-context-menu');
+      const drawingPopoverEl = document.getElementById('drawing-edit-popover');
+      if (
+        (menuEl && menuEl.contains(e.target as Node)) ||
+        (popoverEl && popoverEl.contains(e.target as Node)) ||
+        (drawingMenuEl && drawingMenuEl.contains(e.target as Node)) ||
+        (drawingPopoverEl && drawingPopoverEl.contains(e.target as Node))
+      ) {
+        return;
+      }
+      setContextMenu(null);
+      setOrderPopover(null);
+      setDrawingContextMenu(null);
+      setDrawingEditPopover(null);
+    };
+    window.addEventListener('mousedown', handleMouseDownOutside);
+    return () => window.removeEventListener('mousedown', handleMouseDownOutside);
+  }, [contextMenu, orderPopover, drawingContextMenu, drawingEditPopover]);
+
+  const handleColorChange = (newColor: string) => {
+    setActiveColor(newColor);
+    
+    // If a drawing is currently selected, update its style immediately
+    const manager = drawingManagerRef.current;
+    if (manager) {
+      const selected = manager.getSelectedDrawing();
+      if (selected) {
+        if (originalStylesRef.current[selected.id]) {
+          originalStylesRef.current[selected.id].lineColor = newColor;
+          originalStylesRef.current[selected.id].labelColor = newColor;
+          originalStylesRef.current[selected.id].fillColor = hexToRgba(newColor, 0.15);
+        }
+
+        selected.updateStyle({
+          lineColor: newColor,
+          labelColor: newColor,
+          fillColor: hexToRgba(newColor, 0.25),
+          lineWidth: 4,
+        });
+        
+        saveAndSyncRef.current();
+      }
+    }
+  };
+
+  const handleModifyDrawingColor = (id: string, newColor: string) => {
+    const manager = drawingManagerRef.current;
+    if (manager) {
+      const d = manager.getDrawing(id);
+      if (d) {
+        if (originalStylesRef.current[id]) {
+          originalStylesRef.current[id].lineColor = newColor;
+          originalStylesRef.current[id].labelColor = newColor;
+          originalStylesRef.current[id].fillColor = hexToRgba(newColor, 0.15);
+
+          d.updateStyle({
+            lineColor: newColor,
+            labelColor: newColor,
+            fillColor: hexToRgba(newColor, 0.25),
+            lineWidth: 4,
+          });
+        } else {
+          d.updateStyle({
+            lineColor: newColor,
+            labelColor: newColor,
+            fillColor: hexToRgba(newColor, 0.15),
+          });
+        }
+        
+        // If the modified drawing is the currently selected one, sync activeColor
+        const selected = manager.getSelectedDrawing();
+        if (selected && selected.id === id) {
+          setActiveColor(newColor);
+        }
+        
+        saveAndSyncRef.current();
+      }
+    }
+  };
+
   function buildPriceLines(): PriceLineSpec[] {
     const okColor = cssVar('--color-ok');
     const errColor = cssVar('--color-err');
@@ -1095,7 +2151,7 @@ export function ChartPanel({
   }
 
   return (
-    <section className='flex flex-1 flex-col rounded-md border border-line bg-panel'>
+    <section className='flex min-h-0 flex-1 flex-col rounded-md border border-line bg-panel'>
       <header className='flex items-center gap-3 border-b border-line px-4 py-2'>
         <strong>{symbol}</strong>
         <nav className='flex gap-1'>
@@ -1153,6 +2209,31 @@ export function ChartPanel({
         </span>
       </header>
       {error && <p className='px-4 py-1 text-xs text-err'>{error}</p>}
+      {activeStrategy?.spec &&
+        (activeStrategy.spec.unrecognized_indicators.length > 0 ||
+          activeStrategy.spec.chart_notes.length > 0) && (
+          <div className='flex flex-wrap items-center gap-1.5 border-b border-line px-4 py-1 text-xs text-ink-muted'>
+            <span className='text-ink-muted/70'>{activeStrategy.name} mentions (not auto-drawn):</span>
+            {activeStrategy.spec.unrecognized_indicators.map((name) => (
+              <span
+                key={`ind:${name}`}
+                className='rounded border border-line px-1.5 py-0.5'
+                title='Indicator outside the 5 plottable families (EMA/SMA/RSI/MACD/Bollinger)'
+              >
+                {name}
+              </span>
+            ))}
+            {activeStrategy.spec.chart_notes.map((note) => (
+              <span
+                key={`note:${note}`}
+                className='rounded border border-line px-1.5 py-0.5'
+                title='No explicit price level in the source document — not turned into chart geometry'
+              >
+                {note}
+              </span>
+            ))}
+          </div>
+        )}
       {/* Drawings list panel — shown when the toggle is active */}
       {showDrawingsList && (
         <DrawingsList
@@ -1160,8 +2241,22 @@ export function ChartPanel({
           onRemove={(id) => drawingManagerRef.current?.removeDrawing(id)}
           onToggleVisible={(id) => {
             const d = drawingManagerRef.current?.getDrawing(id);
-            if (d) d.updateOptions({ visible: !d.options.visible });
+            if (d) {
+              d.updateOptions({ visible: !d.options.visible });
+              const manager = drawingManagerRef.current;
+              if (manager) {
+                try {
+                  const data = manager.exportDrawings();
+                  localStorage.setItem(
+                    `chart-drawings:${symbolRef.current}`,
+                    JSON.stringify(data),
+                  );
+                } catch {}
+                setDrawingsList(manager.getAllDrawings());
+              }
+            }
           }}
+          onColorChange={handleModifyDrawingColor}
         />
       )}
       <div className='relative min-h-0 flex-1'>
@@ -1171,9 +2266,95 @@ export function ChartPanel({
           activeTool={drawingTool}
           onToolSelect={setDrawingTool}
           onClearAll={() => {
-            drawingManagerRef.current?.clearAll();
+            const manager = drawingManagerRef.current;
+            if (manager) clearUserDrawings(manager);
           }}
+          activeColor={activeColor}
+          onColorChange={handleColorChange}
         />
+        {contextMenu && (
+          <ChartContextMenu
+            x={contextMenu.x}
+            y={contextMenu.y}
+            price={contextMenu.price}
+            containerWidth={contextMenu.containerWidth}
+            containerHeight={contextMenu.containerHeight}
+            onSelectOption={(side, type) => {
+              setOrderPopover({
+                x: contextMenu.x,
+                y: contextMenu.y,
+                price: contextMenu.price,
+                side,
+                orderType: type,
+                containerWidth: contextMenu.containerWidth,
+                containerHeight: contextMenu.containerHeight,
+              });
+              setContextMenu(null);
+            }}
+          />
+        )}
+        {orderPopover && (
+          <ChartOrderPopover
+            x={orderPopover.x}
+            y={orderPopover.y}
+            price={orderPopover.price}
+            side={orderPopover.side}
+            orderType={orderPopover.orderType}
+            containerWidth={orderPopover.containerWidth}
+            containerHeight={orderPopover.containerHeight}
+            busy={editBusy}
+            onClose={() => setOrderPopover(null)}
+            onPlace={async (volume, price, sl, tp) => {
+              await trading.placePending(
+                orderPopover.side,
+                orderPopover.orderType,
+                volume,
+                price,
+                sl,
+                tp
+              );
+            }}
+          />
+        )}
+        {drawingContextMenu && (
+          <DrawingContextMenu
+            x={drawingContextMenu.x}
+            y={drawingContextMenu.y}
+            drawingType={drawingContextMenu.drawingType}
+            containerWidth={drawingContextMenu.containerWidth}
+            containerHeight={drawingContextMenu.containerHeight}
+            onSelectEdit={() => {
+              setDrawingEditPopover({
+                x: drawingContextMenu.x,
+                y: drawingContextMenu.y,
+                drawingId: drawingContextMenu.drawingId,
+                drawingType: drawingContextMenu.drawingType,
+                containerWidth: drawingContextMenu.containerWidth,
+                containerHeight: drawingContextMenu.containerHeight,
+              });
+              setDrawingContextMenu(null);
+            }}
+            onDelete={() => {
+              drawingManagerRef.current?.removeDrawing(drawingContextMenu.drawingId);
+              setDrawingContextMenu(null);
+            }}
+          />
+        )}
+        {drawingEditPopover && (
+          <DrawingEditPopover
+            x={drawingEditPopover.x}
+            y={drawingEditPopover.y}
+            drawingId={drawingEditPopover.drawingId}
+            drawingType={drawingEditPopover.drawingType}
+            containerWidth={drawingEditPopover.containerWidth}
+            containerHeight={drawingEditPopover.containerHeight}
+            manager={drawingManagerRef.current}
+            originalStylesRef={originalStylesRef}
+            onClose={() => setDrawingEditPopover(null)}
+            onSaveAndSync={saveAndSyncRef.current}
+            onColorChange={handleModifyDrawingColor}
+          />
+        )}
         {newsBands.map((b) => {
           const color = cssVar(
             b.phase === 'pre' ? '--color-err' : '--color-accent',

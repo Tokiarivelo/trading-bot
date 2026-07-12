@@ -14,7 +14,39 @@ The JSON object must have exactly these keys:
   regardless of what timeframe the document describes)
 - "confirmation_timeframes": array from ["H1", "H4", "D1"], the higher
   timeframes the method uses (or should use) to confirm an M5 entry
-- "indicators": array of indicator names used, e.g. ["EMA200", "RSI14"]
+- "indicators": array of objects, one per indicator the text names, that maps
+  cleanly onto one of exactly 5 recognized families — "ema", "sma", "rsi",
+  "macd", "bollinger". Each object:
+  {"type": "ema"|"sma"|"rsi"|"macd"|"bollinger", "period": <int>,
+   "source": "close", "label": "<as written in the text, e.g. EMA200>",
+   "params": {...}}
+  - ema / sma / rsi: "period" is the span (e.g. "EMA200" -> period 200,
+    "RSI14" -> period 14); "params" is {}
+  - macd: "period" is the fast EMA period; "params" is
+    {"slow": <int>, "signal": <int>} — use the standard 12/26/9 only if the
+    text says "MACD" with no numbers of its own
+  - bollinger: "period" is the SMA lookback; "params" is
+    {"std_dev": <number>} — use the standard 20/2.0 only if the text says
+    "Bollinger Bands" with no numbers of its own
+  Never force-fit an indicator into one of these 5 families if it clearly
+  isn't one of them — put it in "unrecognized_indicators" instead.
+- "unrecognized_indicators": array of plain indicator-name strings for
+  anything mentioned that does not map onto the 5 families above (e.g.
+  "Ichimoku Cloud", "Parabolic SAR") — may be empty
+- "price_levels": array of objects, ONLY when the text states an explicit
+  numeric price for a support/resistance/pivot level — e.g. "resistance at
+  2050" or "support around 1985.50":
+  {"type": "support"|"resistance"|"level", "price": <number>,
+   "label": "<as written in the text>"}
+  Never emit a price_levels entry for a level described only qualitatively
+  (no literal number printed in the text) — this is extracted only from
+  numbers actually present in the text, never estimated or inferred from a
+  chart image or general description.
+- "chart_notes": array of plain strings for any other charting/drawing-tool
+  mention that has no explicit number attached (e.g. "use Fibonacci
+  retracement on the last swing high/low", "draw a trendline connecting
+  recent lows") — informational only, never turned into a price level or
+  any other geometry
 - "entry_rules": plain-English description of when to enter, precise enough
   that a programmer could implement it
 - "exit_rules": plain-English description of stop-loss/take-profit/exit logic

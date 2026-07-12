@@ -26,12 +26,16 @@ class StrategyVersionRepository:
             row = session.get(StrategyVersionRow, version_id)
         return _to_domain(row) if row else None
 
-    def list_all(self, name: str | None = None) -> list[StrategyVersion]:
+    def list_all(
+        self, name: str | None = None, status: VersionStatus | None = None
+    ) -> list[StrategyVersion]:
         query = select(StrategyVersionRow).order_by(
             StrategyVersionRow.name, StrategyVersionRow.version.desc()
         )
         if name is not None:
             query = query.where(StrategyVersionRow.name == name)
+        if status is not None:
+            query = query.where(StrategyVersionRow.status == status.value)
         with self._session_factory() as session:
             rows = session.scalars(query).all()
         return [_to_domain(row) for row in rows]

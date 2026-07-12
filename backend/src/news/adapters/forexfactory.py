@@ -57,6 +57,9 @@ def _parse_row(row: dict) -> NewsEvent | None:
             time=datetime.fromisoformat(row["date"]).astimezone(UTC),
             impact=impact,
             currency=row.get("country", ""),
+            forecast=row.get("forecast") or None,
+            previous=row.get("previous") or None,
+            # the weekly feed never carries a released "actual" value
         )
     except (KeyError, ValueError):
         return None

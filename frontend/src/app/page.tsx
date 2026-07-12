@@ -7,9 +7,12 @@ import { ChartPanel } from "@/features/chart/ChartPanel";
 import { SymbolPicker } from "@/features/chart/SymbolPicker";
 import { EngineControlPanel } from "@/features/engine/EngineControlPanel";
 import { ActiveNewsWindowsSummary } from "@/features/news/ActiveNewsWindowsSummary";
+import { useActiveStrategyForSymbol } from "@/features/strategies/useActiveStrategyForSymbol";
+import { OrdersDock } from "@/features/trading/OrdersDock";
 import { TradePanel } from "@/features/trading/TradePanel";
 import { useTrading } from "@/features/trading/useTrading";
 import { getAppConfig, getHealth, type AppConfig } from "@/shared/api/client";
+import { MenuButton } from "@/shared/ui/NavigationDrawer";
 
 const EXTRA_SYMBOLS_KEY = "tb.extraSymbols";
 const FAVORITE_SYMBOLS_KEY = "tb.favoriteSymbols";
@@ -49,6 +52,7 @@ export default function Home() {
   // resolving on mount (see the effect below) — the empty-string placeholder
   // is never rendered since ChartPanel itself is gated on `symbol` below.
   const trading = useTrading(symbol ?? "");
+  const activeStrategy = useActiveStrategyForSymbol(symbol ?? "");
 
   // Resolve the symbol to open on load — `?symbol=` wins over the last one
   // viewed (`tb.lastSymbol`), which wins over the first favorite, which wins
@@ -174,6 +178,7 @@ export default function Home() {
   return (
     <div className="flex h-screen flex-col">
       <header className="flex items-center gap-4 border-b border-line px-4 py-2">
+        <MenuButton />
         <h1 className="text-base font-bold">AI Trading Bot</h1>
         {config && (
           <span
@@ -262,6 +267,9 @@ export default function Home() {
         <Link href="/news" className="text-sm text-ink-muted hover:text-accent">
           News
         </Link>
+        <Link href="/settings" className="text-sm text-ink-muted hover:text-accent">
+          Settings
+        </Link>
         <span className="text-sm">
           backend:{" "}
           {backendUp === null ? (
@@ -275,13 +283,15 @@ export default function Home() {
       </header>
 
       <main className="flex min-h-0 flex-1">
-        {symbol ? (
-          <ChartPanel symbol={symbol} trading={trading} />
-        ) : (
-          <div className="flex flex-1 items-center justify-center rounded-md border border-line bg-panel text-sm text-ink-muted">
-            Loading chart…
-          </div>
-        )}
+        <OrdersDock>
+          {symbol ? (
+            <ChartPanel symbol={symbol} trading={trading} activeStrategy={activeStrategy} />
+          ) : (
+            <div className="flex flex-1 items-center justify-center rounded-md border border-line bg-panel text-sm text-ink-muted">
+              Loading chart…
+            </div>
+          )}
+        </OrdersDock>
         <aside className="flex w-[300px] flex-col gap-2 overflow-y-auto border-l border-line p-2">
           <AccountPanel />
           <Panel>

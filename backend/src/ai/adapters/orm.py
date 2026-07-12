@@ -1,5 +1,6 @@
-"""AI persistence tables: §8.1 PDF-derived drafts, and §8.2 10-trade
-self-refinement analysis reports/proposals."""
+"""AI persistence tables: §8.1 PDF-derived drafts, §8.2 10-trade
+self-refinement analysis reports/proposals, and settings-page per-task
+provider overrides (AI_PROVIDER_SETTINGS_PLAN.md §6.3)."""
 
 from __future__ import annotations
 
@@ -55,3 +56,12 @@ class RefinementProposalRow(Base):
     candidate_backtest_report_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     improvement_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
     applied_mode: Mapped[str | None] = mapped_column(String(16), nullable=True)
+
+
+class TaskProviderOverrideRow(Base):
+    __tablename__ = "ai_task_provider_override"
+
+    task: Mapped[str] = mapped_column(String(32), primary_key=True)
+    provider: Mapped[str] = mapped_column(String(32))
+    model: Mapped[str] = mapped_column(String(128))
+    updated_at: Mapped[int] = mapped_column(Integer)

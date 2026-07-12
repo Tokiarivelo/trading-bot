@@ -56,6 +56,16 @@ def _parse_row(row: dict) -> NewsEvent | None:
             time=datetime.fromisoformat(row["time"].replace(" ", "T")).replace(tzinfo=UTC),
             impact=impact,
             currency=row.get("country", ""),
+            forecast=_stringify(row.get("estimate")),
+            previous=_stringify(row.get("prev")),
+            actual=_stringify(row.get("actual")),
         )
     except (KeyError, ValueError):
         return None
+
+
+def _stringify(value: object) -> str | None:
+    """Finnhub reports `estimate`/`prev`/`actual` as bare numbers (or
+    omits/nulls them pre-release) — normalize to the same string-or-None
+    shape `NewsEvent` uses for ForexFactory's pre-formatted strings."""
+    return None if value is None else str(value)

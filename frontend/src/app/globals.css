@@ -30,3 +30,27 @@
   --color-buy: #42a5f5;
   --color-sell: #ff9800;
 }
+
+/* Color picker input custom styling */
+.color-picker-input {
+  -webkit-appearance: none;
+  -moz-appearance: none;
+  appearance: none;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  padding: 0;
+  outline: none;
+}
+.color-picker-input::-webkit-color-swatch-wrapper {
+  padding: 0;
+}
+.color-picker-input::-webkit-color-swatch {
+  border: 1px solid var(--color-line);
+  border-radius: 50%;
+}
+.color-picker-input::-moz-color-swatch {
+  border: 1px solid var(--color-line);
+  border-radius: 50%;
+}
+

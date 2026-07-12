@@ -12,6 +12,10 @@ import {
   updateStrategyDraftSpec,
   type ExtractedStrategySpec,
   type GeneratedCode,
+  type IndicatorSpec,
+  type IndicatorType,
+  type PriceLevelAnnotation,
+  type PriceLevelAnnotationType,
   type StrategyDraft,
 } from "@/shared/api/client";
 import { RenameVersionInline } from "./RenameVersionInline";
@@ -20,13 +24,18 @@ import { StrategyVersionList } from "./StrategyVersionList";
 import { SymbolMultiSelect } from "./SymbolMultiSelect";
 
 const EDITABLE_STATUSES = new Set(["pending_review", "approved"]);
+const INDICATOR_TYPES: IndicatorType[] = ["ema", "sma", "rsi", "macd", "bollinger"];
+const PRICE_LEVEL_TYPES: PriceLevelAnnotationType[] = ["support", "resistance", "level"];
 
 interface SpecFormState {
   name: string;
   symbols: string[];
   entry_timeframe: string;
   confirmation_timeframes: string;
-  indicators: string;
+  indicators: IndicatorSpec[];
+  unrecognized_indicators: string;
+  price_levels: PriceLevelAnnotation[];
+  chart_notes: string;
   entry_rules: string;
   exit_rules: string;
   risk_notes: string;
@@ -175,12 +184,34 @@ export function StrategyDraftDetail({ draftId }: { draftId: string }) {
             onChange={(e) => setForm({ ...form, entry_timeframe: e.target.value })}
           />
         </Field>
-        <Field label="Indicators (comma-separated)">
+        <Field label="Indicators (plottable on the chart)">
+          <IndicatorListEditor
+            value={form.indicators}
+            onChange={(indicators) => setForm({ ...form, indicators })}
+            disabled={!editable}
+          />
+        </Field>
+        <Field label="Other indicators mentioned (comma-separated, not charted)">
           <input
             className={inputCls}
-            value={form.indicators}
+            value={form.unrecognized_indicators}
             disabled={!editable}
-            onChange={(e) => setForm({ ...form, indicators: e.target.value })}
+            onChange={(e) => setForm({ ...form, unrecognized_indicators: e.target.value })}
+          />
+        </Field>
+        <Field label="Price levels (rendered as locked horizontal lines)">
+          <PriceLevelListEditor
+            value={form.price_levels}
+            onChange={(price_levels) => setForm({ ...form, price_levels })}
+            disabled={!editable}
+          />
+        </Field>
+        <Field label="Chart notes (comma-separated, no explicit price — informational only)">
+          <input
+            className={inputCls}
+            value={form.chart_notes}
+            disabled={!editable}
+            onChange={(e) => setForm({ ...form, chart_notes: e.target.value })}
           />
         </Field>
         <Field label="Entry rules">
@@ -300,7 +331,10 @@ function toFormState(spec: ExtractedStrategySpec): SpecFormState {
     symbols: spec.symbols,
     entry_timeframe: spec.entry_timeframe,
     confirmation_timeframes: spec.confirmation_timeframes.join(", "),
-    indicators: spec.indicators.join(", "),
+    indicators: spec.indicators,
+    unrecognized_indicators: spec.unrecognized_indicators.join(", "),
+    price_levels: spec.price_levels,
+    chart_notes: spec.chart_notes.join(", "),
     entry_rules: spec.entry_rules,
     exit_rules: spec.exit_rules,
     risk_notes: spec.risk_notes,
@@ -320,7 +354,10 @@ function fromFormState(form: SpecFormState): ExtractedStrategySpec | null {
     symbols: form.symbols,
     entry_timeframe: form.entry_timeframe.trim(),
     confirmation_timeframes: splitList(form.confirmation_timeframes),
-    indicators: splitList(form.indicators),
+    indicators: form.indicators,
+    unrecognized_indicators: splitList(form.unrecognized_indicators),
+    price_levels: form.price_levels,
+    chart_notes: splitList(form.chart_notes),
     entry_rules: form.entry_rules,
     exit_rules: form.exit_rules,
     risk_notes: form.risk_notes,
@@ -333,6 +370,194 @@ function splitList(s: string): string[] {
     .split(",")
     .map((x) => x.trim())
     .filter(Boolean);
+}
+
+function defaultIndicator(type: IndicatorType): IndicatorSpec {
+  const defaults: Record<IndicatorType, { period: number; params: Record<string, number> }> = {
+    ema: { period: 200, params: {} },
+    sma: { period: 50, params: {} },
+    rsi: { period: 14, params: {} },
+    macd: { period: 12, params: { slow: 26, signal: 9 } },
+    bollinger: { period: 20, params: { std_dev: 2 } },
+  };
+  const d = defaults[type];
+  return { type, period: d.period, label: type.toUpperCase(), source: "close", params: d.params };
+}
+
+/** One row per indicator, each with its family, period, label, and any
+ * family-specific params (macd: slow/signal, bollinger: std_dev) edited as
+ * raw JSON since the shape differs per family. */
+function IndicatorListEditor({
+  value,
+  onChange,
+  disabled,
+}: {
+  value: IndicatorSpec[];
+  onChange: (value: IndicatorSpec[]) => void;
+  disabled: boolean;
+}) {
+  return (
+    <div className="flex flex-col gap-2">
+      {value.map((indicator, i) => (
+        <div key={i} className="flex flex-wrap items-center gap-1">
+          <select
+            className={inputCls}
+            value={indicator.type}
+            disabled={disabled}
+            onChange={(e) => {
+              const updated = [...value];
+              updated[i] = defaultIndicator(e.target.value as IndicatorType);
+              onChange(updated);
+            }}
+          >
+            {INDICATOR_TYPES.map((t) => (
+              <option key={t} value={t}>
+                {t}
+              </option>
+            ))}
+          </select>
+          <input
+            className={`${inputCls} w-20`}
+            type="number"
+            value={indicator.period}
+            disabled={disabled}
+            title="Period"
+            onChange={(e) => {
+              const updated = [...value];
+              updated[i] = { ...indicator, period: Number(e.target.value) };
+              onChange(updated);
+            }}
+          />
+          <input
+            className={`${inputCls} w-28`}
+            value={indicator.label}
+            disabled={disabled}
+            placeholder="Label"
+            onChange={(e) => {
+              const updated = [...value];
+              updated[i] = { ...indicator, label: e.target.value };
+              onChange(updated);
+            }}
+          />
+          {(indicator.type === "macd" || indicator.type === "bollinger") && (
+            <input
+              className={`${inputCls} w-40 font-mono text-xs`}
+              value={JSON.stringify(indicator.params)}
+              disabled={disabled}
+              title="Family-specific params (JSON)"
+              onChange={(e) => {
+                try {
+                  const params = JSON.parse(e.target.value);
+                  const updated = [...value];
+                  updated[i] = { ...indicator, params };
+                  onChange(updated);
+                } catch {
+                  // Invalid JSON while typing — ignored until it parses.
+                }
+              }}
+            />
+          )}
+          {!disabled && (
+            <button
+              type="button"
+              className="cursor-pointer text-ink-muted hover:text-err"
+              onClick={() => onChange(value.filter((_, j) => j !== i))}
+            >
+              ×
+            </button>
+          )}
+        </div>
+      ))}
+      {!disabled && (
+        <button
+          type="button"
+          className={`${btnCls} w-fit`}
+          onClick={() => onChange([...value, defaultIndicator("ema")])}
+        >
+          + Add indicator
+        </button>
+      )}
+    </div>
+  );
+}
+
+/** One row per explicit numeric price level (support/resistance/level). */
+function PriceLevelListEditor({
+  value,
+  onChange,
+  disabled,
+}: {
+  value: PriceLevelAnnotation[];
+  onChange: (value: PriceLevelAnnotation[]) => void;
+  disabled: boolean;
+}) {
+  return (
+    <div className="flex flex-col gap-2">
+      {value.map((level, i) => (
+        <div key={i} className="flex flex-wrap items-center gap-1">
+          <select
+            className={inputCls}
+            value={level.type}
+            disabled={disabled}
+            onChange={(e) => {
+              const updated = [...value];
+              updated[i] = { ...level, type: e.target.value as PriceLevelAnnotationType };
+              onChange(updated);
+            }}
+          >
+            {PRICE_LEVEL_TYPES.map((t) => (
+              <option key={t} value={t}>
+                {t}
+              </option>
+            ))}
+          </select>
+          <input
+            className={`${inputCls} w-24`}
+            type="number"
+            value={level.price}
+            disabled={disabled}
+            title="Price"
+            onChange={(e) => {
+              const updated = [...value];
+              updated[i] = { ...level, price: Number(e.target.value) };
+              onChange(updated);
+            }}
+          />
+          <input
+            className={`${inputCls} w-40`}
+            value={level.label}
+            disabled={disabled}
+            placeholder="Label"
+            onChange={(e) => {
+              const updated = [...value];
+              updated[i] = { ...level, label: e.target.value };
+              onChange(updated);
+            }}
+          />
+          {!disabled && (
+            <button
+              type="button"
+              className="cursor-pointer text-ink-muted hover:text-err"
+              onClick={() => onChange(value.filter((_, j) => j !== i))}
+            >
+              ×
+            </button>
+          )}
+        </div>
+      ))}
+      {!disabled && (
+        <button
+          type="button"
+          className={`${btnCls} w-fit`}
+          onClick={() =>
+            onChange([...value, { type: "resistance", price: 0, label: "" }])
+          }
+        >
+          + Add price level
+        </button>
+      )}
+    </div>
+  );
 }
 
 function Field({ label, children }: { label: string; children: React.ReactNode }) {

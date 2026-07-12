@@ -4,9 +4,12 @@
 
 An MT5-connected, AI-assisted trading bot. Entries on M5 with higher-timeframe
 confirmation, TradingView-style chart, strategies generated from PDF documents
-by an AI (Claude or Ollama), and automatic self-refinement every 10 trades.
+by an AI (choice of provider per task — Claude API, Claude Code, Ollama/Hermes
+Agent, or OpenClaw), and automatic self-refinement every 10 trades.
 
 **Full design & roadmap:** see [`IMPLEMENTATION_PLAN.md`](IMPLEMENTATION_PLAN.md).
+**AI provider setup (per provider, step by step):** see
+[`AI_PROVIDERS_CONFIGURATION.md`](AI_PROVIDERS_CONFIGURATION.md).
 
 ## Repository layout
 

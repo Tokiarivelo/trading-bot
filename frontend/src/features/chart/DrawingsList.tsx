@@ -10,7 +10,6 @@
  */
 
 import type { IDrawing } from "lightweight-charts-drawing";
-import type { DrawingToolType } from "./ChartPanel";
 
 // Human-readable labels for each tool type.
 const TOOL_LABELS: Record<string, string> = {
@@ -88,9 +87,10 @@ interface Props {
   drawings: IDrawing[];
   onRemove: (id: string) => void;
   onToggleVisible: (id: string) => void;
+  onColorChange: (id: string, color: string) => void;
 }
 
-export function DrawingsList({ drawings, onRemove, onToggleVisible }: Props) {
+export function DrawingsList({ drawings, onRemove, onToggleVisible, onColorChange }: Props) {
   if (drawings.length === 0) {
     return (
       <div
@@ -120,7 +120,7 @@ export function DrawingsList({ drawings, onRemove, onToggleVisible }: Props) {
       <div
         style={{
           display: "grid",
-          gridTemplateColumns: "24px 1fr 70px 24px 24px",
+          gridTemplateColumns: "24px 1fr 70px 24px 24px 24px",
           gap: 4,
           padding: "4px 12px",
           fontSize: 10,
@@ -134,6 +134,7 @@ export function DrawingsList({ drawings, onRemove, onToggleVisible }: Props) {
         <span />
         <span>Type</span>
         <span>Price</span>
+        <span title="Color">🎨</span>
         <span title="Toggle visibility">👁</span>
         <span title="Delete">✕</span>
       </div>
@@ -145,7 +146,7 @@ export function DrawingsList({ drawings, onRemove, onToggleVisible }: Props) {
             key={d.id}
             style={{
               display: "grid",
-              gridTemplateColumns: "24px 1fr 70px 24px 24px",
+              gridTemplateColumns: "24px 1fr 70px 24px 24px 24px",
               gap: 4,
               alignItems: "center",
               padding: "3px 12px",
@@ -169,6 +170,22 @@ export function DrawingsList({ drawings, onRemove, onToggleVisible }: Props) {
             <span style={{ fontVariantNumeric: "tabular-nums", fontSize: 11 }}>
               {anchorSummary(d)}
             </span>
+
+            {/* Color picker */}
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "center" }}>
+              <input
+                type="color"
+                value={d.style.lineColor}
+                onChange={(e) => onColorChange(d.id, e.target.value)}
+                className="color-picker-input"
+                style={{
+                  width: 14,
+                  height: 14,
+                  cursor: "pointer",
+                }}
+                title="Change color"
+              />
+            </div>
 
             {/* Visibility toggle */}
             <button

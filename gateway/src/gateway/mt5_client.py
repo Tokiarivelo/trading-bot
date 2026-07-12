@@ -29,6 +29,11 @@ class Mt5Error(Exception):
 
 _TIMEFRAME_SECONDS = {"M1": 60, "M5": 300, "H1": 3600, "H4": 14400, "D1": 86400}
 
+# The modify request's price/sl/tp already match the order/position — MT5
+# rejects it as a no-op rather than silently accepting it, but the desired
+# end state already holds, so callers should see this as success.
+TRADE_RETCODE_NO_CHANGES = 10025
+
 # MT5 trade-server return codes worth explaining in plain English — `_last_error()`
 # reports the last *IPC* error, which is frequently "[1] Success" even when the
 # trade itself was rejected (the rejection reason is the retcode alone), so a raw
@@ -282,6 +287,9 @@ class Mt5Client:
             "tp": tp if tp is not None else position.tp,
         }
         result = mt5.order_send(request)
+        if result is not None and result.retcode == TRADE_RETCODE_NO_CHANGES:
+            logger.info("position_modify(%s): sl/tp already match request, no-op", ticket)
+            return
         if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
             code = result.retcode if result is not None else None
             raise Mt5Error(
@@ -431,6 +439,11 @@ class Mt5Client:
             "type_filling": self._filling_type(order.symbol),
         }
         result = mt5.order_send(request)
+        if result is not None and result.retcode == TRADE_RETCODE_NO_CHANGES:
+            logger.info(
+                "modify_pending_order(%s): price/sl/tp already match request, no-op", ticket
+            )
+            return
         if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
             code = result.retcode if result is not None else None
             raise Mt5Error(

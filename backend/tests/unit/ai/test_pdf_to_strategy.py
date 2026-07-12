@@ -14,7 +14,14 @@ from sqlalchemy.orm import sessionmaker
 
 from src.ai.adapters.repository import DraftRepository
 from src.ai.application.pdf_to_strategy import InvalidDraftStateError, PdfToStrategyService
-from src.ai.domain.models import DraftStatus, ExtractedStrategySpec
+from src.ai.domain.models import (
+    AnnotationType,
+    DraftStatus,
+    ExtractedStrategySpec,
+    IndicatorSpec,
+    IndicatorType,
+    PriceLevelAnnotation,
+)
 from src.market_data.adapters import orm as market_data_orm  # noqa: F401 — registers candles table
 from src.shared.db.base import Base
 from src.strategies.adapters.repository import StrategyVersionRepository
@@ -56,7 +63,10 @@ EXTRACTED_SPEC_JSON = json.dumps(
         "symbols": ["XAUUSD"],
         "entry_timeframe": "M5",
         "confirmation_timeframes": ["H1"],
-        "indicators": ["EMA200"],
+        "indicators": [{"type": "ema", "period": 200, "label": "EMA200"}],
+        "unrecognized_indicators": ["Ichimoku Cloud"],
+        "price_levels": [{"type": "resistance", "price": 2050.0, "label": "resistance at 2050"}],
+        "chart_notes": ["Fibonacci retracement on the swing points"],
         "entry_rules": "Buy when price pulls back to EMA200 in an uptrend.",
         "exit_rules": "SL below recent swing low, TP at 2R.",
         "risk_notes": "Risk 0.5% per trade.",
@@ -125,6 +135,19 @@ async def test_create_draft_from_pdf_extracts_spec(service):
     assert draft.extracted_spec.name == "gold_ema_pullback"
     assert draft.edited_spec is None
     assert draft.effective_spec == draft.extracted_spec
+
+
+async def test_create_draft_from_pdf_extracts_structured_indicators_and_levels(service):
+    draft = await service.create_draft_from_pdf("method.pdf", _fake_pdf_bytes())
+    spec = draft.extracted_spec
+    assert spec.indicators == (IndicatorSpec(type=IndicatorType.EMA, period=200, label="EMA200"),)
+    assert spec.unrecognized_indicators == ("Ichimoku Cloud",)
+    assert spec.price_levels == (
+        PriceLevelAnnotation(
+            type=AnnotationType.RESISTANCE, price=2050.0, label="resistance at 2050"
+        ),
+    )
+    assert spec.chart_notes == ("Fibonacci retracement on the swing points",)
 
 
 async def test_update_draft_spec_keeps_original_and_resets_review(service):
