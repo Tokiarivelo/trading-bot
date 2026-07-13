@@ -61,3 +61,12 @@ class LLMPort(Protocol):
         boundary so both providers implement the same tiny surface.
         """
         ...
+
+
+class LLMCallError(RuntimeError):
+    """The provider was configured, but the call itself failed — timeout,
+    non-zero exit, or an error result. Distinct from
+    `LLMProviderNotConfiguredError` (missing setup, never even attempted a
+    call) so API routes can map it to 504 rather than a generic 500.
+    Subclasses `RuntimeError` so existing `pytest.raises(RuntimeError)`
+    call-site assertions keep working."""

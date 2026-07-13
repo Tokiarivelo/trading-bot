@@ -34,6 +34,10 @@ class Settings(BaseSettings):
     ollama_url: str = "http://127.0.0.1:11434"
     claude_code_binary: str = "claude"
     claude_code_extra_args: str = ""
+    # code_generation calls can run close to the 480s adapter default
+    # (full strategy file + ~8.5k-11.8k fixed CLI overhead per call) —
+    # override per-deployment if that's still not enough headroom.
+    claude_code_timeout_s: float = 480.0
     openclaw_url: str = ""
     openclaw_api_key: str = ""
     forexfactory_calendar_url: str = "https://nfs.faireconomy.media"

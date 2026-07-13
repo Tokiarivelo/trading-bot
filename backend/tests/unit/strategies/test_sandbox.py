@@ -4,7 +4,9 @@ not hang validation itself."""
 
 from __future__ import annotations
 
-from src.strategies.sandbox import validate_and_load
+import pytest
+
+from src.strategies.sandbox import _safe_import, validate_and_load
 
 VALID_STRATEGY = """
 from src.strategies.domain.models import Direction, MarketContext, Signal, StrategySpec
@@ -174,6 +176,53 @@ class Infinite:
     instance, errors = validate_and_load(code)
     assert instance is None
     assert any("did not return within" in e for e in errors)
+
+
+def test_safe_import_allows_numpy_internal_submodule():
+    # numpy/pandas lazily `__import__` their own dotted submodules on first
+    # use of ordinary top-level API (e.g. `.sum()`/`.mean()` pulling in
+    # `numpy._core._methods`) — this used to be rejected outright because
+    # `_safe_import` checked the full dotted name for an exact allowlist
+    # match instead of also accepting an allowlisted top-level package.
+    assert _safe_import("numpy._core._methods") is not None
+    assert _safe_import("pandas._libs.lib") is not None
+
+
+def test_safe_import_still_rejects_unrelated_dotted_import():
+    with pytest.raises(ImportError, match="os.path"):
+        _safe_import("os.path")
+
+
+def test_strategy_using_pandas_and_numpy_reductions_loads():
+    # Mirrors the real-world failure this guards against: a strategy calling
+    # ordinary numpy/pandas reduction methods must not be rejected by the
+    # sandbox's import guard, since those internally trigger dotted imports
+    # of their own submodules the first time they run in a process.
+    code = """
+import numpy as np
+from src.strategies.domain.models import Direction, MarketContext, Signal, StrategySpec
+
+
+class NumpyUser:
+    def __init__(self):
+        self.spec = StrategySpec(
+            name="numpy_user", version=1, symbols=("XAUUSD",), entry_timeframe="M5",
+            confirmation_timeframes=(), params={},
+        )
+
+    def evaluate(self, ctx: MarketContext):
+        m5 = ctx.candles.get("M5")
+        if m5 is None or len(m5) < 5:
+            return None
+        mean_close = float(m5["close"].mean())
+        total_volume = float(np.array(m5["tick_volume"].to_numpy()).sum())
+        if mean_close > 0 and total_volume > 0:
+            return Signal(direction=Direction.BUY, sl_points=5.0, tp_points=10.0, reason="test")
+        return None
+"""
+    instance, errors = validate_and_load(code)
+    assert errors == ()
+    assert instance is not None
 
 
 def test_empty_symbols_rejected_before_smoke_test():

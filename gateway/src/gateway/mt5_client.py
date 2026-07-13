@@ -27,7 +27,21 @@ class Mt5Error(Exception):
     """Raised when the terminal is unreachable or a call is rejected."""
 
 
-_TIMEFRAME_SECONDS = {"M1": 60, "M5": 300, "H1": 3600, "H4": 14400, "D1": 86400}
+_TIMEFRAME_SECONDS = {
+    "M1": 60,
+    "M5": 300,
+    "M15": 900,
+    "M30": 1800,
+    "H1": 3600,
+    "H4": 14400,
+    "D1": 86400,
+    "W1": 604800,
+    "MN": 2592000,  # approximate (30-day average) — only used to size the copy_rates_range span
+}
+
+# MetaTrader5's monthly constant is TIMEFRAME_MN1, not TIMEFRAME_MN — every
+# other timeframe matches our naming (TIMEFRAME_M1, TIMEFRAME_H4, ...).
+_MT5_CONSTANT_NAMES = {"MN": "MN1"}
 
 # The modify request's price/sl/tp already match the order/position — MT5
 # rejects it as a no-op rather than silently accepting it, but the desired
@@ -575,8 +589,9 @@ class Mt5Client:
 
     @staticmethod
     def _timeframe(timeframe: str) -> int:
+        name = _MT5_CONSTANT_NAMES.get(timeframe, timeframe)
         try:
-            return getattr(mt5, f"TIMEFRAME_{timeframe}")
+            return getattr(mt5, f"TIMEFRAME_{name}")
         except AttributeError:
             raise Mt5Error(f"unsupported timeframe {timeframe!r}") from None
 

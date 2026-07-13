@@ -47,6 +47,9 @@ provider_per_task:
   code_generation:  { provider: claude, model: claude-sonnet-5 }
   ten_trade_review: { provider: claude, model: claude-haiku-4-5 }
   code_refinement:  { provider: claude, model: claude-sonnet-5 }
+  # AI code regeneration (the version detail page's "Regenerate with AI")
+  # deliberately has no entry of its own here — it reuses code_generation's
+  # provider, so there's exactly one "strategy code" setting to manage.
   # Other providers, same shape:
   #   { provider: ollama, model: "hermes3:8b" }        # Hermes Agent preset
   #   { provider: ollama, model: "qwen2.5-coder:14b" }  # any local model

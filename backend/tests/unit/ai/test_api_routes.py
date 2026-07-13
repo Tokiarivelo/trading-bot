@@ -17,6 +17,7 @@ from sqlalchemy.orm import sessionmaker
 from src.ai.adapters.repository import DraftRepository
 from src.ai.api.routes import router
 from src.ai.application.pdf_to_strategy import PdfToStrategyService
+from src.ai.ports.llm import LLMCallError
 from src.market_data.adapters import orm as market_data_orm  # noqa: F401
 from src.shared.db.base import Base
 from src.strategies.adapters.repository import StrategyVersionRepository
@@ -61,10 +62,18 @@ class FakeLLM:
         return self.response
 
 
+class FailingLLM:
+    """Simulates a provider call that fails outright, e.g. the claude_code
+    adapter's subprocess timing out (backend/src/ai/adapters/claude_code.py)."""
+
+    async def complete(self, message, *, max_tokens=4096):
+        raise LLMCallError("claude code call exceeded 480s timeout and was killed")
+
+
 class FakeRouter:
-    def __init__(self, code: str = VALID_CODE) -> None:
+    def __init__(self, code: str = VALID_CODE, codegen=None) -> None:
         self._extraction = FakeLLM(json.dumps(EXTRACTED_SPEC))
-        self._codegen = FakeLLM(code)
+        self._codegen = codegen or FakeLLM(code)
 
     def for_task(self, task: str):
         return {"pdf_extraction": self._extraction, "code_generation": self._codegen}[task]
@@ -78,7 +87,7 @@ def _fake_pdf_bytes() -> bytes:
     return data
 
 
-def _build_service(tmp_path, code: str = VALID_CODE) -> PdfToStrategyService:
+def _build_service(tmp_path, code: str = VALID_CODE, codegen=None) -> PdfToStrategyService:
     engine = create_engine(f"sqlite:///{tmp_path}/test.db")
     Base.metadata.create_all(engine)
     session_factory = sessionmaker(bind=engine, expire_on_commit=False)
@@ -94,7 +103,7 @@ def _build_service(tmp_path, code: str = VALID_CODE) -> PdfToStrategyService:
     return PdfToStrategyService(
         DraftRepository(session_factory),
         strategy_versions,
-        FakeRouter(code),
+        FakeRouter(code, codegen),
         backtest_database_url=f"sqlite:///{tmp_path}/candles.db",
     )
 
@@ -199,6 +208,22 @@ async def test_generate_code_success(api):
     assert body["is_valid"] is True
     assert body["version_id"] is not None
     assert body["sandbox_errors"] == []
+
+
+async def test_generate_code_llm_call_failure_returns_504(tmp_path):
+    app = FastAPI()
+    app.include_router(router)
+    app.state.container = SimpleNamespace(
+        pdf_to_strategy=_build_service(tmp_path, codegen=FailingLLM())
+    )
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://backend") as client:
+        draft = await _upload(client)
+        await client.post(f"/ai/pdf-strategy/drafts/{draft['id']}/approve")
+
+        response = await client.post(f"/ai/pdf-strategy/drafts/{draft['id']}/generate-code")
+        assert response.status_code == 504
+        assert "timeout" in response.json()["detail"]
 
 
 async def test_generate_code_surfaces_sandbox_errors(tmp_path):

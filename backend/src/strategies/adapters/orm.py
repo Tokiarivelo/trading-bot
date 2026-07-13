@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from sqlalchemy import JSON, Integer, String
+from sqlalchemy import JSON, Boolean, Integer, String
 from sqlalchemy.orm import Mapped, mapped_column
 
 from src.shared.db.base import Base
@@ -23,3 +23,4 @@ class StrategyVersionRow(Base):
     draft_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     spec: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     backtest_report_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    paused: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")

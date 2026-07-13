@@ -26,6 +26,11 @@ from src.strategies.sandbox import validate_and_load
 
 logger = logging.getLogger(__name__)
 
+# Sentinel for `StrategyVersionService.edit_code`'s `spec` kwarg, distinguishing
+# "not given, carry the base version's spec over unchanged" from an explicit
+# `spec=None` (clear it) or `spec={...}` (override it).
+_UNSET = object()
+
 # Matches the `symbols=(...)` keyword argument inside a generated file's
 # `StrategySpec(...)` call — the codegen prompt (ai/prompts/
 # generate_strategy_code.md) always produces this as a flat tuple literal of
@@ -53,6 +58,28 @@ class StrategyNameConflictError(Exception):
     def __init__(self, name: str) -> None:
         super().__init__(f"strategy name {name!r} is already in use")
         self.name = name
+
+
+class VersionAlreadyArchivedError(Exception):
+    def __init__(self, version_id: str) -> None:
+        super().__init__(f"strategy version {version_id!r} is already archived")
+        self.version_id = version_id
+
+
+class VersionActiveError(Exception):
+    """Raised when trying to delete a version that's currently live."""
+
+    def __init__(self, version_id: str) -> None:
+        super().__init__(f"strategy version {version_id!r} is active; archive it first")
+        self.version_id = version_id
+
+
+class VersionNotActiveError(Exception):
+    """Raised when trying to pause/resume a version that isn't the live one."""
+
+    def __init__(self, version_id: str) -> None:
+        super().__init__(f"strategy version {version_id!r} is not active")
+        self.version_id = version_id
 
 
 class StrategyVersionService:
@@ -174,6 +201,83 @@ class StrategyVersionService:
         )
         return duplicated
 
+    def edit_code(
+        self,
+        version_id: str,
+        code: str,
+        *,
+        source: CodeSource = CodeSource.MANUAL,
+        new_name: str | None = None,
+        spec: dict[str, object] | None | object = _UNSET,
+    ) -> StrategyVersion:
+        """Validate `code` in the sandbox and, if it passes, save it as a new
+        version — used by both the manual code editor and AI regeneration
+        (`ai/application/code_regeneration.py`).
+
+        Two save destinations, chosen by `new_name`:
+        - Omitted (or equal to `version_id`'s own family name): increments
+          within that family, parented explicitly on `version_id` — unlike
+          `save_generated_code` (whose parent is always whatever's currently
+          ACTIVE), this always parents on the exact version being edited, so
+          editing an old or archived version doesn't silently rebase onto
+          the live one.
+        - A different name: forks into a brand-new family at version 1, no
+          parent — same fork semantics as `duplicate_version`, just with
+          edited/regenerated code instead of a verbatim copy.
+
+        `spec` defaults to carrying `version_id`'s spec snapshot over
+        unchanged; pass an explicit dict (or `None`) to override it, e.g.
+        when the trader edited the spec before an AI regeneration. Raises
+        `ValueError` if `version_id` doesn't exist, `StrategyNameConflictError`
+        if `new_name` is already a different, existing family, and
+        `StrategyValidationError` if `code` fails sandbox validation —
+        nothing is written to disk in either error case."""
+        base = self._repository.get(version_id)
+        if base is None:
+            raise ValueError(f"no strategy version with id {version_id!r}")
+
+        forking = new_name is not None and new_name != base.name
+        if forking and self._repository.latest_version_number(new_name) > 0:
+            raise StrategyNameConflictError(new_name)
+
+        instance, errors = validate_and_load(code)
+        if instance is None:
+            raise StrategyValidationError(errors)
+
+        target_name = new_name if forking else base.name
+        next_version = 1 if forking else self._repository.latest_version_number(base.name) + 1
+        parent_version_id = None if forking else base.id
+        effective_spec = base.spec if spec is _UNSET else spec
+
+        file_name = f"{target_name}_v{next_version}.py"
+        (self._generated_dir / file_name).write_text(code)
+
+        version = StrategyVersion(
+            id=str(uuid.uuid4()),
+            name=target_name,
+            version=next_version,
+            file_path=f"src/strategies/generated/{file_name}",
+            code_hash=hashlib.sha256(code.encode()).hexdigest(),
+            source=source,
+            status=VersionStatus.VALIDATED,
+            created_at=datetime.now(UTC),
+            parent_version_id=parent_version_id,
+            draft_id=None,
+            spec=effective_spec,
+            backtest_report_id=None,
+        )
+        self._repository.save(version)
+        logger.info(
+            "strategy version edited: name=%s version=%d id=%s source=%s base=%s forked=%s",
+            target_name,
+            next_version,
+            version.id,
+            source,
+            version_id,
+            forking,
+        )
+        return version
+
     def rename_family(self, version_id: str, new_name: str) -> StrategyVersion:
         """Rename the strategy family `version_id` belongs to — updates the
         stored `name` on every version that shares it (all versions of the
@@ -216,7 +320,10 @@ class StrategyVersionService:
         """Re-validate the file on disk (never trust a stale in-memory
         instance), register it live in the `StrategyRegistry`, archive the
         previously active version for the same name, and mark this one
-        active. Also how rollback works: activate an older version id."""
+        active. Also how rollback works: activate an older version id.
+        Always starts the newly activated version unpaused — including
+        clearing any pause left over from the version it supersedes, so a
+        paused bot doesn't stay silently hidden under a new version id."""
         version = self._repository.get(version_id)
         if version is None:
             raise ValueError(f"no strategy version with id {version_id!r}")
@@ -225,10 +332,13 @@ class StrategyVersionService:
 
         previous_active = self._repository.get_active(version.name)
         if previous_active is not None and previous_active.id != version.id:
-            self._repository.save(replace(previous_active, status=VersionStatus.ARCHIVED))
+            self._repository.save(
+                replace(previous_active, status=VersionStatus.ARCHIVED, paused=False)
+            )
 
-        activated = replace(version, status=VersionStatus.ACTIVE)
+        activated = replace(version, status=VersionStatus.ACTIVE, paused=False)
         self._repository.save(activated)
+        self._registry.resume(version.name)
         self._registry.register(instance)
         logger.info(
             "strategy version activated: name=%s version=%d id=%s",
@@ -237,6 +347,104 @@ class StrategyVersionService:
             version.id,
         )
         return activated
+
+    def archive_version(self, version_id: str) -> StrategyVersion:
+        """Retires this version without deleting it: marks it ARCHIVED and,
+        if it was the live ACTIVE version, unregisters it from the
+        StrategyRegistry so the engine stops evaluating it on the next
+        candle close. Unlike activate_version's implicit archive-on-
+        supersede, this is a direct user action with no replacement
+        version — the strategy family can end up with no active version at
+        all. Raises `ValueError` if `version_id` doesn't exist, and
+        `VersionAlreadyArchivedError` if it's already archived."""
+        version = self._repository.get(version_id)
+        if version is None:
+            raise ValueError(f"no strategy version with id {version_id!r}")
+        if version.status == VersionStatus.ARCHIVED:
+            raise VersionAlreadyArchivedError(version_id)
+
+        archived = replace(version, status=VersionStatus.ARCHIVED, paused=False)
+        self._repository.save(archived)
+        if version.status == VersionStatus.ACTIVE:
+            self._registry.unregister(version.name)
+        logger.info(
+            "strategy version archived: name=%s version=%d id=%s",
+            version.name,
+            version.version,
+            version.id,
+        )
+        return archived
+
+    def delete_version(self, version_id: str) -> None:
+        """Hard-deletes the version's DB row and its generated file, and clears
+        `parent_version_id` on any child versions so they never point at a
+        row that no longer exists. Refuses to delete a currently ACTIVE
+        version — archive it (or activate a replacement) first, so the
+        engine is never left pointing at a file that's about to disappear.
+        Raises `ValueError` if `version_id` doesn't exist, and
+        `VersionActiveError` if it's the active version."""
+        version = self._repository.get(version_id)
+        if version is None:
+            raise ValueError(f"no strategy version with id {version_id!r}")
+        if version.status == VersionStatus.ACTIVE:
+            raise VersionActiveError(version_id)
+
+        self._repository.delete(version_id)
+        self._repository.clear_parent_references(version_id)
+        (self._generated_dir / Path(version.file_path).name).unlink(missing_ok=True)
+        logger.info(
+            "strategy version deleted: name=%s version=%d id=%s",
+            version.name,
+            version.version,
+            version.id,
+        )
+
+    def pause_version(self, version_id: str) -> StrategyVersion:
+        """Suspends live trading for this ACTIVE version without
+        deactivating or archiving it: the StrategyRegistry stops returning
+        it to the engine, so no new entries are evaluated for it, but it
+        stays ACTIVE and `resume_version` brings it straight back. Distinct
+        from the engine-wide kill switch (`POST /engine/kill`), which pauses
+        every strategy at once. Raises `ValueError` if `version_id` doesn't
+        exist, and `VersionNotActiveError` if it isn't the active version."""
+        version = self._repository.get(version_id)
+        if version is None:
+            raise ValueError(f"no strategy version with id {version_id!r}")
+        if version.status != VersionStatus.ACTIVE:
+            raise VersionNotActiveError(version_id)
+
+        paused = replace(version, paused=True)
+        self._repository.save(paused)
+        self._registry.pause(version.name)
+        logger.info(
+            "strategy version paused: name=%s version=%d id=%s",
+            version.name,
+            version.version,
+            version.id,
+        )
+        return paused
+
+    def resume_version(self, version_id: str) -> StrategyVersion:
+        """Reverses `pause_version`: the StrategyRegistry resumes returning
+        this version to the engine. Raises `ValueError` if `version_id`
+        doesn't exist, and `VersionNotActiveError` if it isn't the active
+        version."""
+        version = self._repository.get(version_id)
+        if version is None:
+            raise ValueError(f"no strategy version with id {version_id!r}")
+        if version.status != VersionStatus.ACTIVE:
+            raise VersionNotActiveError(version_id)
+
+        resumed = replace(version, paused=False)
+        self._repository.save(resumed)
+        self._registry.resume(version.name)
+        logger.info(
+            "strategy version resumed: name=%s version=%d id=%s",
+            version.name,
+            version.version,
+            version.id,
+        )
+        return resumed
 
     def load_active_into_registry(self) -> None:
         """Called once at startup so a backend restart doesn't lose whichever
@@ -252,10 +460,13 @@ class StrategyVersionService:
                 )
                 continue
             self._registry.register(instance)
+            if version.paused:
+                self._registry.pause(version.name)
             logger.info(
-                "active strategy version loaded at startup: name=%s version=%d",
+                "active strategy version loaded at startup: name=%s version=%d paused=%s",
                 version.name,
                 version.version,
+                version.paused,
             )
 
     def _load_instance(self, version: StrategyVersion) -> Strategy:

@@ -23,14 +23,23 @@ export function BacktestReportDetail({ reportId }: { reportId: string }) {
 
   return (
     <div className="flex flex-col gap-4 p-4">
-      <div>
-        <Link href="/backtest" className="text-xs text-ink-muted hover:text-accent">
-          ← All reports
+      <div className="flex items-start justify-between">
+        <div>
+          <Link href="/backtest" className="text-xs text-ink-muted hover:text-accent">
+            ← All reports
+          </Link>
+          <h2 className="mt-1 text-lg font-semibold">
+            {report.strategy} on {report.symbol}
+          </h2>
+          <p className="text-sm text-ink-muted">{report.period}</p>
+        </div>
+        <Link
+          href={`/?symbol=${encodeURIComponent(report.symbol)}&backtestReport=${encodeURIComponent(report.id)}`}
+          className="shrink-0 rounded border border-accent px-3 py-1.5 text-sm text-accent hover:bg-accent/10"
+          title="See this report's trades plotted against the actual candles they traded on"
+        >
+          View on chart →
         </Link>
-        <h2 className="mt-1 text-lg font-semibold">
-          {report.strategy} on {report.symbol}
-        </h2>
-        <p className="text-sm text-ink-muted">{report.period}</p>
       </div>
 
       <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-7">

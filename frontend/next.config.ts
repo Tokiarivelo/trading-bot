@@ -20,12 +20,15 @@ const nextConfig: NextConfig = {
     // rewrite above, e.g. POST /api/ai/pdf-strategy/upload.
     proxyClientMaxBodySize: "50mb",
     // Next's dev proxy kills any /api rewrite after 30s by default. PDF
-    // extraction runs a real LLM call over the extracted text and routinely
-    // takes longer than that on a big PDF, so the proxy was resetting the
-    // socket (ECONNRESET) while the backend kept working in the background —
-    // the draft would show up on refresh even though the upload request
-    // itself errored client-side. 3 minutes covers slow LLM extraction.
-    proxyTimeout: 180_000,
+    // extraction and code generation both run a real LLM call and routinely
+    // take longer than that, so the proxy was resetting the socket
+    // (ECONNRESET) while the backend kept working in the background — the
+    // draft would show up on refresh even though the request itself errored
+    // client-side. code_generation via the claude_code provider can run up
+    // to its own 480s adapter timeout (backend/src/ai/adapters/claude_code.py,
+    // TB_CLAUDE_CODE_TIMEOUT_S) — this must stay above that or the proxy cuts
+    // the connection before the backend's own timeout/response has a chance.
+    proxyTimeout: 540_000,
   },
 };
 

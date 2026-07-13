@@ -11,6 +11,7 @@ from fastapi import APIRouter, HTTPException, Path, Query, Request
 
 from src.strategies.api.schemas import (
     DuplicateVersionRequest,
+    EditVersionCodeRequest,
     RenameVersionRequest,
     StrategyVersionDetailOut,
     StrategyVersionOut,
@@ -19,6 +20,9 @@ from src.strategies.application.versioning import (
     StrategyNameConflictError,
     StrategyValidationError,
     StrategyVersionService,
+    VersionActiveError,
+    VersionAlreadyArchivedError,
+    VersionNotActiveError,
 )
 from src.strategies.domain.versioning import VersionStatus
 
@@ -179,3 +183,155 @@ async def rename_version(
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     return StrategyVersionOut.from_domain(renamed)
+
+
+@router.post(
+    "/versions/{version_id}/edit",
+    response_model=StrategyVersionDetailOut,
+    summary="Save a manual code edit as a new strategy version",
+    description=(
+        "Re-validates the given source in the sandbox and, if it passes, saves it — by "
+        "default as a new version of this version's strategy family, parented on "
+        "`version_id` itself (not necessarily the active version), so editing an old or "
+        "archived version doesn't silently rebase onto whatever is currently live. Pass "
+        "`new_name` to fork the edit into a brand-new strategy family at version 1 instead "
+        "('duplicate' destination), for trying a change without touching the original. The "
+        "new version's status is always 'validated', never 'active' — activating it is a "
+        "separate call (POST .../activate). This is the manual counterpart to AI "
+        "regeneration (POST /ai/strategies/versions/{version_id}/regenerate)."
+    ),
+    responses={
+        **_VERSION_NOT_FOUND,
+        409: {"description": "`new_name` is already in use by another strategy family."},
+        422: {"description": "The edited code failed sandbox validation (import whitelist, "
+              "AST scan, or the smoke-test evaluate() call)."},
+    },
+)
+async def edit_version_code(
+    request: Request,
+    body: EditVersionCodeRequest,
+    version_id: str = Path(description="Version id whose code is being edited."),
+) -> StrategyVersionDetailOut:
+    service = _service(request)
+    try:
+        edited = service.edit_code(version_id, body.code, new_name=body.new_name)
+    except StrategyNameConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except StrategyValidationError as exc:
+        raise HTTPException(status_code=422, detail="; ".join(exc.errors)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return StrategyVersionDetailOut.from_domain_with_code(edited, body.code)
+
+
+@router.post(
+    "/versions/{version_id}/archive",
+    response_model=StrategyVersionOut,
+    summary="Archive a strategy version",
+    description=(
+        "Retires this version without deleting it: marks it 'archived' and, if it was the "
+        "live active version, unregisters it from the StrategyRegistry so the engine stops "
+        "evaluating it on the next candle close. Unlike activation's implicit archive-on-"
+        "supersede, this is a direct action with no replacement version — the strategy "
+        "family can end up with no active version at all."
+    ),
+    responses={
+        **_VERSION_NOT_FOUND,
+        409: {"description": "The version is already archived."},
+    },
+)
+async def archive_version(
+    request: Request,
+    version_id: str = Path(description="Version id to archive."),
+) -> StrategyVersionOut:
+    service = _service(request)
+    try:
+        archived = service.archive_version(version_id)
+    except VersionAlreadyArchivedError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return StrategyVersionOut.from_domain(archived)
+
+
+@router.delete(
+    "/versions/{version_id}",
+    status_code=204,
+    summary="Delete a strategy version",
+    description=(
+        "Hard-deletes this version's database record and its generated Python file. "
+        "Refuses to delete the currently active version — archive it (POST .../archive) or "
+        "activate a replacement first, so the engine is never left pointing at a file "
+        "that's about to disappear. This cannot be undone."
+    ),
+    responses={
+        **_VERSION_NOT_FOUND,
+        409: {"description": "The version is currently active; archive it before deleting."},
+    },
+)
+async def delete_version(
+    request: Request,
+    version_id: str = Path(description="Version id to delete."),
+) -> None:
+    service = _service(request)
+    try:
+        service.delete_version(version_id)
+    except VersionActiveError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post(
+    "/versions/{version_id}/pause",
+    response_model=StrategyVersionOut,
+    summary="Pause a strategy version",
+    description=(
+        "Suspends live trading for this active version without deactivating or archiving "
+        "it: the StrategyRegistry stops returning it to the engine, so no new entries are "
+        "evaluated for it, but it stays 'active' and POST .../resume brings it straight "
+        "back. Distinct from the engine-wide kill switch (POST /engine/kill), which pauses "
+        "every strategy at once."
+    ),
+    responses={
+        **_VERSION_NOT_FOUND,
+        409: {"description": "The version isn't the active one for its strategy family."},
+    },
+)
+async def pause_version(
+    request: Request,
+    version_id: str = Path(description="Version id to pause — must be the active version."),
+) -> StrategyVersionOut:
+    service = _service(request)
+    try:
+        paused = service.pause_version(version_id)
+    except VersionNotActiveError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return StrategyVersionOut.from_domain(paused)
+
+
+@router.post(
+    "/versions/{version_id}/resume",
+    response_model=StrategyVersionOut,
+    summary="Resume a paused strategy version",
+    description="Reverses POST .../pause: the StrategyRegistry resumes returning this "
+    "version to the engine so it evaluates entries again.",
+    responses={
+        **_VERSION_NOT_FOUND,
+        409: {"description": "The version isn't the active one for its strategy family."},
+    },
+)
+async def resume_version(
+    request: Request,
+    version_id: str = Path(description="Version id to resume — must be the active version."),
+) -> StrategyVersionOut:
+    service = _service(request)
+    try:
+        resumed = service.resume_version(version_id)
+    except VersionNotActiveError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return StrategyVersionOut.from_domain(resumed)

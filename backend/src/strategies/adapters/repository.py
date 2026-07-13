@@ -26,6 +26,27 @@ class StrategyVersionRepository:
             row = session.get(StrategyVersionRow, version_id)
         return _to_domain(row) if row else None
 
+    def delete(self, version_id: str) -> None:
+        with self._session_factory() as session:
+            row = session.get(StrategyVersionRow, version_id)
+            if row is not None:
+                session.delete(row)
+                session.commit()
+
+    def clear_parent_references(self, version_id: str) -> None:
+        """Nulls `parent_version_id` on every row that points at `version_id`,
+        so deleting a version never leaves children with a dangling parent
+        link (§ StrategyVersionService.delete_version)."""
+        with self._session_factory() as session:
+            children = session.scalars(
+                select(StrategyVersionRow).where(
+                    StrategyVersionRow.parent_version_id == version_id
+                )
+            ).all()
+            for child in children:
+                child.parent_version_id = None
+            session.commit()
+
     def list_all(
         self, name: str | None = None, status: VersionStatus | None = None
     ) -> list[StrategyVersion]:
@@ -76,6 +97,7 @@ def _to_row(version: StrategyVersion) -> StrategyVersionRow:
         draft_id=version.draft_id,
         spec=version.spec,
         backtest_report_id=version.backtest_report_id,
+        paused=version.paused,
     )
 
 
@@ -93,4 +115,5 @@ def _to_domain(row: StrategyVersionRow) -> StrategyVersion:
         draft_id=row.draft_id,
         spec=row.spec,
         backtest_report_id=row.backtest_report_id,
+        paused=row.paused,
     )

@@ -12,7 +12,7 @@ import json
 import pytest
 
 from src.ai.adapters.claude_code import ClaudeCodeAdapter
-from src.ai.ports.llm import LLMMessage
+from src.ai.ports.llm import LLMCallError, LLMMessage
 
 
 class _FakeProcess:
@@ -23,6 +23,28 @@ class _FakeProcess:
 
     async def communicate(self) -> tuple[bytes, bytes]:
         return self._stdout, self._stderr
+
+
+class _HangingProcess:
+    """Never resolves `communicate()`, like a CLI call stuck past the
+    timeout — used to verify the adapter kills it instead of leaking it."""
+
+    def __init__(self) -> None:
+        self.killed = False
+        self.waited = False
+        self.returncode: int | None = None
+
+    async def communicate(self) -> tuple[bytes, bytes]:
+        await asyncio.sleep(3600)
+        raise AssertionError("should have been cancelled by the timeout")
+
+    def kill(self) -> None:
+        self.killed = True
+        self.returncode = -9
+
+    async def wait(self) -> int:
+        self.waited = True
+        return self.returncode or -9
 
 
 def _patch_subprocess(monkeypatch, process: _FakeProcess, captured: list):
@@ -85,7 +107,7 @@ async def test_nonzero_exit_raises(monkeypatch):
     _patch_subprocess(monkeypatch, _FakeProcess(b"", b"boom", returncode=1), captured)
 
     adapter = ClaudeCodeAdapter("claude", "sonnet")
-    with pytest.raises(RuntimeError, match="boom"):
+    with pytest.raises(LLMCallError, match="boom"):
         await adapter.complete(LLMMessage(system="s", user="u"))
 
 
@@ -95,8 +117,33 @@ async def test_is_error_result_raises(monkeypatch):
     _patch_subprocess(monkeypatch, _FakeProcess(json.dumps(payload).encode()), captured)
 
     adapter = ClaudeCodeAdapter("claude", "sonnet")
-    with pytest.raises(RuntimeError, match="error result"):
+    with pytest.raises(LLMCallError, match="error result"):
         await adapter.complete(LLMMessage(system="s", user="u"))
+
+
+async def test_timeout_kills_process_and_raises_llm_call_error(monkeypatch):
+    process = _HangingProcess()
+    captured: list = []
+    _patch_subprocess(monkeypatch, process, captured)
+
+    # A tiny timeout keeps the test fast; behavior under a real 480s default
+    # is identical since asyncio.wait_for's cancellation path doesn't care
+    # about the magnitude of the timeout.
+    adapter = ClaudeCodeAdapter("claude", "sonnet", timeout_s=0.05)
+    with pytest.raises(LLMCallError, match="timeout"):
+        await adapter.complete(LLMMessage(system="s", user="u"))
+
+    assert process.killed
+    assert process.waited
+
+
+async def test_timeout_s_defaults_to_480(monkeypatch):
+    payload = {"type": "result", "is_error": False, "result": "ok"}
+    captured: list = []
+    _patch_subprocess(monkeypatch, _FakeProcess(json.dumps(payload).encode()), captured)
+
+    adapter = ClaudeCodeAdapter("claude", "sonnet")
+    assert adapter._timeout_s == 480.0
 
 
 async def test_extra_args_are_appended(monkeypatch):

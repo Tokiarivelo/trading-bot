@@ -24,6 +24,7 @@ from src.ai.adapters.provider_config_repository import ProviderConfigRepository
 from src.ai.adapters.provider_secret_store import ProviderSecretStore
 from src.ai.adapters.report_repository import AnalysisReportRepository, RefinementProposalRepository
 from src.ai.adapters.repository import DraftRepository
+from src.ai.application.code_regeneration import CodeRegenerationService
 from src.ai.application.llm_router import LLMProviderNotConfiguredError, LLMRouter, ProviderFactory
 from src.ai.application.pdf_to_strategy import PdfToStrategyService
 from src.ai.application.provider_settings import ProviderSettingsService
@@ -131,6 +132,7 @@ class Container:
     strategy_versions: StrategyVersionService
     skill_selector: SkillSelectorPort
     pdf_to_strategy: PdfToStrategyService
+    code_regeneration: CodeRegenerationService
     refinement_loop: RefinementLoopService
     provider_settings: ProviderSettingsService
     news_client: httpx.AsyncClient
@@ -298,6 +300,10 @@ def build_container(settings: Settings | None = None) -> Container:
         strategy_versions=strategy_versions,
         llm_router=llm_router,
     )
+    code_regeneration = CodeRegenerationService(
+        strategy_versions=strategy_versions,
+        llm_router=llm_router,
+    )
 
     normal_skill_selector = SkillSelector(
         skills={symbol: _load_normal_skill(symbol) for symbol in symbols}, timezone=timezone
@@ -394,6 +400,7 @@ def build_container(settings: Settings | None = None) -> Container:
         strategy_versions=strategy_versions,
         skill_selector=skill_selector,
         pdf_to_strategy=pdf_to_strategy,
+        code_regeneration=code_regeneration,
         refinement_loop=refinement_loop,
         provider_settings=provider_settings,
         news_client=news_client,
@@ -469,7 +476,10 @@ def _build_provider_factories(
                 "provider in configs/ai.yaml"
             )
         return ClaudeCodeAdapter(
-            settings.claude_code_binary, spec.model, settings.claude_code_extra_args
+            settings.claude_code_binary,
+            spec.model,
+            settings.claude_code_extra_args,
+            settings.claude_code_timeout_s,
         )
 
     def _openclaw(spec: ProviderSpec) -> OpenClawAdapter:

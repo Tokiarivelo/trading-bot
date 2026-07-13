@@ -22,6 +22,7 @@ from src.ai.domain.models import (
     IndicatorType,
     PriceLevelAnnotation,
 )
+from src.ai.ports.llm import LLMCallError
 from src.market_data.adapters import orm as market_data_orm  # noqa: F401 — registers candles table
 from src.shared.db.base import Base
 from src.strategies.adapters.repository import StrategyVersionRepository
@@ -89,8 +90,37 @@ class FakeCodeGenLLM:
 
 
 class InvalidCodeGenLLM:
+    def __init__(self) -> None:
+        self.calls = 0
+
     async def complete(self, message, *, max_tokens=4096):
+        self.calls += 1
         return "import os\nx = 1\n"
+
+
+class RetryThenValidCodeGenLLM:
+    """First completion fails the sandbox (forbidden import); the retry
+    prompt (fed the sandbox's error) gets a valid one — mirrors an LLM
+    self-correcting once shown what it broke."""
+
+    def __init__(self, bad_code: str, good_code: str) -> None:
+        self.bad_code = bad_code
+        self.good_code = good_code
+        self.calls = 0
+
+    async def complete(self, message, *, max_tokens=4096):
+        self.calls += 1
+        code = self.bad_code if self.calls == 1 else self.good_code
+        return f"```python\n{code}\n```"
+
+
+class FailingCodeGenLLM:
+    """Simulates a provider call that fails outright (e.g. the claude_code
+    adapter's subprocess timing out) rather than returning bad code — the
+    failure must propagate, not get swallowed as a sandbox rejection."""
+
+    async def complete(self, message, *, max_tokens=4096):
+        raise LLMCallError("claude code call exceeded 480s timeout and was killed")
 
 
 class FakeRouter:
@@ -211,7 +241,8 @@ async def test_generate_code_success_creates_validated_version(service):
 
 
 async def test_generate_code_rejects_invalid_code_without_crashing(tmp_path):
-    service = _make_service(tmp_path, InvalidCodeGenLLM())
+    llm = InvalidCodeGenLLM()
+    service = _make_service(tmp_path, llm)
     draft = await service.create_draft_from_pdf("method.pdf", _fake_pdf_bytes())
     await service.approve_draft(draft.id)
 
@@ -220,6 +251,42 @@ async def test_generate_code_rejects_invalid_code_without_crashing(tmp_path):
     assert not result.is_valid
     assert result.version_id is None
     assert any("os" in e for e in result.sandbox_errors)
+    # 1 initial completion + 2 retries (MAX_ATTEMPTS=3 sandbox checks total),
+    # then gives up rather than looping forever against an LLM that never
+    # fixes the problem.
+    assert llm.calls == 3
+
+    # Draft stays approved (not code_generated) so the user can retry.
+    updated_draft = await service.get_draft(draft.id)
+    assert updated_draft.status == DraftStatus.APPROVED
+
+
+async def test_generate_code_retries_after_sandbox_rejection_then_succeeds(tmp_path):
+    llm = RetryThenValidCodeGenLLM(
+        bad_code="import os\nx = 1\n", good_code=_code_for("gold_ema_pullback")
+    )
+    service = _make_service(tmp_path, llm)
+    draft = await service.create_draft_from_pdf("method.pdf", _fake_pdf_bytes())
+    await service.approve_draft(draft.id)
+
+    result = await service.generate_code(draft.id)
+
+    assert result.is_valid
+    assert result.sandbox_errors == ()
+    assert result.version_id is not None
+    assert llm.calls == 2
+
+    version = service._strategy_versions.get_version(result.version_id)
+    assert version.status == VersionStatus.VALIDATED
+
+
+async def test_generate_code_propagates_llm_call_error(tmp_path):
+    service = _make_service(tmp_path, FailingCodeGenLLM())
+    draft = await service.create_draft_from_pdf("method.pdf", _fake_pdf_bytes())
+    await service.approve_draft(draft.id)
+
+    with pytest.raises(LLMCallError):
+        await service.generate_code(draft.id)
 
     # Draft stays approved (not code_generated) so the user can retry.
     updated_draft = await service.get_draft(draft.id)

@@ -210,6 +210,160 @@ async def test_list_versions_filters_by_status(api, service):
     assert summary["id"] == v1.id
 
 
+async def test_pause_and_resume_version(api, service):
+    strategy_versions, registry = service
+    v1 = strategy_versions.save_generated_code(
+        name="sample", code=VALID_CODE, source=CodeSource.AI_GENERATED
+    )
+    await api.post(f"/strategies/versions/{v1.id}/activate")
+
+    pause_response = await api.post(f"/strategies/versions/{v1.id}/pause")
+    assert pause_response.status_code == 200
+    assert pause_response.json()["paused"] is True
+    assert registry.get("sample") is None
+
+    resume_response = await api.post(f"/strategies/versions/{v1.id}/resume")
+    assert resume_response.status_code == 200
+    assert resume_response.json()["paused"] is False
+    assert registry.get("sample") is not None
+
+
+async def test_pause_non_active_version_returns_409(api, service):
+    strategy_versions, _ = service
+    v1 = strategy_versions.save_generated_code(
+        name="sample", code=VALID_CODE, source=CodeSource.AI_GENERATED
+    )
+    response = await api.post(f"/strategies/versions/{v1.id}/pause")
+    assert response.status_code == 409
+
+
+async def test_pause_not_found(api):
+    response = await api.post("/strategies/versions/does-not-exist/pause")
+    assert response.status_code == 404
+
+
+async def test_archive_active_version(api, service):
+    strategy_versions, registry = service
+    v1 = strategy_versions.save_generated_code(
+        name="sample", code=VALID_CODE, source=CodeSource.AI_GENERATED
+    )
+    await api.post(f"/strategies/versions/{v1.id}/activate")
+
+    response = await api.post(f"/strategies/versions/{v1.id}/archive")
+    assert response.status_code == 200
+    assert response.json()["status"] == "archived"
+    assert registry.get("sample") is None
+
+
+async def test_archive_already_archived_returns_409(api, service):
+    strategy_versions, _ = service
+    v1 = strategy_versions.save_generated_code(
+        name="sample", code=VALID_CODE, source=CodeSource.AI_GENERATED
+    )
+    await api.post(f"/strategies/versions/{v1.id}/activate")
+    await api.post(f"/strategies/versions/{v1.id}/archive")
+    response = await api.post(f"/strategies/versions/{v1.id}/archive")
+    assert response.status_code == 409
+
+
+async def test_archive_not_found(api):
+    response = await api.post("/strategies/versions/does-not-exist/archive")
+    assert response.status_code == 404
+
+
+async def test_delete_validated_version(api, service):
+    strategy_versions, _ = service
+    v1 = strategy_versions.save_generated_code(
+        name="sample", code=VALID_CODE, source=CodeSource.AI_GENERATED
+    )
+    response = await api.delete(f"/strategies/versions/{v1.id}")
+    assert response.status_code == 204
+
+    get_response = await api.get(f"/strategies/versions/{v1.id}")
+    assert get_response.status_code == 404
+
+
+async def test_delete_active_version_returns_409(api, service):
+    strategy_versions, _ = service
+    v1 = strategy_versions.save_generated_code(
+        name="sample", code=VALID_CODE, source=CodeSource.AI_GENERATED
+    )
+    await api.post(f"/strategies/versions/{v1.id}/activate")
+    response = await api.delete(f"/strategies/versions/{v1.id}")
+    assert response.status_code == 409
+
+
+async def test_delete_not_found(api):
+    response = await api.delete("/strategies/versions/does-not-exist")
+    assert response.status_code == 404
+
+
+EDITED_CODE = VALID_CODE + "\n# edited\n"
+
+INVALID_CODE = "import os\nx = 1\n"
+
+
+async def test_edit_version_code_saves_new_version(api, service):
+    strategy_versions, _ = service
+    v1 = strategy_versions.save_generated_code(
+        name="sample", code=VALID_CODE, source=CodeSource.AI_GENERATED
+    )
+    response = await api.post(f"/strategies/versions/{v1.id}/edit", json={"code": EDITED_CODE})
+    assert response.status_code == 200
+    body = response.json()
+    assert body["version"] == 2
+    assert body["parent_version_id"] == v1.id
+    assert body["source"] == "manual"
+    assert body["status"] == "validated"
+    assert body["code"] == EDITED_CODE
+
+
+async def test_edit_version_code_invalid_returns_422(api, service):
+    strategy_versions, _ = service
+    v1 = strategy_versions.save_generated_code(
+        name="sample", code=VALID_CODE, source=CodeSource.AI_GENERATED
+    )
+    response = await api.post(f"/strategies/versions/{v1.id}/edit", json={"code": INVALID_CODE})
+    assert response.status_code == 422
+
+
+async def test_edit_version_code_not_found(api):
+    response = await api.post(
+        "/strategies/versions/does-not-exist/edit", json={"code": VALID_CODE}
+    )
+    assert response.status_code == 404
+
+
+async def test_edit_version_code_with_new_name_forks(api, service):
+    strategy_versions, _ = service
+    v1 = strategy_versions.save_generated_code(
+        name="sample", code=VALID_CODE, source=CodeSource.AI_GENERATED
+    )
+    response = await api.post(
+        f"/strategies/versions/{v1.id}/edit",
+        json={"code": EDITED_CODE, "new_name": "sample_fork"},
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["name"] == "sample_fork"
+    assert body["version"] == 1
+    assert body["parent_version_id"] is None
+
+
+async def test_edit_version_code_new_name_conflict_returns_409(api, service):
+    strategy_versions, _ = service
+    v1 = strategy_versions.save_generated_code(
+        name="sample", code=VALID_CODE, source=CodeSource.AI_GENERATED
+    )
+    strategy_versions.save_generated_code(
+        name="other", code=VALID_CODE, source=CodeSource.AI_GENERATED
+    )
+    response = await api.post(
+        f"/strategies/versions/{v1.id}/edit", json={"code": EDITED_CODE, "new_name": "other"}
+    )
+    assert response.status_code == 409
+
+
 async def test_get_version_with_legacy_string_indicators_still_validates(api, service):
     """`StrategyVersion.spec` rows written before indicators were structured
     objects (plain `indicators: list[str]`) must still deserialize — this is

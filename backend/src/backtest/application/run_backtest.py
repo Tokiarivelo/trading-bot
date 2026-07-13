@@ -40,6 +40,8 @@ from src.shared.config.settings import CONFIGS_DIR, load_yaml_config
 from src.shared.db.base import make_session_factory
 from src.shared.events.bus import EventBus
 from src.shared.events.definitions import CandleClosed, PositionClosed, PositionOpened
+from src.strategies.adapters.repository import StrategyVersionRepository
+from src.strategies.application.versioning import StrategyVersionService
 from src.strategies.generated.breakout_v1 import BreakoutV1
 from src.strategies.registry import StrategyRegistry
 
@@ -51,6 +53,9 @@ logger = logging.getLogger(__name__)
 HISTORY_BUFFER = timedelta(days=60)
 DEFAULT_STARTING_BALANCE = 10_000.0
 DEFAULT_DATABASE_URL = "sqlite:///./data/trading.db"
+# backend/src/backtest/application/run_backtest.py -> backend/src
+_BACKEND_SRC_DIR = Path(__file__).resolve().parent.parent.parent
+_STRATEGIES_GENERATED_DIR = _BACKEND_SRC_DIR / "strategies" / "generated"
 
 
 class NoHistoryError(Exception):
@@ -69,7 +74,7 @@ async def run_backtest(
 ) -> BacktestReport:
     start, end = parse_period(period)
 
-    registry = strategy_source or _default_registry()
+    registry = strategy_source or _default_registry(database_url)
     strategy = registry.get(strategy_name)
     if strategy is None:
         raise ValueError(f"unknown strategy: {strategy_name!r}")
@@ -210,7 +215,18 @@ def _stop_hit(position: Position, candle: Candle) -> float | None:
     return None
 
 
-def _default_registry() -> StrategyRegistry:
+def _default_registry(database_url: str) -> StrategyRegistry:
+    """`breakout_v1` plus every strategy the trader has actually built and
+    activated — mirrors `container.py`'s startup wiring so `make backtest`/
+    the CLI can run a backtest against any AI-generated or hand-edited
+    strategy, not just the hardcoded demo one."""
     registry = StrategyRegistry()
     registry.register(BreakoutV1())
+    session_factory = make_session_factory(database_url)
+    strategy_versions = StrategyVersionService(
+        repository=StrategyVersionRepository(session_factory),
+        registry=registry,
+        generated_dir=_STRATEGIES_GENERATED_DIR,
+    )
+    strategy_versions.load_active_into_registry()
     return registry

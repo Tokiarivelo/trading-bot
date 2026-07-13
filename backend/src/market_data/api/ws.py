@@ -114,7 +114,7 @@ async def disconnect(sid: str) -> None:
 async def subscribe(sid: str, data: dict[str, str]) -> None:
     """Client -> server event `subscribe`.
 
-    Payload: `{"symbol": str, "timeframe": "M1" | "M5" | "H1" | "H4" | "D1"}`.
+    Payload: `{"symbol": str, "timeframe": "M1" | "M5" | "M15" | "M30" | "H1" | "H4" | "D1" | "W1" | "MN"}`.
     Joins the `<symbol>:<timeframe>` room; the client starts receiving that
     room's `candle_closed` and `candle_update` events. Also starts the
     candle stream polling `symbol` if it wasn't already covered by
@@ -145,7 +145,7 @@ async def subscribe(sid: str, data: dict[str, str]) -> None:
 async def unsubscribe(sid: str, data: dict[str, str]) -> None:
     """Client -> server event `unsubscribe`.
 
-    Payload: `{"symbol": str, "timeframe": "M1" | "M5" | "H1" | "H4" | "D1"}`.
+    Payload: `{"symbol": str, "timeframe": "M1" | "M5" | "M15" | "M30" | "H1" | "H4" | "D1" | "W1" | "MN"}`.
     Leaves the `<symbol>:<timeframe>` room, stops the live-candle preview
     for it, and stops the candle stream from polling `symbol` once no
     client has any room open for it anymore (unless it's part of the

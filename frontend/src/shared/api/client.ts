@@ -51,7 +51,7 @@ async function errorMessage(res: Response): Promise<string> {
 }
 
 function handleUnauthorized(path: string, status: number): void {
-  if (status !== 401 || path.startsWith("/auth/")) return;
+  if (status !== 401 || path.startsWith("/auth/") || path === "/account/connect") return;
   clearToken();
   if (typeof window !== "undefined") {
     window.dispatchEvent(new CustomEvent(UNAUTHORIZED_EVENT));
@@ -67,6 +67,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     handleUnauthorized(path, res.status);
     throw new ApiError(res.status, await errorMessage(res));
   }
+  if (res.status === 204) return undefined as T;
   return res.json() as Promise<T>;
 }
 
@@ -158,7 +159,7 @@ export const disconnectAccount = (forget = false) =>
 
 export interface Candle {
   symbol: string;
-  timeframe: "M1" | "M5" | "H1" | "H4" | "D1";
+  timeframe: "M1" | "M5" | "M15" | "M30" | "H1" | "H4" | "D1" | "W1" | "MN";
   time: number; // bar open, epoch seconds UTC (lightweight-charts native)
   open: number;
   high: number;
@@ -429,6 +430,9 @@ export interface StrategyVersionSummary {
   code_hash: string;
   source: StrategySource;
   status: StrategyVersionStatus;
+  /** Only meaningful while status is "active": true if suspended from live
+   * evaluation via pauseStrategyVersion without being deactivated. */
+  paused: boolean;
   created_at: number; // epoch seconds UTC
   parent_version_id: string | null;
   draft_id: string | null;
@@ -465,6 +469,70 @@ export const duplicateStrategyVersion = (id: string, body: { name: string; symbo
 export const renameStrategyVersion = (id: string, name: string) =>
   api.patch<StrategyVersionSummary>(`/strategies/versions/${encodeURIComponent(id)}/rename`, {
     name,
+  });
+/** Retires this version: marks it archived and, if it was the live version,
+ * stops the engine from evaluating it. No replacement version is required —
+ * the strategy family can end up with nothing active. */
+export const archiveStrategyVersion = (id: string) =>
+  api.post<StrategyVersionSummary>(`/strategies/versions/${encodeURIComponent(id)}/archive`);
+/** Hard-deletes this version's record and generated file. Rejected with a
+ * 409 if the version is currently active — archive it first. */
+export const deleteStrategyVersion = (id: string) =>
+  api.delete<void>(`/strategies/versions/${encodeURIComponent(id)}`);
+/** Suspends live trading for this active version without deactivating it —
+ * distinct from the engine-wide kill switch, which pauses every strategy. */
+export const pauseStrategyVersion = (id: string) =>
+  api.post<StrategyVersionSummary>(`/strategies/versions/${encodeURIComponent(id)}/pause`);
+/** Reverses pauseStrategyVersion. */
+export const resumeStrategyVersion = (id: string) =>
+  api.post<StrategyVersionSummary>(`/strategies/versions/${encodeURIComponent(id)}/resume`);
+/** Saves a hand-edited source. Leave `newName` unset to save as the next
+ * version of this version's own strategy family, parented on `id` itself
+ * (not necessarily the active version). Pass `newName` to fork the edit
+ * into a brand-new strategy family at version 1 instead — throws
+ * ApiError(409) if that name is already in use by another family.
+ * Re-validated in the sandbox either way — throws ApiError(422) if that
+ * fails. The new version's status is "validated", never "active". */
+export const editStrategyVersionCode = (id: string, code: string, newName?: string) =>
+  api.post<StrategyVersionDetail>(`/strategies/versions/${encodeURIComponent(id)}/edit`, {
+    code,
+    new_name: newName,
+  });
+
+// ── AI: user-triggered code regeneration (§6.5 code editor) ────────────────
+
+export interface RegeneratedCode {
+  version_id: string;
+  instructions: string;
+  code: string;
+  is_valid: boolean;
+  sandbox_errors: string[];
+  new_version_id: string | null;
+}
+
+/** Runs the trader's free-form instructions through the `code_generation`
+ * task's configured LLM (the same provider setting as the PDF-to-code
+ * pipeline — see the Settings page) against this version's current code
+ * and spec — or,
+ * if `spec` is given, that edited spec instead, letting the trader tweak
+ * symbols/timeframes/entry-exit rules before regenerating — then
+ * sandbox-validates the result. Leave `newName` unset to save as the next
+ * version of this version's own family; pass it to fork into a brand-new
+ * family at version 1 instead (throws ApiError(409) if already in use). On
+ * success `new_version_id` points at the new "validated" StrategyVersion;
+ * on sandbox rejection `sandbox_errors` explains why and no version is
+ * created — the caller can still show `code` for manual fixup via
+ * `editStrategyVersionCode`. */
+export const regenerateStrategyVersionCode = (
+  id: string,
+  instructions: string,
+  spec?: ExtractedStrategySpec,
+  newName?: string,
+) =>
+  api.post<RegeneratedCode>(`/ai/strategies/versions/${encodeURIComponent(id)}/regenerate`, {
+    instructions,
+    spec,
+    new_name: newName,
   });
 
 // ── AI: 10-trade self-refinement loop (Phase 7, F5) ─────────────────────────

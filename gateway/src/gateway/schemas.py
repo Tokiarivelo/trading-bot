@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from pydantic import BaseModel
 
-VALID_TIMEFRAMES = ("M1", "M5", "H1", "H4", "D1")
+VALID_TIMEFRAMES = ("M1", "M5", "M15", "M30", "H1", "H4", "D1", "W1", "MN")
 
 
 class LoginRequest(BaseModel):

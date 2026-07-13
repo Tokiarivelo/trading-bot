@@ -21,7 +21,9 @@ from src.market_data.domain.models import MarketDataUnavailable, Timeframe
 
 router = APIRouter(prefix="/market-data", tags=["market-data"])
 
-TimeframeParam = Annotated[Timeframe, Query(description="Bar size: M1, M5, H1, H4, or D1.")]
+TimeframeParam = Annotated[
+    Timeframe, Query(description="Bar size: M1, M5, M15, M30, H1, H4, D1, W1, or MN.")
+]
 
 _UNAVAILABLE = {503: {"description": "The MT5 gateway is unreachable or not logged in."}}
 

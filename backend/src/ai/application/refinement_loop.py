@@ -26,6 +26,7 @@ from src.ai.adapters.report_repository import AnalysisReportRepository, Refineme
 from src.ai.application.llm_router import LLMRouter
 from src.ai.application.llm_text import extract_python_code, strip_fences
 from src.ai.application.pdf_to_strategy import default_backtest_period
+from src.ai.application.sandbox_retry import generate_valid_strategy_code
 from src.ai.domain.models import (
     AnalysisReport,
     ProposalStatus,
@@ -220,9 +221,35 @@ class RefinementLoopService:
         )
         refine_llm = self._llm_router.for_task("code_refinement")
         raw_refine = await refine_llm.complete(refine_message, max_tokens=8192)
-        rationale, proposed_code = _parse_rationale_and_code(raw_refine)
+        rationale, first_pass_code = _parse_rationale_and_code(raw_refine)
 
         proposal_id = str(uuid.uuid4())
+        # The first draft sometimes trips the sandbox on something the LLM
+        # can plausibly fix itself (an accidentally forbidden import, a
+        # construct the static scan flags) — retry against the same errors
+        # before rejecting the proposal outright.
+        proposed_code, retry_errors = await generate_valid_strategy_code(
+            refine_llm, strategy_name, first_pass_code
+        )
+        if retry_errors:
+            logger.warning(
+                "refined strategy code failed sandbox validation after retries: "
+                "report=%s errors=%s",
+                report.id,
+                retry_errors,
+            )
+            return RefinementProposal(
+                id=proposal_id,
+                report_id=report.id,
+                strategy_name=strategy_name,
+                base_version_id=active_version_id,
+                rationale=rationale,
+                proposed_code=proposed_code,
+                status=ProposalStatus.REJECTED,
+                created_at=datetime.now(UTC),
+                sandbox_errors=retry_errors,
+            )
+
         try:
             new_version = await asyncio.to_thread(
                 self._strategy_versions.save_generated_code,

@@ -13,6 +13,7 @@ from fastapi import APIRouter, File, Form, HTTPException, Path, Request, UploadF
 from src.ai.api.schemas import GeneratedCodeOut, StrategyDraftOut, UpdateDraftSpecIn
 from src.ai.application.llm_router import LLMProviderNotConfiguredError
 from src.ai.application.pdf_to_strategy import InvalidDraftStateError, PdfToStrategyService
+from src.ai.ports.llm import LLMCallError
 
 router = APIRouter(prefix="/ai/pdf-strategy", tags=["ai"])
 
@@ -24,6 +25,13 @@ _PROVIDER_NOT_CONFIGURED = {
     503: {
         "description": "The task's configured LLM provider is missing required setup "
         "(e.g. no TB_ANTHROPIC_API_KEY) — an operator needs to fix .env or configs/ai.yaml."
+    }
+}
+_LLM_CALL_FAILED = {
+    504: {
+        "description": "The configured LLM provider was reachable but the call itself failed "
+        "(timeout, non-zero exit, or an error result) — retry, or switch this task to a "
+        "different provider on the Settings page."
     }
 }
 
@@ -48,7 +56,11 @@ def _service(request: Request) -> PdfToStrategyService:
         "the draft — and the auto-backtest that `generate-code` later runs — is scoped to "
         "whatever symbol was active on the chart when the upload was started."
     ),
-    responses={400: {"description": "File is not a PDF."}, **_PROVIDER_NOT_CONFIGURED},
+    responses={
+        400: {"description": "File is not a PDF."},
+        **_PROVIDER_NOT_CONFIGURED,
+        **_LLM_CALL_FAILED,
+    },
 )
 async def upload_pdf(
     request: Request,
@@ -70,6 +82,8 @@ async def upload_pdf(
         )
     except LLMProviderNotConfiguredError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except LLMCallError as exc:
+        raise HTTPException(status_code=504, detail=str(exc)) from exc
     return StrategyDraftOut.from_domain(draft)
 
 
@@ -180,7 +194,12 @@ async def reject_draft(
         "comes back null rather than failing the whole request. Only allowed once the draft "
         "is approved."
     ),
-    responses={**_DRAFT_NOT_FOUND, **_DRAFT_STATE_CONFLICT, **_PROVIDER_NOT_CONFIGURED},
+    responses={
+        **_DRAFT_NOT_FOUND,
+        **_DRAFT_STATE_CONFLICT,
+        **_PROVIDER_NOT_CONFIGURED,
+        **_LLM_CALL_FAILED,
+    },
 )
 async def generate_code(
     request: Request, draft_id: str = Path(description="Draft id, must be approved.")
@@ -191,6 +210,8 @@ async def generate_code(
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except LLMProviderNotConfiguredError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except LLMCallError as exc:
+        raise HTTPException(status_code=504, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     return GeneratedCodeOut.from_domain(result)

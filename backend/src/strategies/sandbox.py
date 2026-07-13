@@ -103,7 +103,17 @@ def _static_scan(source: str) -> list[str]:
 
 
 def _safe_import(name: str, *args: object, **kwargs: object) -> object:
-    if name not in ALLOWED_IMPORT_MODULES:
+    # `name` isn't necessarily what the strategy source itself wrote — numpy
+    # and pandas both lazily `__import__` their own dotted submodules on first
+    # use of ordinary top-level API (e.g. `.sum()`/`.mean()` pulling in
+    # `numpy._core._methods`). The static scan already restricts what the
+    # strategy file itself may `import`/`from ... import` to
+    # ALLOWED_IMPORT_MODULES; once a top-level package is on that list, its
+    # own internal submodule imports aren't additional attack surface, so
+    # they're allowed too — only the exact-match check still applies to
+    # non-package-prefixed entries like "src.strategies.domain.models".
+    top_level = name.partition(".")[0]
+    if name not in ALLOWED_IMPORT_MODULES and top_level not in ALLOWED_IMPORT_MODULES:
         raise ImportError(f"import of {name!r} is not allowed in sandboxed strategy code")
     return __import__(name, *args, **kwargs)
 

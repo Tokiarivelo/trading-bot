@@ -23,6 +23,7 @@ import fitz  # PyMuPDF
 from src.ai.adapters.repository import DraftRepository
 from src.ai.application.llm_router import LLMRouter
 from src.ai.application.llm_text import extract_python_code, strip_fences
+from src.ai.application.sandbox_retry import generate_valid_strategy_code
 from src.ai.domain.models import DraftStatus, ExtractedStrategySpec, GeneratedCode, StrategyDraft
 from src.ai.prompts.loader import render_prompt
 from src.backtest.application.run_backtest import NoHistoryError, run_backtest
@@ -158,7 +159,20 @@ class PdfToStrategyService:
         )
         llm = self._llm_router.for_task("code_generation")
         raw = await llm.complete(message, max_tokens=8192)
-        code = extract_python_code(raw)
+        first_pass_code = extract_python_code(raw)
+        # The first draft sometimes trips the sandbox on something the LLM
+        # can plausibly fix itself (an accidentally forbidden import, a
+        # construct the static scan flags) — retry against the same errors
+        # before handing the trader a rejection to fix by hand.
+        code, retry_errors = await generate_valid_strategy_code(llm, spec.name, first_pass_code)
+        if retry_errors:
+            logger.warning(
+                "generated strategy code failed sandbox validation after retries: "
+                "draft=%s errors=%s",
+                draft_id,
+                retry_errors,
+            )
+            return GeneratedCode(draft_id=draft_id, code=code, sandbox_errors=retry_errors)
 
         try:
             version = await asyncio.to_thread(

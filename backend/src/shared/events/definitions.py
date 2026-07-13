@@ -18,7 +18,7 @@ class Event:
 @dataclass(frozen=True, kw_only=True)
 class CandleClosed(Event):
     symbol: str
-    timeframe: str  # "M1" | "M5" | "H1" | "H4" | "D1"
+    timeframe: str  # "M1" | "M5" | "M15" | "M30" | "H1" | "H4" | "D1" | "W1" | "MN"
 
 
 @dataclass(frozen=True, kw_only=True)

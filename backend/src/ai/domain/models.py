@@ -224,6 +224,28 @@ class GeneratedCode:
         return not self.sandbox_errors
 
 
+@dataclass(frozen=True)
+class RegeneratedCode:
+    """Output of `regenerate_strategy_code` for a user-triggered, free-form
+    edit request against an existing `StrategyVersion` (§6.5 code editor).
+    Distinct from `RefinementProposal`: this is always human-initiated (no
+    trade review, no backtest gate, no auto-apply path) — the trader types
+    what they want changed and gets back a new 'validated' version to review
+    and, separately, activate. `sandbox_errors` non-empty means the code was
+    rejected and `new_version_id` stays unset.
+    """
+
+    version_id: str
+    instructions: str
+    code: str
+    sandbox_errors: tuple[str, ...] = ()
+    new_version_id: str | None = None
+
+    @property
+    def is_valid(self) -> bool:
+        return not self.sandbox_errors
+
+
 @dataclass(frozen=True, kw_only=True)
 class RefinementConfig:
     """Mirrors `configs/ai.yaml: refinement` — the self-refinement loop's

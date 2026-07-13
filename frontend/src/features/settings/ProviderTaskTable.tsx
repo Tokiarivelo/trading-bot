@@ -14,9 +14,9 @@ import { ProviderTestButton } from "./ProviderTestButton";
 
 const TASK_LABELS: Record<string, string> = {
   pdf_extraction: "Document analysis (PDF → strategy)",
-  code_generation: "Strategy code generation",
+  code_generation: "Strategy code generation (also used by AI regeneration on the version editor)",
   ten_trade_review: "10-trade review",
-  code_refinement: "Code refinement",
+  code_refinement: "Code refinement (10-trade auto-refinement loop)",
 };
 
 /** Not a real provider id — a settings-UI-only pseudo-provider. Picking it

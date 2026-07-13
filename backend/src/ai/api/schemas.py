@@ -17,6 +17,7 @@ from src.ai.domain.models import (
     PriceLevelAnnotation,
     ProposalStatus,
     RefinementProposal,
+    RegeneratedCode,
     ReportVerdict,
     StrategyDraft,
 )
@@ -189,6 +190,56 @@ class GeneratedCodeOut(BaseModel):
             sandbox_errors=list(result.sandbox_errors),
             version_id=result.version_id,
             backtest_report_id=result.backtest_report_id,
+        )
+
+
+class RegenerateCodeIn(BaseModel):
+    instructions: str = Field(
+        description="Free-form description of what to change, e.g. 'only trade during the "
+        "London session' or 'tighten the stop loss to 1.5x ATR'. Sent to the LLM alongside "
+        "the version's current code and spec snapshot.",
+        min_length=1,
+    )
+    spec: ExtractedStrategySpecSchema | None = Field(
+        default=None,
+        description="Edited spec snapshot to use instead of the version's stored one — both "
+        "in the prompt sent to the LLM and on the resulting version. Lets the trader tweak "
+        "symbols, timeframes, entry/exit rules, etc. before regenerating. Omit to regenerate "
+        "against the version's spec unchanged.",
+    )
+    new_name: str | None = Field(
+        default=None,
+        description="Leave unset to save the regenerated code as the next version of this "
+        "version's own strategy family (the usual case). Set to a different, not-yet-used "
+        "name to fork the result into a brand-new strategy family at version 1 instead — the "
+        "'duplicate' save destination, for trying a change without touching the original. "
+        "Rejected with 409 if the name is already in use by another family.",
+    )
+
+
+class RegeneratedCodeOut(BaseModel):
+    version_id: str = Field(description="The strategy version this regeneration was based on.")
+    instructions: str = Field(description="The instructions that were sent to the LLM.")
+    code: str = Field(description="The regenerated Python source, whether or not it validated.")
+    is_valid: bool = Field(description="True if the code passed sandbox validation.")
+    sandbox_errors: list[str] = Field(
+        description="Why the code was rejected — empty when is_valid is true."
+    )
+    new_version_id: str | None = Field(
+        description="The new StrategyVersion id if validation passed, else null. Its status is "
+        "'validated', not 'active' — activating it is a separate user action via "
+        "POST /strategies/versions/{id}/activate."
+    )
+
+    @staticmethod
+    def from_domain(result: RegeneratedCode) -> RegeneratedCodeOut:
+        return RegeneratedCodeOut(
+            version_id=result.version_id,
+            instructions=result.instructions,
+            code=result.code,
+            is_valid=result.is_valid,
+            sandbox_errors=list(result.sandbox_errors),
+            new_version_id=result.new_version_id,
         )
 
 

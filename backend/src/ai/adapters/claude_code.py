@@ -22,16 +22,26 @@ import asyncio
 import json
 import shlex
 
-from src.ai.ports.llm import LLMMessage
+from src.ai.ports.llm import LLMCallError, LLMMessage
 
-_TIMEOUT_S = 180.0
+# Fixed per-call overhead alone (see module docstring) can approach 180s
+# under load, and a full `code_generation` task also has to emit up to
+# ~8192 tokens of Python before the CLI exits — 180s was tuned against
+# quick calls (e.g. `pdf_extraction`) and reliably timed out full code
+# generation. 480s gives that headroom; `next.config.ts`'s `proxyTimeout`
+# must stay above this value too, or the frontend dev proxy cuts the
+# connection first.
+_DEFAULT_TIMEOUT_S = 480.0
 
 
 class ClaudeCodeAdapter:
-    def __init__(self, binary: str, model: str, extra_args: str = "") -> None:
+    def __init__(
+        self, binary: str, model: str, extra_args: str = "", timeout_s: float = _DEFAULT_TIMEOUT_S
+    ) -> None:
         self._binary = binary
         self._model = model
         self._extra_args = shlex.split(extra_args) if extra_args else []
+        self._timeout_s = timeout_s
 
     async def complete(self, message: LLMMessage, *, max_tokens: int = 4096) -> str:
         # Claude Code manages output length itself (no CLI flag maps to
@@ -55,10 +65,20 @@ class ClaudeCodeAdapter:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=_TIMEOUT_S)
+        try:
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=self._timeout_s)
+        except TimeoutError:
+            # asyncio.wait_for only cancels the *wait* — the subprocess keeps
+            # running unless we kill it ourselves, otherwise every timeout
+            # leaves an orphaned `claude` process behind.
+            proc.kill()
+            await proc.wait()
+            raise LLMCallError(
+                f"claude code call exceeded {self._timeout_s:.0f}s timeout and was killed"
+            ) from None
         if proc.returncode != 0:
-            raise RuntimeError(f"claude code exited {proc.returncode}: {stderr.decode()[:500]}")
+            raise LLMCallError(f"claude code exited {proc.returncode}: {stderr.decode()[:500]}")
         payload = json.loads(stdout)
         if payload.get("is_error"):
-            raise RuntimeError(f"claude code returned an error result: {payload!r}")
+            raise LLMCallError(f"claude code returned an error result: {payload!r}")
         return payload["result"]

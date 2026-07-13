@@ -114,6 +114,11 @@ class StrategyVersionOut(BaseModel):
         description="'validated' (passed the sandbox, not live), 'active' (registered in the "
         "StrategyRegistry and tradeable), or 'archived' (was active, superseded)."
     )
+    paused: bool = Field(
+        description="Only meaningful while status is 'active': true if the version is "
+        "suspended from live evaluation via POST .../pause without being deactivated. "
+        "Distinct from the engine-wide kill switch, which pauses every strategy at once."
+    )
     created_at: int = Field(description="Epoch seconds UTC.")
     parent_version_id: str | None = Field(
         description="The version this one supersedes, if any — the rollback/diff chain."
@@ -139,6 +144,7 @@ class StrategyVersionOut(BaseModel):
             code_hash=version.code_hash,
             source=version.source,
             status=version.status,
+            paused=version.paused,
             created_at=int(version.created_at.timestamp()),
             parent_version_id=version.parent_version_id,
             draft_id=version.draft_id,
@@ -171,6 +177,21 @@ class RenameVersionRequest(BaseModel):
     name: str = Field(
         description="New display name for this version's strategy family — applies to "
         "every version that currently shares the family's name, not just this one."
+    )
+
+
+class EditVersionCodeRequest(BaseModel):
+    code: str = Field(
+        description="Full replacement Python source for this strategy. Re-validated in the "
+        "sandbox before saving; nothing is written if it fails."
+    )
+    new_name: str | None = Field(
+        default=None,
+        description="Leave unset to save as the next version of this version's own strategy "
+        "family (the usual case). Set to a different, not-yet-used name to fork the edit into "
+        "a brand-new strategy family at version 1 instead — the 'duplicate' save destination, "
+        "for trying a change without touching the original. Rejected with 409 if the name is "
+        "already in use by another family.",
     )
 
 

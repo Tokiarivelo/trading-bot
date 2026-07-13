@@ -149,7 +149,7 @@ mt5-login: ## Log in to MT5 through the gateway from the CLI: make mt5-login LOG
 backtest: ## Run a strategy backtest: make backtest strategy=breakout_v1 symbol=XAUUSD period=2025-01:2025-06
 	@test -n "$(strategy)" && test -n "$(symbol)" && test -n "$(period)" || \
 		{ echo 'usage: make backtest strategy=breakout_v1 symbol=XAUUSD period=2025-01:2025-06'; exit 1; }
-	cd backend && uv run python -m src.backtest.cli $(strategy) $(symbol) $(period)
+	cd backend && uv run python -m src.backtest.cli "$(strategy)" "$(symbol)" "$(period)"
 
 # ─── Quality gates (run `make check` before declaring any task done) ─────────
 

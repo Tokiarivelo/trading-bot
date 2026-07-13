@@ -17,7 +17,9 @@ class CandleOut(BaseModel):
     `candle_closed` Socket.IO event."""
 
     symbol: str
-    timeframe: str = Field(description="One of 'M1', 'M5', 'H1', 'H4', 'D1'.")
+    timeframe: str = Field(
+        description="One of 'M1', 'M5', 'M15', 'M30', 'H1', 'H4', 'D1', 'W1', 'MN'."
+    )
     time: int = Field(description="Bar open time, epoch seconds UTC.")
     open: float
     high: float
@@ -90,7 +92,8 @@ class BackfillRequest(BaseModel):
         default=None, description="Symbols to backfill; defaults to `configs/app.yaml: symbols`."
     )
     timeframes: list[Timeframe] | None = Field(
-        default=None, description="Timeframes to backfill; defaults to all of M1/M5/H1/H4/D1."
+        default=None,
+        description="Timeframes to backfill; defaults to all of M1/M5/M15/M30/H1/H4/D1/W1/MN.",
     )
     count: int = Field(
         default=1000, ge=1, le=5000, description="Number of bars per symbol/timeframe."

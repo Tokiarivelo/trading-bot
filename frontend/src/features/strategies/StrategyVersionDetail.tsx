@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import {
   ApiError,
@@ -8,13 +9,16 @@ import {
   getStrategyVersion,
   type StrategyVersionDetail as VersionDetail,
 } from "@/shared/api/client";
+import { CodeEditorPanel } from "./CodeEditorPanel";
 import { DuplicateVersionForm } from "./DuplicateVersionForm";
 import { RenameVersionInline } from "./RenameVersionInline";
 import { StatusBadge } from "./StatusBadge";
+import { VersionLifecycleActions } from "./VersionLifecycleActions";
 
 /** Full version detail: spec snapshot, source code, and the activate button
  * — which doubles as rollback when applied to an older version (§6.5). */
 export function StrategyVersionDetail({ versionId }: { versionId: string }) {
+  const router = useRouter();
   const [version, setVersion] = useState<VersionDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -55,6 +59,7 @@ export function StrategyVersionDetail({ versionId }: { versionId: string }) {
           </h2>
           <RenameVersionInline versionId={version.id} name={version.name} onRenamed={load} />
           <StatusBadge status={version.status} />
+          {version.status === "active" && version.paused && <StatusBadge status="paused" />}
         </div>
         <p className="text-sm text-ink-muted">
           {version.source === "ai_generated" ? "AI generated" : "Manual"} · {version.file_path}
@@ -77,6 +82,11 @@ export function StrategyVersionDetail({ versionId }: { versionId: string }) {
         <DuplicateVersionForm
           versionId={version.id}
           sourceSymbols={version.spec?.symbols ?? []}
+        />
+        <VersionLifecycleActions
+          version={version}
+          onChanged={load}
+          onDeleted={() => router.push("/strategies")}
         />
         {version.parent_version_id && (
           <Link
@@ -140,12 +150,12 @@ export function StrategyVersionDetail({ versionId }: { versionId: string }) {
         </section>
       )}
 
-      <section className="rounded-md border border-line bg-panel">
-        <header className="border-b border-line px-3 py-2 text-sm text-ink-muted">
-          Source code
-        </header>
-        <pre className="max-h-[32rem] overflow-auto p-3 text-xs">{version.code}</pre>
-      </section>
+      <CodeEditorPanel
+        versionId={version.id}
+        name={version.name}
+        code={version.code}
+        spec={version.spec}
+      />
     </div>
   );
 }

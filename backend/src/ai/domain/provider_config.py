@@ -11,7 +11,12 @@ from datetime import datetime
 
 #: The 4 AI tasks the settings page lists (AI_PROVIDER_SETTINGS_PLAN.md §1),
 #: matching the literal `for_task(...)` strings in `pdf_to_strategy.py` /
-#: `refinement_loop.py`.
+#: `refinement_loop.py`. `code_regeneration.py` deliberately reuses
+#: `code_generation` rather than getting its own entry here — see that
+#: module's docstring. A task missing here can never get a settings-page
+#: override — `for_task()` silently keeps using `configs/ai.yaml`'s default
+#: provider for it regardless of what the settings page shows selected for
+#: other tasks.
 KNOWN_TASKS = ("pdf_extraction", "code_generation", "ten_trade_review", "code_refinement")
 
 

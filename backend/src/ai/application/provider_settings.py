@@ -45,7 +45,7 @@ _TEST_MESSAGE = LLMMessage(system="", user="Reply with exactly one word: pong")
 
 class UnknownTaskError(ValueError):
     """`task` is not one of `KNOWN_TASKS` — the settings page only ever
-    offers the 4 real AI tasks, so this means a client bug, not an operator
+    offers the real AI tasks, so this means a client bug, not an operator
     typo the UI could make."""
 
 

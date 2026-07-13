@@ -20,6 +20,7 @@ const FAVORITE_SYMBOLS_KEY = "tb.favoriteSymbols";
 const FAVORITES_MIGRATED_KEY = "tb.favoritesMigrated";
 const LAST_SYMBOL_KEY = "tb.lastSymbol";
 const SYMBOL_QUERY_KEY = "symbol";
+const BACKTEST_REPORT_QUERY_KEY = "backtestReport";
 // Last-resort fallback when nothing else (URL, last-viewed, favorites,
 // engine config) can resolve an initial symbol — e.g. the very first load
 // with the backend unreachable. Not used as the nav bar's default chip set
@@ -49,6 +50,22 @@ export default function Home() {
   const [symbol, setSymbol] = useState<string | null>(null);
   const [extraSymbols, setExtraSymbols] = useState<string[]>([]);
   const [favoriteSymbols, setFavoriteSymbols] = useState<string[]>([]);
+  // Set from `?backtestReport=` (arrived via "View on chart" on a backtest
+  // report) — tells ChartPanel to overlay that report's trades on the
+  // candle history they actually traded on, instead of the live journal's.
+  const [backtestReportId, setBacktestReportId] = useState<string | null>(null);
+  useEffect(() => {
+    setBacktestReportId(
+      new URLSearchParams(window.location.search).get(BACKTEST_REPORT_QUERY_KEY),
+    );
+  }, []);
+
+  function exitBacktestView() {
+    setBacktestReportId(null);
+    const url = new URL(window.location.href);
+    url.searchParams.delete(BACKTEST_REPORT_QUERY_KEY);
+    window.history.replaceState(null, "", url);
+  }
   // ChartPanel needs a symbol string even while the real one is still
   // resolving on mount (see the effect below) — the empty-string placeholder
   // is never rendered since ChartPanel itself is gated on `symbol` below.
@@ -289,7 +306,13 @@ export default function Home() {
       <main className="flex min-h-0 flex-1">
         <OrdersDock>
           {symbol ? (
-            <ChartPanel symbol={symbol} trading={trading} activeStrategy={activeStrategy} />
+            <ChartPanel
+              symbol={symbol}
+              trading={trading}
+              activeStrategy={activeStrategy}
+              backtestReportId={backtestReportId}
+              onExitBacktestView={exitBacktestView}
+            />
           ) : (
             <div className="flex flex-1 items-center justify-center rounded-md border border-line bg-panel text-sm text-ink-muted">
               Loading chart…
@@ -301,12 +324,6 @@ export default function Home() {
           <Panel>
             <EngineControlPanel />
           </Panel>
-          {symbol && (
-            <Panel>
-              <TradePanel symbol={symbol} trading={trading} />
-            </Panel>
-          )}
-          <Panel>Journal (Phase 3)</Panel>
           <Panel>
             {symbol ? (
               <BotSelector symbol={symbol} activeStrategy={activeStrategy} />
@@ -316,6 +333,12 @@ export default function Home() {
               </Link>
             )}
           </Panel>
+          {symbol && (
+            <Panel>
+              <TradePanel symbol={symbol} trading={trading} />
+            </Panel>
+          )}
+          <Panel>Journal (Phase 3)</Panel>
           <Panel>
             <Link href="/ai-reports" className="text-accent hover:underline">
               AI reviews →

@@ -38,9 +38,11 @@ import {
 import { useEffect, useRef, useState } from 'react';
 import {
   getActiveNewsWindows,
+  getBacktestReport,
   getCandles,
   getSymbolInfo,
   getTradeMarkers,
+  type BacktestTrade,
   type Candle,
   type NewsWindow,
   type PositionOut,
@@ -84,8 +86,44 @@ export type DrawingToolType =
   | 'fib-retracement'
   | 'parallel-channel';
 
-const TIMEFRAMES: Candle['timeframe'][] = ['M1', 'M5', 'H1', 'H4', 'D1'];
+const TIMEFRAMES: Candle['timeframe'][] = ['M1', 'M5', 'M15', 'M30', 'H1', 'H4', 'D1', 'W1', 'MN'];
+const LAST_TIMEFRAME_KEY = 'chart-last-timeframe';
+const TIMEFRAME_QUERY_KEY = 'timeframe';
 const CANDLE_COUNT = 300;
+// Seconds per bar, used only to anchor backtest-view history loads (see
+// `resolveInitialCandles` below) — approximate for W1/MN is fine since it
+// only sizes a buffer, never the bars themselves.
+const TIMEFRAME_SECONDS: Record<Candle['timeframe'], number> = {
+  M1: 60,
+  M5: 300,
+  M15: 900,
+  M30: 1800,
+  H1: 3600,
+  H4: 14_400,
+  D1: 86_400,
+  W1: 604_800,
+  MN: 2_592_000,
+};
+
+function isTimeframe(value: string | null): value is Candle['timeframe'] {
+  return TIMEFRAMES.includes(value as Candle['timeframe']);
+}
+
+/**
+ * Restores the timeframe to open on load — `?timeframe=` wins over the last
+ * one picked on any chart (`chart-last-timeframe`), same priority order as
+ * the symbol resolution in page.tsx.
+ */
+function loadLastTimeframe(): Candle['timeframe'] {
+  try {
+    const urlTimeframe = new URLSearchParams(window.location.search).get(TIMEFRAME_QUERY_KEY);
+    if (isTimeframe(urlTimeframe)) return urlTimeframe;
+    const stored = localStorage.getItem(LAST_TIMEFRAME_KEY);
+    return isTimeframe(stored) ? stored : 'M5';
+  } catch {
+    return 'M5';
+  }
+}
 const SPREAD_POLL_MS = 3000;
 const MARKERS_POLL_MS = 5000;
 // Matches the backend's own news-window transition-check cadence — no point
@@ -371,6 +409,34 @@ function toSeriesMarkers(
     }
   }
   // The markers plugin requires ascending time order.
+  return markers.sort((a, b) => (a.time as number) - (b.time as number));
+}
+
+/** Same entry-arrow/exit-circle rendering as `toSeriesMarkers`, but for a
+ * backtest report's closed trades (§F: "test the bot against candle
+ * history") — a `BacktestTrade` always has a `close_time`/`close_price`
+ * (the run is over), unlike a live `TradeMarker` which is null while open. */
+function toBacktestSeriesMarkers(
+  trades: BacktestTrade[],
+  colors: { ok: string; err: string },
+): SeriesMarker<Time>[] {
+  const markers: SeriesMarker<Time>[] = [];
+  for (const t of trades) {
+    markers.push({
+      time: t.open_time as UTCTimestamp,
+      position: t.side === 'buy' ? 'belowBar' : 'aboveBar',
+      color: t.side === 'buy' ? colors.ok : colors.err,
+      shape: t.side === 'buy' ? 'arrowUp' : 'arrowDown',
+      text: `${t.side.toUpperCase()} ${t.volume}`,
+    });
+    markers.push({
+      time: t.close_time as UTCTimestamp,
+      position: 'inBar',
+      color: t.profit >= 0 ? colors.ok : colors.err,
+      shape: 'circle',
+      text: `${t.profit >= 0 ? '+' : ''}${t.profit.toFixed(2)}`,
+    });
+  }
   return markers.sort((a, b) => (a.time as number) - (b.time as number));
 }
 
@@ -830,10 +896,21 @@ export function ChartPanel({
   symbol,
   trading,
   activeStrategy,
+  backtestReportId = null,
+  onExitBacktestView,
 }: {
   symbol: string;
   trading: Trading;
   activeStrategy: StrategyVersionSummary | null;
+  /** When set, the chart shows this backtest report's trades as markers
+   * (§F: "test the bot in chart for candle history") instead of the live
+   * journal's — anchored to the historical candle window the report's
+   * trades actually happened in, and with live WS updates paused so a
+   * present-day candle doesn't get appended after months of history. */
+  backtestReportId?: string | null;
+  /** Called when the user leaves backtest view (only rendered while
+   * `backtestReportId` is set) — the caller owns clearing the id/URL param. */
+  onExitBacktestView?: () => void;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
@@ -863,8 +940,27 @@ export function ChartPanel({
   const candlesRef = useRef<Candle[]>([]);
   const hasMoreHistoryRef = useRef(true);
   const loadingMoreRef = useRef(false);
+  // Backtest-view state (§F): the report's trades, converted to markers once
+  // fetched, and an error flag for the "View on Chart" banner below.
+  const [backtestTrades, setBacktestTrades] = useState<BacktestTrade[] | null>(null);
+  const [backtestError, setBacktestError] = useState<string | null>(null);
 
-  const [timeframe, setTimeframe] = useState<Candle['timeframe']>('M5');
+  const [timeframe, setTimeframe] = useState<Candle['timeframe']>(loadLastTimeframe);
+
+  // Keep `?timeframe=` and the last-picked timeframe in sync so a refresh (or
+  // a bookmarked/bare link) resumes on the same timeframe — same convention
+  // as the `?symbol=`/`tb.lastSymbol` sync in page.tsx.
+  useEffect(() => {
+    const url = new URL(window.location.href);
+    url.searchParams.set(TIMEFRAME_QUERY_KEY, timeframe);
+    window.history.replaceState(null, '', url);
+    try {
+      localStorage.setItem(LAST_TIMEFRAME_KEY, timeframe);
+    } catch {
+      // Ignore blocked/full localStorage — timeframe just won't persist.
+    }
+  }, [timeframe]);
+
   const [spreadPoints, setSpreadPoints] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loadingMore, setLoadingMore] = useState(false);
@@ -1641,7 +1737,9 @@ export function ChartPanel({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Load history + subscribe to live updates whenever symbol/timeframe changes.
+  // Load history + subscribe to live updates whenever symbol/timeframe
+  // changes — or, in backtest view, whenever the report being inspected
+  // changes (§F: "test the bot in chart for candle history").
   useEffect(() => {
     let cancelled = false;
     setError(null);
@@ -1650,6 +1748,8 @@ export function ChartPanel({
     setOrderPopover(null);
     setDrawingContextMenu(null);
     setDrawingEditPopover(null);
+    setBacktestTrades(null);
+    setBacktestError(null);
     // WS updates for the new room can start arriving before the REST
     // history call below resolves. Applying one to the still-stale
     // previous symbol/timeframe's data can move time backwards (e.g.
@@ -1740,7 +1840,23 @@ export function ChartPanel({
     };
     chart?.timeScale().subscribeVisibleLogicalRangeChange(onVisibleRangeChange);
 
-    getCandles(symbol, timeframe, CANDLE_COUNT)
+    // Backtest view anchors history to the report's own trades instead of
+    // "now" — just past the last trade's close, scaled to a couple of bars
+    // of the current timeframe, so the anchor guarantees that trade's candle
+    // is included without burning most of CANDLE_COUNT's budget on empty
+    // time past the trades (a flat multi-hour buffer would eat most of a
+    // 300-bar M5 window and push every earlier trade off the loaded page).
+    async function resolveInitialCandles(): Promise<Candle[]> {
+      if (!backtestReportId) return getCandles(symbol, timeframe, CANDLE_COUNT);
+      const report = await getBacktestReport(backtestReportId);
+      if (cancelled) return [];
+      setBacktestTrades(report.trades);
+      const lastClose = report.trades.reduce((max, t) => Math.max(max, t.close_time), 0);
+      const anchor = lastClose > 0 ? lastClose + 2 * TIMEFRAME_SECONDS[timeframe] : undefined;
+      return getCandles(symbol, timeframe, CANDLE_COUNT, anchor);
+    }
+
+    resolveInitialCandles()
       .then((candles) => {
         if (cancelled) return;
         candlesRef.current = candles;
@@ -1761,8 +1877,21 @@ export function ChartPanel({
         }, 50);
       })
       .catch(() => {
-        if (!cancelled) setError('failed to load candles');
+        if (cancelled) return;
+        setError(backtestReportId ? 'failed to load backtest report' : 'failed to load candles');
+        if (backtestReportId) setBacktestError('failed to load backtest report');
       });
+
+    // Live candle updates only make sense against "now" — in backtest view
+    // the chart is anchored to a historical window, so a fresh WS tick would
+    // just append a stray present-day bar after a months-wide gap.
+    if (backtestReportId) {
+      return () => {
+        cancelled = true;
+        historyLoadedRef.current = false;
+        chart?.timeScale().unsubscribeVisibleLogicalRangeChange(onVisibleRangeChange);
+      };
+    }
 
     // `candle_update` streams the in-progress bar every ~1.5s so the
     // rightmost candle moves continuously like MT5; `candle_closed` is the
@@ -1777,7 +1906,15 @@ export function ChartPanel({
         if (!historyLoadedRef.current) return;
         const { candle } = message;
         const bars = candlesRef.current;
-        if (bars.length > 0 && bars[bars.length - 1].time === candle.time) {
+        const lastTime = bars.length > 0 ? bars[bars.length - 1].time : undefined;
+        if (lastTime !== undefined && candle.time < lastTime) {
+          // Stale/out-of-order message (e.g. stream jitter) — pushing this
+          // would break the ascending-time invariant every indicator and
+          // lightweight-charts itself relies on, so drop it instead.
+          console.warn('chart: dropped out-of-order candle update', candle.time, 'last', lastTime);
+          return;
+        }
+        if (lastTime === candle.time) {
           bars[bars.length - 1] = candle;
         } else {
           bars.push(candle);
@@ -1808,7 +1945,7 @@ export function ChartPanel({
         .unsubscribeVisibleLogicalRangeChange(onVisibleRangeChange);
       unsubscribe();
     };
-  }, [symbol, timeframe]);
+  }, [symbol, timeframe, backtestReportId]);
 
   // Recompute overlays when the active strategy changes (activated,
   // deactivated, or a different one picked up for this symbol) or the user
@@ -1960,7 +2097,10 @@ export function ChartPanel({
   }, [symbol]);
 
   // Poll trade markers (F7): entry arrows + exit circles from the journal.
+  // Skipped in backtest view — those markers come from the report's own
+  // trades (set below) instead of the live journal.
   useEffect(() => {
+    if (backtestReportId) return;
     let cancelled = false;
 
     const poll = () => {
@@ -1984,7 +2124,15 @@ export function ChartPanel({
       cancelled = true;
       clearInterval(timer);
     };
-  }, [symbol]);
+  }, [symbol, backtestReportId]);
+
+  // Render the backtest report's trades as markers once fetched (see the
+  // history-loading effect above, which sets `backtestTrades`).
+  useEffect(() => {
+    if (!backtestReportId || backtestTrades === null) return;
+    const colors = { ok: cssVar('--color-ok'), err: cssVar('--color-err') };
+    seriesMarkersRef.current?.setMarkers(toBacktestSeriesMarkers(backtestTrades, colors));
+  }, [backtestReportId, backtestTrades]);
 
   // News window shading (§8, F8): shade the pre/post-event window of any
   // active news window that affects this symbol. Pixel positions are
@@ -2423,6 +2571,23 @@ export function ChartPanel({
         </span>
       </header>
       {error && <p className='px-4 py-1 text-xs text-err'>{error}</p>}
+      {backtestReportId && (
+        <div className='flex items-center gap-2 border-b border-line bg-accent/10 px-4 py-1 text-xs text-accent'>
+          <span>
+            Backtest view
+            {backtestTrades !== null && ` — ${backtestTrades.length} trade${backtestTrades.length === 1 ? '' : 's'}`}
+            {backtestError && ` — ${backtestError}`}
+          </span>
+          {onExitBacktestView && (
+            <button
+              className='ml-auto cursor-pointer rounded border border-accent px-2 py-0.5 text-accent hover:bg-accent/20'
+              onClick={onExitBacktestView}
+            >
+              Exit backtest view
+            </button>
+          )}
+        </div>
+      )}
       {activeStrategy?.spec &&
         (activeStrategy.spec.unrecognized_indicators.length > 0 ||
           activeStrategy.spec.chart_notes.length > 0) && (

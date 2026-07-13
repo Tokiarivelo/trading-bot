@@ -40,3 +40,4 @@ class StrategyVersion:
     draft_id: str | None = None
     spec: dict[str, Any] | None = None
     backtest_report_id: str | None = None
+    paused: bool = False  # only meaningful while status == ACTIVE; see StrategyRegistry.pause

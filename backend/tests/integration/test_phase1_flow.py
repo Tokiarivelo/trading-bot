@@ -204,7 +204,17 @@ async def test_candles_flow_live_and_db_fallback(api):
 
     stored = await api.post("/market-data/backfill", json={"count": 5})
     assert stored.json() == {
-        "stored": {"XAUUSD:M1": 5, "XAUUSD:M5": 5, "XAUUSD:H1": 5, "XAUUSD:H4": 5, "XAUUSD:D1": 5}
+        "stored": {
+            "XAUUSD:M1": 5,
+            "XAUUSD:M5": 5,
+            "XAUUSD:M15": 5,
+            "XAUUSD:M30": 5,
+            "XAUUSD:H1": 5,
+            "XAUUSD:H4": 5,
+            "XAUUSD:D1": 5,
+            "XAUUSD:W1": 5,
+            "XAUUSD:MN": 5,
+        }
     }
 
     # Gateway loses the session → candles now come from the DB.

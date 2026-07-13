@@ -10,15 +10,29 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
 
-_TIMEFRAME_SECONDS = {"M1": 60, "M5": 300, "H1": 3600, "H4": 14400, "D1": 86400}
+_TIMEFRAME_SECONDS = {
+    "M1": 60,
+    "M5": 300,
+    "M15": 900,
+    "M30": 1800,
+    "H1": 3600,
+    "H4": 14400,
+    "D1": 86400,
+    "W1": 604800,
+    "MN": 2592000,  # approximate (30-day average); use bar_open/close_of for exact month alignment
+}
 
 
 class Timeframe(StrEnum):
     M1 = "M1"
     M5 = "M5"
+    M15 = "M15"
+    M30 = "M30"
     H1 = "H1"
     H4 = "H4"
     D1 = "D1"
+    W1 = "W1"
+    MN = "MN"
 
     @property
     def seconds(self) -> int:
@@ -26,13 +40,36 @@ class Timeframe(StrEnum):
 
     def bar_open(self, moment: datetime) -> datetime:
         """Open time of the bar containing `moment` (UTC-aligned; broker
-        server-time offsets for D1 are a Phase 4 concern)."""
+        server-time offsets for D1 are a Phase 4 concern). W1 bars open on
+        Monday 00:00 UTC; MN bars open on the 1st of the calendar month."""
+        if self is Timeframe.MN:
+            return datetime(moment.year, moment.month, 1, tzinfo=UTC)
         epoch = int(moment.timestamp())
+        if self is Timeframe.W1:
+            # Unix epoch (1970-01-01) was a Thursday; shift 3 days so Monday
+            # boundaries align to a multiple of `seconds`.
+            shifted = epoch + 3 * 86400
+            return datetime.fromtimestamp(shifted - shifted % self.seconds - 3 * 86400, tz=UTC)
         return datetime.fromtimestamp(epoch - epoch % self.seconds, tz=UTC)
+
+    def close_of(self, bar_open_time: datetime) -> datetime:
+        """Open time of the bar following the one opening at `bar_open_time`
+        (i.e. this bar's close time). Calendar-correct for MN's variable
+        month length."""
+        if self is Timeframe.MN:
+            year, month = bar_open_time.year, bar_open_time.month
+            return datetime(year + (month == 12), month % 12 + 1, 1, tzinfo=UTC)
+        return datetime.fromtimestamp(int(bar_open_time.timestamp()) + self.seconds, tz=UTC)
 
     def last_closed_open(self, now: datetime) -> datetime:
         """Open time of the most recent fully closed bar at `now`."""
-        return datetime.fromtimestamp(int(self.bar_open(now).timestamp()) - self.seconds, tz=UTC)
+        current = self.bar_open(now)
+        if self is Timeframe.MN:
+            year, month = current.year, current.month
+            prev_month = 12 if month == 1 else month - 1
+            prev_year = year - 1 if month == 1 else year
+            return datetime(prev_year, prev_month, 1, tzinfo=UTC)
+        return datetime.fromtimestamp(int(current.timestamp()) - self.seconds, tz=UTC)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -49,7 +86,7 @@ class Candle:
 
     @property
     def close_time(self) -> datetime:
-        return datetime.fromtimestamp(int(self.time.timestamp()) + self.timeframe.seconds, tz=UTC)
+        return self.timeframe.close_of(self.time)
 
     def is_closed(self, now: datetime) -> bool:
         return now >= self.close_time

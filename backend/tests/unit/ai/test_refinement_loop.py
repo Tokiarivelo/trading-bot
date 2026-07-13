@@ -96,10 +96,37 @@ class RaisingLLM:
         raise RuntimeError("LLM boom")
 
 
+class RetryThenValidLLM:
+    """First completion fails the sandbox (forbidden import); the retry
+    prompt (fed the sandbox's error) gets a valid one — mirrors an LLM
+    self-correcting once shown what it broke."""
+
+    def __init__(self, bad_response: str, good_response: str) -> None:
+        self.bad_response = bad_response
+        self.good_response = good_response
+        self.calls = 0
+
+    async def complete(self, message, *, max_tokens: int = 4096) -> str:
+        self.calls += 1
+        return self.bad_response if self.calls == 1 else self.good_response
+
+
 class FakeRouter:
     def __init__(self, review_response: str, refine_response: str | None = None) -> None:
         self._review = FakeLLM(review_response)
         self._refine = FakeLLM(refine_response or "")
+
+    def for_task(self, task: str):
+        return {"ten_trade_review": self._review, "code_refinement": self._refine}[task]
+
+
+class StatefulRefineRouter:
+    """Like `FakeRouter`, but `code_refinement` is served by a caller-supplied
+    stateful LLM (e.g. `RetryThenValidLLM`) instead of a fixed response."""
+
+    def __init__(self, review_response: str, refine_llm) -> None:
+        self._review = FakeLLM(review_response)
+        self._refine = refine_llm
 
     def for_task(self, task: str):
         return {"ten_trade_review": self._review, "code_refinement": self._refine}[task]
@@ -242,6 +269,32 @@ async def test_sandbox_invalid_refined_code_is_rejected(tmp_path):
     assert proposal.status == ProposalStatus.REJECTED
     assert proposal.new_version_id is None
     assert any("os" in e for e in proposal.sandbox_errors)
+
+
+async def test_refinement_retries_after_sandbox_rejection_then_succeeds(tmp_path, monkeypatch):
+    refine_llm = RetryThenValidLLM(
+        bad_response=_refine_response(INVALID_CODE), good_response=_refine_response()
+    )
+    service, strategy_versions, registry, base_version, event, proposal_repository = _make(
+        tmp_path, StatefulRefineRouter(REFINE_REVIEW, refine_llm)
+    )
+
+    async def fake_run_backtest(strategy_name, symbol, period, *, strategy_source=None, **kwargs):
+        return _bt(1.0) if strategy_source is registry else _bt(1.5)
+
+    monkeypatch.setattr(refinement_loop_module, "run_backtest", fake_run_backtest)
+    monkeypatch.setattr(
+        refinement_loop_module, "write_report", lambda report: tmp_path / f"{report.avg_r}.json"
+    )
+
+    await service.on_ten_trades_completed(event)
+
+    (report,) = await service.list_reports()
+    proposal = await service.get_proposal(report.proposal_id)
+    assert proposal.status == ProposalStatus.BACKTESTED
+    assert proposal.new_version_id is not None
+    assert proposal.sandbox_errors == ()
+    assert refine_llm.calls == 2
 
 
 async def test_auto_mode_activates_when_improvement_meets_threshold(tmp_path, monkeypatch):

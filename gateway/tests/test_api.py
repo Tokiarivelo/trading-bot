@@ -56,7 +56,7 @@ def test_candles_accepts_m1_timeframe(api):
 
 def test_candles_rejects_unknown_timeframe(api):
     _login(api)
-    response = api.get("/candles", params={"symbol": "XAUUSD", "timeframe": "M15"})
+    response = api.get("/candles", params={"symbol": "XAUUSD", "timeframe": "M2"})
     assert response.status_code == 422
 
 

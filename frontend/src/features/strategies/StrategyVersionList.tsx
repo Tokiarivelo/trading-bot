@@ -1,10 +1,11 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { getStrategyVersions, type StrategyVersionSummary } from "@/shared/api/client";
 import { DuplicateVersionForm } from "./DuplicateVersionForm";
 import { StatusBadge } from "./StatusBadge";
+import { VersionLifecycleActions } from "./VersionLifecycleActions";
 
 /** Every recorded strategy version, newest first per name. Pass `name` to
  * restrict to one strategy family (used on the draft detail page once code
@@ -15,11 +16,13 @@ export function StrategyVersionList({ name }: { name?: string }) {
   const [error, setError] = useState<string | null>(null);
   const [filter, setFilter] = useState("");
 
-  useEffect(() => {
+  const reload = useCallback(() => {
     getStrategyVersions(name)
       .then(setVersions)
       .catch(() => setError("failed to load strategy versions"));
   }, [name]);
+
+  useEffect(reload, [reload]);
 
   if (error) return <p className="p-4 text-sm text-err">{error}</p>;
   if (versions === null) return <p className="p-4 text-sm text-ink-muted">Loading…</p>;
@@ -82,11 +85,21 @@ export function StrategyVersionList({ name }: { name?: string }) {
                   {v.source === "ai_generated" ? "AI generated" : "Manual"}
                 </td>
                 <td className="px-3 py-2">
-                  <StatusBadge status={v.status} />
+                  <div className="flex items-center gap-1.5">
+                    <StatusBadge status={v.status} />
+                    {v.status === "active" && v.paused && <StatusBadge status="paused" />}
+                  </div>
                 </td>
                 <td className="px-3 py-2 text-ink-muted">{formatTime(v.created_at)}</td>
                 <td className="px-3 py-2">
-                  <DuplicateVersionForm versionId={v.id} sourceSymbols={v.spec?.symbols ?? []} />
+                  <div className="flex flex-wrap items-center gap-2">
+                    <DuplicateVersionForm versionId={v.id} sourceSymbols={v.spec?.symbols ?? []} />
+                    <VersionLifecycleActions
+                      version={v}
+                      onChanged={reload}
+                      onDeleted={reload}
+                    />
+                  </div>
                 </td>
               </tr>
             ))}

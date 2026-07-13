@@ -28,7 +28,7 @@ from src.ai.application.provider_settings import (
 
 router = APIRouter(prefix="/ai/settings", tags=["ai-settings"])
 
-_TASK_NOT_FOUND = {404: {"description": "Not one of the 4 known AI tasks."}}
+_TASK_NOT_FOUND = {404: {"description": "Not one of the known AI tasks (see KNOWN_TASKS)."}}
 _PROVIDER_UNKNOWN = {422: {"description": "Not one of the 10 known providers."}}
 _DEFAULT_TEST_BODY = ProviderTestIn()
 
@@ -189,7 +189,8 @@ def _service(request: Request) -> ProviderSettingsService:
         "The 4 AI tasks (pdf_extraction, code_generation, ten_trade_review, code_refinement) "
         "with each one's current effective provider/model — a settings-page override if one is "
         "set, else the configs/ai.yaml default — plus whether that provider is usable right now "
-        "without revealing any secret value."
+        "without revealing any secret value. AI code regeneration (the version detail page's "
+        "'Regenerate with AI') has no row of its own — it reuses code_generation's provider."
     ),
 )
 async def list_tasks(request: Request) -> list[TaskProviderStatusOut]:
