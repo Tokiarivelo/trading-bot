@@ -69,7 +69,13 @@ class BacktestBookkeeper:
         self.balance += event.profit
         now = self._clock()
         self._risk_manager.record_trade_closed(event.profit, balance=self.balance, now=now)
-        self.equity_curve.append(EquityPoint(time=now, balance=self.balance))
+        if self.equity_curve and self.equity_curve[-1].time == now:
+            # Two positions closed on the same bar: collapse into one point so
+            # the curve stays strictly time-ascending (lightweight-charts
+            # requires this and rejects duplicate timestamps).
+            self.equity_curve[-1] = EquityPoint(time=now, balance=self.balance)
+        else:
+            self.equity_curve.append(EquityPoint(time=now, balance=self.balance))
 
         leg = self._open.pop(event.position_id, None)
         if leg is None:

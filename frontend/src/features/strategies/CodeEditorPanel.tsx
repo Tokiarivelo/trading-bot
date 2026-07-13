@@ -85,6 +85,14 @@ export function CodeEditorPanel({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [sandboxErrors, setSandboxErrors] = useState<string[]>([]);
+  const [copied, setCopied] = useState(false);
+
+  const handleCopy = () => {
+    const textToCopy = mode === "edit" ? draft : code;
+    navigator.clipboard.writeText(textToCopy);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  };
 
   function resetSaveDestination() {
     setSaveTarget("increment");
@@ -249,21 +257,34 @@ export function CodeEditorPanel({
     <section className="rounded-md border border-line bg-panel">
       <header className="flex flex-wrap items-center justify-between gap-2 border-b border-line px-3 py-2 text-sm text-ink-muted">
         <span>Source code</span>
-        {mode === "view" && (
-          <div className="flex gap-2">
-            <button type="button" className={btnCls} onClick={startEdit}>
-              Edit
+        <div className="flex gap-2">
+          {(mode === "view" || mode === "edit") && (
+            <button
+              type="button"
+              className={`${btnCls} transition-colors ${
+                copied ? "border-ok text-ok hover:border-ok hover:text-ok" : ""
+              }`}
+              onClick={handleCopy}
+            >
+              {copied ? "Copied!" : "Copy"}
             </button>
-            <button type="button" className={btnAccentCls} onClick={startRegenerate}>
-              Regenerate with AI
+          )}
+          {mode === "view" && (
+            <>
+              <button type="button" className={btnCls} onClick={startEdit}>
+                Edit
+              </button>
+              <button type="button" className={btnAccentCls} onClick={startRegenerate}>
+                Regenerate with AI
+              </button>
+            </>
+          )}
+          {mode !== "view" && (
+            <button type="button" className={btnCls} disabled={busy} onClick={cancel}>
+              Cancel
             </button>
-          </div>
-        )}
-        {mode !== "view" && (
-          <button type="button" className={btnCls} disabled={busy} onClick={cancel}>
-            Cancel
-          </button>
-        )}
+          )}
+        </div>
       </header>
 
       {mode === "regenerate" && (

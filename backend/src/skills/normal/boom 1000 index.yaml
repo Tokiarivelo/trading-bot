@@ -1,7 +1,7 @@
-# Default trading behavior for Boom 1000 Index.
 name: normal/generic
-symbol: "Boom 1000 Index"
-strategy: breakout_v1
+symbol: Boom 1000 Index
+strategy: pob_price_action_snd
 risk_multiplier: 1.0
 sessions:
-  - { start: "00:00", end: "23:59" }
+- start: 00:00
+  end: '23:59'

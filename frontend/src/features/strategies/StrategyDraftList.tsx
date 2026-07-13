@@ -6,8 +6,10 @@ import { getStrategyDrafts, type StrategyDraft } from "@/shared/api/client";
 import { StatusBadge } from "./StatusBadge";
 import { StrategyUploadForm } from "./StrategyUploadForm";
 
-/** Every PDF-derived draft, newest first, with the upload form above it. */
-export function StrategyDraftList() {
+/** Every PDF-derived draft, newest first, with the upload form above it —
+ * pass `showUploadForm={false}` when an embedding page (e.g. the Bots hub)
+ * already renders its own generation form above this list. */
+export function StrategyDraftList({ showUploadForm = true }: { showUploadForm?: boolean } = {}) {
   const [drafts, setDrafts] = useState<StrategyDraft[] | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -19,7 +21,7 @@ export function StrategyDraftList() {
 
   return (
     <div className="flex flex-col gap-3 p-4">
-      <StrategyUploadForm />
+      {showUploadForm && <StrategyUploadForm />}
       {error && <p className="text-sm text-err">{error}</p>}
       {drafts === null ? (
         <p className="text-sm text-ink-muted">Loading…</p>

@@ -106,7 +106,7 @@ class NeverTradesStrategy:
 
 async def test_baseline_and_candidate_backtests_reflect_different_signals(database_url):
     baseline_registry = StrategyRegistry()
-    baseline_registry.register(NeverTradesStrategy())
+    baseline_registry.register("breakout_v1", NeverTradesStrategy())
     baseline_report = await run_backtest(
         "breakout_v1",
         "XAUUSD",
@@ -116,7 +116,7 @@ async def test_baseline_and_candidate_backtests_reflect_different_signals(databa
     )
 
     candidate_registry = StrategyRegistry()
-    candidate_registry.register(BreakoutV1())
+    candidate_registry.register("breakout_v1", BreakoutV1())
     candidate_report = await run_backtest(
         "breakout_v1",
         "XAUUSD",

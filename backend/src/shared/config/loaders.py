@@ -31,6 +31,20 @@ def load_symbol_trading_config(symbol: str, configs_dir: Path) -> SymbolTradingC
     )
 
 
+def load_symbol_trading_config_if_exists(
+    symbol: str, configs_dir: Path
+) -> SymbolTradingConfig | None:
+    """Same as `load_symbol_trading_config`, but `None` instead of raising
+    when `configs/symbols/<symbol>.yaml` doesn't exist — for callers with a
+    dynamic source of truth for a symbol's facts (e.g. `SpreadGate`'s
+    no-config fallback, `run_backtest`'s DB-backed `SymbolSpec`) where a
+    hand-authored file is optional, not required."""
+    try:
+        return load_symbol_trading_config(symbol, configs_dir)
+    except FileNotFoundError:
+        return None
+
+
 def load_risk_caps(configs_dir: Path) -> RiskCaps:
     data = load_yaml_config("risk", configs_dir)
     return RiskCaps(

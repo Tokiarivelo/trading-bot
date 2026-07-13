@@ -7,6 +7,8 @@ archives whatever was active — nothing is ever edited in place.
 
 from __future__ import annotations
 
+from typing import Any
+
 from fastapi import APIRouter, HTTPException, Path, Query, Request
 
 from src.strategies.api.schemas import (
@@ -335,3 +337,194 @@ async def resume_version(
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     return StrategyVersionOut.from_domain(resumed)
+
+
+from pydantic import BaseModel, Field
+
+
+class CustomSignalOut(BaseModel):
+    time: int
+    direction: str
+    sl_points: float
+    tp_points: float
+    confidence: float
+    reason: str
+
+
+class EvaluateCustomCodeRequest(BaseModel):
+    code: str
+    symbol: str
+    timeframe: str = "M5"
+    period: str = "2026-07-01:2026-07-13"
+
+
+class EvaluateCustomCodeResponse(BaseModel):
+    signals: list[CustomSignalOut]
+    indicators: dict[str, list[float | None]]
+    candles: list[dict[str, Any]]
+    error: str | None = None
+
+
+@router.post(
+    "/evaluate-custom",
+    response_model=EvaluateCustomCodeResponse,
+    summary="Evaluate custom strategy code against symbol history",
+    description="Loads arbitrary strategy code, compiles it in the sandbox, runs evaluate() over the historical candles, and returns signals/indicators.",
+)
+async def evaluate_custom_code(
+    request: Request,
+    body: EvaluateCustomCodeRequest,
+) -> EvaluateCustomCodeResponse:
+    from src.strategies.sandbox import validate_and_load
+    from src.shared.db.base import make_session_factory
+    from src.market_data.adapters.candle_repository import CandleRepository
+    from src.backtest.application.period import parse_period
+    from src.engine.application.context import _to_dataframe
+    from src.market_data.domain.models import Timeframe
+    from datetime import timedelta
+    from src.strategies.domain.models import MarketContext
+    from pydantic import BaseModel
+    import logging
+
+    logger = logging.getLogger(__name__)
+
+    # 1. Validate and load strategy from code
+    strategy, errors = validate_and_load(body.code)
+    if not strategy:
+        return EvaluateCustomCodeResponse(
+            signals=[],
+            indicators={},
+            candles=[],
+            error="; ".join(errors)
+        )
+
+    # 2. Parse period and set up dates
+    try:
+        start, end = parse_period(body.period)
+    except Exception as exc:
+        return EvaluateCustomCodeResponse(
+            signals=[],
+            indicators={},
+            candles=[],
+            error=f"Invalid period format: {exc}"
+        )
+
+    # Warmup buffer of 30 days
+    history_start = start - timedelta(days=30)
+
+    # 3. Load candles
+    session_factory = make_session_factory(request.app.state.container.settings.database_url)
+    candle_repo = CandleRepository(session_factory)
+
+    try:
+        tf_enum = Timeframe(body.timeframe)
+    except ValueError:
+        tf_enum = Timeframe.M5
+
+    raw_candles = candle_repo.get_range(body.symbol, tf_enum, history_start, end)
+    if not raw_candles:
+        return EvaluateCustomCodeResponse(
+            signals=[],
+            indicators={},
+            candles=[],
+            error=f"No candles found for {body.symbol} in the requested range."
+        )
+
+    candles_by_tf = {body.timeframe: raw_candles}
+    for tf_str in getattr(strategy.spec, "confirmation_timeframes", []):
+        if tf_str != body.timeframe:
+            try:
+                c_enum = Timeframe(tf_str)
+                candles_by_tf[tf_str] = candle_repo.get_range(body.symbol, c_enum, history_start, end)
+            except Exception:
+                pass
+
+    # Convert to pandas DataFrames
+    dfs = {tf: _to_dataframe(candles) for tf, candles in candles_by_tf.items()}
+    entry_df = dfs[body.timeframe]
+
+    if entry_df.empty:
+        return EvaluateCustomCodeResponse(
+            signals=[],
+            indicators={},
+            candles=[],
+            error="Empty candle data set."
+        )
+
+    # 4. Step-by-step evaluation
+    signals = []
+    eval_indices = entry_df[entry_df["time"] >= start].index
+    if len(eval_indices) > 1000:
+        eval_indices = eval_indices[-1000:]
+
+    for idx in eval_indices:
+        current_time = entry_df.loc[idx, "time"]
+        
+        # Slice DataFrames up to current_time
+        sliced_candles = {}
+        for tf, df in dfs.items():
+            sliced_df = df[df["time"] <= current_time]
+            sliced_candles[tf] = sliced_df
+
+        ctx = MarketContext(
+            symbol=body.symbol,
+            candles=sliced_candles,
+            spread_points=20.0
+        )
+
+        try:
+            sig = strategy.evaluate(ctx)
+            if sig:
+                signals.append(CustomSignalOut(
+                    time=int(current_time.timestamp()),
+                    direction=sig.direction.value,
+                    sl_points=sig.sl_points,
+                    tp_points=sig.tp_points,
+                    confidence=sig.confidence,
+                    reason=sig.reason
+                ))
+        except Exception:
+            # Silently ignore evaluation errors on specific candles
+            pass
+
+    # 5. Extract indicators
+    indicators_data = {}
+    if hasattr(strategy, "indicators"):
+        try:
+            raw_inds = strategy.indicators(dfs)
+            valid_indices = entry_df[entry_df["time"] >= start].index
+            for name, val_list in raw_inds.items():
+                if hasattr(val_list, "iloc"):
+                    vals = [val_list.iloc[i] for i in valid_indices]
+                else:
+                    vals = [val_list[i] for i in valid_indices]
+
+                cleaned = []
+                for val in vals:
+                    if pd.isna(val) or val is None:
+                        cleaned.append(None)
+                    else:
+                        cleaned.append(float(val))
+                indicators_data[name] = cleaned
+        except Exception as e:
+            logger.warning("Failed to compute custom indicators: %s", e)
+
+    # 6. Format candles to return to frontend
+    candles_out = [
+        {
+            "time": int(c.time.timestamp()),
+            "open": c.open,
+            "high": c.high,
+            "low": c.low,
+            "close": c.close,
+            "tick_volume": c.tick_volume
+        }
+        for c in raw_candles
+        if c.time >= start
+    ]
+
+    return EvaluateCustomCodeResponse(
+        signals=signals,
+        indicators=indicators_data,
+        candles=candles_out
+    )

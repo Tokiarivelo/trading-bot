@@ -297,3 +297,34 @@ async def test_reject_draft(service):
     draft = await service.create_draft_from_pdf("method.pdf", _fake_pdf_bytes())
     rejected = await service.reject_draft(draft.id)
     assert rejected.status == DraftStatus.REJECTED
+
+
+async def test_create_draft_from_text_extracts_spec(service):
+    draft = await service.create_draft_from_text(
+        "Buy when price pulls back to the 200 EMA on H1 with RSI below 40."
+    )
+    assert draft.source_filename == "(typed prompt)"
+    assert draft.status == DraftStatus.PENDING_REVIEW
+    assert draft.extracted_spec.name == "gold_ema_pullback"
+    assert draft.edited_spec is None
+    assert draft.effective_spec == draft.extracted_spec
+
+
+async def test_create_draft_from_text_with_symbol_overrides_extraction(service):
+    draft = await service.create_draft_from_text(
+        "Buy the pullback in an uptrend.", symbol="EURUSD"
+    )
+    assert draft.extracted_spec.symbols == ("XAUUSD",)
+    assert draft.edited_spec is not None
+    assert draft.edited_spec.symbols == ("EURUSD",)
+    assert draft.effective_spec.symbols == ("EURUSD",)
+
+
+async def test_create_draft_from_text_can_be_approved_and_generate_code(service):
+    draft = await service.create_draft_from_text("Buy the pullback in an uptrend.")
+    await service.approve_draft(draft.id)
+
+    result = await service.generate_code(draft.id)
+
+    assert result.is_valid
+    assert result.version_id is not None

@@ -129,8 +129,8 @@ export function StrategyDraftDetail({ draftId }: { draftId: string }) {
   return (
     <div className="flex flex-col gap-4 p-4">
       <div>
-        <Link href="/strategies" className="text-xs text-ink-muted hover:text-accent">
-          ← All strategies
+        <Link href="/bots" className="text-xs text-ink-muted hover:text-accent">
+          ← All bots
         </Link>
         <div className="mt-1 flex items-center gap-2">
           <h2 className="text-lg font-semibold">{latestVersion?.name ?? draft.effective_spec.name}</h2>

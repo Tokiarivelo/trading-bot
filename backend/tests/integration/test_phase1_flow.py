@@ -21,6 +21,7 @@ from src.broker.api.routes import router as account_router
 from src.broker.application.account_service import AccountService
 from src.market_data.adapters.candle_repository import CandleRepository
 from src.market_data.adapters.mt5_gateway import GatewayMarketData
+from src.market_data.adapters.symbol_spec_repository import SymbolSpecRepository
 from src.market_data.api.routes import router as market_data_router
 from src.market_data.api.ws import WsBroadcaster
 from src.market_data.application.candle_stream import CandleStreamService
@@ -124,8 +125,11 @@ class ContainerForTest:
         self.gateway_client = gateway_client
         self.market_data = GatewayMarketData(gateway_client)
         repository = CandleRepository(session_factory)
+        self.symbol_spec_repository = SymbolSpecRepository(session_factory)
         self.ws_broadcaster = WsBroadcaster()
-        self.candle_history = CandleHistoryService(self.market_data, repository)
+        self.candle_history = CandleHistoryService(
+            self.market_data, repository, self.symbol_spec_repository
+        )
         self.candle_stream = CandleStreamService(
             market_data=self.market_data,
             repository=repository,
@@ -146,9 +150,11 @@ async def api(tmp_path):
     app = FastAPI()
     app.include_router(account_router)
     app.include_router(market_data_router)
-    app.state.container = ContainerForTest(tmp_path)
+    container = ContainerForTest(tmp_path)
+    app.state.container = container
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://backend") as client:
+        client.container = container  # test-only escape hatch to assert on wired adapters
         yield client
 
 
@@ -216,6 +222,16 @@ async def test_candles_flow_live_and_db_fallback(api):
             "XAUUSD:MN": 5,
         }
     }
+
+    # Backfill also snapshots XAUUSD's broker facts from the gateway's live
+    # symbol_info, so a backtest can replay it offline without a hand-authored
+    # configs/symbols/xauusd.yaml (see run_backtest.py's SymbolSpec sourcing).
+    spec = api.container.symbol_spec_repository.get("XAUUSD")
+    assert spec is not None
+    assert spec.point == 0.01
+    assert spec.digits == 2
+    assert spec.stops_level == 10
+    assert spec.contract_size == 100.0
 
     # Gateway loses the session → candles now come from the DB.
     await api.post("/account/disconnect", json={})

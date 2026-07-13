@@ -66,6 +66,16 @@ export default function Home() {
     url.searchParams.delete(BACKTEST_REPORT_QUERY_KEY);
     window.history.replaceState(null, "", url);
   }
+
+  // Called by the chart's inline strategy editor after it saves an edit and
+  // re-runs the backtest — swaps in the new report id so the chart's trade
+  // markers refresh without leaving the chart.
+  function handleBacktestReportChange(reportId: string) {
+    setBacktestReportId(reportId);
+    const url = new URL(window.location.href);
+    url.searchParams.set(BACKTEST_REPORT_QUERY_KEY, reportId);
+    window.history.replaceState(null, "", url);
+  }
   // ChartPanel needs a symbol string even while the real one is still
   // resolving on mount (see the effect below) — the empty-string placeholder
   // is never rendered since ChartPanel itself is gated on `symbol` below.
@@ -271,10 +281,10 @@ export default function Home() {
           />
         </nav>
         <Link
-          href={symbol ? `/strategies?symbol=${encodeURIComponent(symbol)}` : "/strategies"}
+          href={symbol ? `/bots?symbol=${encodeURIComponent(symbol)}` : "/bots"}
           className="ml-auto text-sm text-ink-muted hover:text-accent"
         >
-          Strategies
+          Bots
         </Link>
         <Link href="/backtest" className="text-sm text-ink-muted hover:text-accent">
           Backtests
@@ -312,6 +322,7 @@ export default function Home() {
               activeStrategy={activeStrategy}
               backtestReportId={backtestReportId}
               onExitBacktestView={exitBacktestView}
+              onReportChange={handleBacktestReportChange}
             />
           ) : (
             <div className="flex flex-1 items-center justify-center rounded-md border border-line bg-panel text-sm text-ink-muted">
@@ -326,10 +337,10 @@ export default function Home() {
           </Panel>
           <Panel>
             {symbol ? (
-              <BotSelector symbol={symbol} activeStrategy={activeStrategy} />
+              <BotSelector symbol={symbol} />
             ) : (
-              <Link href="/strategies" className="text-accent hover:underline">
-                Strategies →
+              <Link href="/bots" className="text-accent hover:underline">
+                Bots →
               </Link>
             )}
           </Panel>

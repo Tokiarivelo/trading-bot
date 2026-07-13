@@ -16,7 +16,7 @@ import logging
 import sys
 
 from src.backtest.application.period import InvalidPeriod
-from src.backtest.application.run_backtest import NoHistoryError, run_backtest
+from src.backtest.application.run_backtest import NoHistoryError, NoSymbolSpecError, run_backtest
 from src.backtest.reports.writer import render_summary, write_report
 from src.shared.config.settings import Settings
 
@@ -38,12 +38,12 @@ def main(argv: list[str]) -> int:
         report = asyncio.run(
             run_backtest(
                 strategy_name,
-                symbol.upper(),
+                symbol,
                 period,
                 database_url=settings.database_url,
             )
         )
-    except (InvalidPeriod, NoHistoryError, ValueError) as exc:
+    except (InvalidPeriod, NoHistoryError, NoSymbolSpecError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 

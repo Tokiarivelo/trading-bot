@@ -13,13 +13,16 @@ config needed.
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from src.backtest.application.run_backtest import run_backtest
+from src.backtest.application.run_backtest import NoSymbolSpecError, run_backtest
 from src.market_data.adapters.candle_repository import CandleRepository
+from src.market_data.adapters.replay import SymbolSpec
+from src.market_data.adapters.symbol_spec_repository import SymbolSpecRepository
 from src.market_data.domain.models import Candle, Timeframe
 from src.shared.db.base import Base
 
@@ -124,6 +127,18 @@ async def test_backtest_raises_when_no_history(database_url):
         await run_backtest("breakout_v1", "XAUUSD", "2030-01:2030-01", database_url=database_url)
 
 
+async def test_backtest_raises_when_history_only_partially_covers_the_period(database_url):
+    """`build_m5_candles()` only seeds 2025-01-01 onward — requesting a period
+    that starts well before that (e.g. 2024-06) must raise instead of
+    silently replaying just the 2025-01 slice that happens to exist, which is
+    what made a request for a year of history quietly turn into a report
+    covering only a couple of days."""
+    from src.backtest.application.run_backtest import NoHistoryError
+
+    with pytest.raises(NoHistoryError, match="only goes back to"):
+        await run_backtest("breakout_v1", "XAUUSD", "2024-06:2025-01", database_url=database_url)
+
+
 async def test_backtest_rejects_unknown_strategy(database_url):
     with pytest.raises(ValueError, match="unknown strategy"):
         await run_backtest("not_a_strategy", "XAUUSD", "2025-01:2025-01", database_url=database_url)
@@ -132,3 +147,105 @@ async def test_backtest_rejects_unknown_strategy(database_url):
 async def test_backtest_rejects_symbol_the_strategy_does_not_trade(database_url):
     with pytest.raises(ValueError, match="does not trade"):
         await run_backtest("breakout_v1", "EURUSD", "2025-01:2025-01", database_url=database_url)
+
+
+def _minimal_configs_dir(tmp_path: Path, *, xauusd_yaml: bool) -> Path:
+    """A fixture configs/ containing only risk.yaml + app.yaml (both required
+    unconditionally by run_backtest) and, optionally, a legacy
+    symbols/xauusd.yaml — for exercising the DB-backed SymbolSpec sourcing
+    without depending on the project's real checked-in config."""
+    configs_dir = tmp_path / "configs"
+    (configs_dir / "symbols").mkdir(parents=True)
+    (configs_dir / "risk.yaml").write_text(
+        "risk_per_trade_pct: 0.5\n"
+        "daily_loss_limit_pct: 2.0\n"
+        "max_open_positions: 100\n"
+        "max_trades_per_day: 8\n"
+        "consecutive_loss_pause: 10\n"
+    )
+    (configs_dir / "app.yaml").write_text('timezone: "UTC"\n')
+    if xauusd_yaml:
+        (configs_dir / "symbols" / "xauusd.yaml").write_text(
+            "symbol: XAUUSD\n"
+            "max_spread_points: 35\n"
+            "min_rr: 1.5\n"
+            "contract_size: 100.0\n"
+            "point: 0.01\n"
+            "digits: 2\n"
+            "stops_level: 0\n"
+            "volume_min: 0.01\n"
+            "volume_max: 50\n"
+            "volume_step: 0.01\n"
+        )
+    return configs_dir
+
+
+def _spec(contract_size: float = 100.0) -> SymbolSpec:
+    return SymbolSpec(
+        point=0.01,
+        digits=2,
+        stops_level=0,
+        contract_size=contract_size,
+        volume_min=0.01,
+        volume_max=50.0,
+        volume_step=0.01,
+    )
+
+
+async def test_backtest_uses_db_backed_symbol_spec_without_any_yaml(tmp_path, database_url):
+    """No configs/symbols/xauusd.yaml at all — the symbol_specs DB row
+    (as populated by POST /market-data/backfill in production) is enough on
+    its own to run a backtest."""
+    configs_dir = _minimal_configs_dir(tmp_path, xauusd_yaml=False)
+    engine = create_engine(database_url)
+    SymbolSpecRepository(sessionmaker(bind=engine, expire_on_commit=False)).upsert(
+        "XAUUSD", _spec()
+    )
+
+    report = await run_backtest(
+        "breakout_v1", "XAUUSD", "2025-01:2025-01", database_url=database_url,
+        configs_dir=configs_dir,
+    )
+
+    assert len(report.trades) == 2
+
+
+async def test_backtest_raises_no_symbol_spec_without_db_row_or_yaml(tmp_path, database_url):
+    configs_dir = _minimal_configs_dir(tmp_path, xauusd_yaml=False)
+
+    with pytest.raises(NoSymbolSpecError, match="XAUUSD"):
+        await run_backtest(
+            "breakout_v1", "XAUUSD", "2025-01:2025-01", database_url=database_url,
+            configs_dir=configs_dir,
+        )
+
+
+async def test_db_symbol_spec_takes_precedence_over_legacy_yaml(tmp_path, database_url):
+    """The legacy YAML has a normal volume_min (0.01, same as the main
+    fixture test above, which trades fine). The DB row's volume_min is set
+    absurdly high (1000) — risk-based position sizing can never produce a
+    viable lot size that large, so no trade opens. If the YAML were still
+    winning over the DB row, trades would go through exactly like the main
+    test; zero trades here proves the DB row is the one actually used."""
+    configs_dir = _minimal_configs_dir(tmp_path, xauusd_yaml=True)
+    engine = create_engine(database_url)
+    repository = SymbolSpecRepository(sessionmaker(bind=engine, expire_on_commit=False))
+    repository.upsert(
+        "XAUUSD",
+        SymbolSpec(
+            point=0.01,
+            digits=2,
+            stops_level=0,
+            contract_size=100.0,
+            volume_min=1000.0,
+            volume_max=2000.0,
+            volume_step=0.01,
+        ),
+    )
+
+    report = await run_backtest(
+        "breakout_v1", "XAUUSD", "2025-01:2025-01", database_url=database_url,
+        configs_dir=configs_dir,
+    )
+
+    assert report.trades == ()

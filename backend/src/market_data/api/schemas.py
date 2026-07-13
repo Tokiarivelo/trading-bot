@@ -7,6 +7,8 @@ see `application/candle_stream.py:candle_message` for the REST/WS shared shape.
 
 from __future__ import annotations
 
+from datetime import datetime
+
 from pydantic import BaseModel, Field
 
 from src.market_data.domain.models import Timeframe
@@ -96,7 +98,26 @@ class BackfillRequest(BaseModel):
         description="Timeframes to backfill; defaults to all of M1/M5/M15/M30/H1/H4/D1/W1/MN.",
     )
     count: int = Field(
-        default=1000, ge=1, le=5000, description="Number of bars per symbol/timeframe."
+        default=1000,
+        ge=1,
+        le=5000,
+        description=(
+            "Number of bars per symbol/timeframe. Without `start`, this is the "
+            "total fetched (most recent bars). With `start`, this is the page "
+            "size used while paging backward — a single gateway call is capped "
+            "at 5000 bars."
+        ),
+    )
+    start: datetime | None = Field(
+        default=None,
+        description=(
+            "If set, pages backward from now in `count`-sized chunks until "
+            "candle history reaches this date (or the broker's history runs "
+            "out), instead of only fetching the most recent `count` bars — use "
+            "this to seed a full date range (e.g. a year of M5 bars) for "
+            "`POST /backtest/run`. Can take a while for a large range/fine "
+            "timeframe combination."
+        ),
     )
 
 

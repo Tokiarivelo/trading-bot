@@ -19,6 +19,8 @@ from collections.abc import Callable
 from datetime import datetime, timedelta
 from pathlib import Path
 
+from sqlalchemy.orm import Session, sessionmaker
+
 from src.backtest.adapters.bookkeeper import BacktestBookkeeper
 from src.backtest.adapters.fixed_skill_selector import FixedSkillSelector
 from src.backtest.application import metrics
@@ -27,6 +29,7 @@ from src.backtest.domain.models import BacktestReport
 from src.broker.adapters.paper import PaperBroker
 from src.broker.application.order_service import OrderService
 from src.broker.application.spread_gate import SpreadGate
+from src.broker.domain.symbol_config import SymbolTradingConfig
 from src.broker.domain.trading import Position, Side
 from src.engine.application.position_manager import PositionManager
 from src.engine.application.risk_manager import RiskManager
@@ -34,8 +37,9 @@ from src.engine.application.trade_loop import TradeEngine
 from src.engine.ports.strategy_source import StrategySourcePort
 from src.market_data.adapters.candle_repository import CandleRepository
 from src.market_data.adapters.replay import ReplayMarketDataPort, SymbolSpec
+from src.market_data.adapters.symbol_spec_repository import SymbolSpecRepository
 from src.market_data.domain.models import Candle, Timeframe
-from src.shared.config.loaders import load_risk_caps, load_symbol_trading_config
+from src.shared.config.loaders import load_risk_caps, load_symbol_trading_config_if_exists
 from src.shared.config.settings import CONFIGS_DIR, load_yaml_config
 from src.shared.db.base import make_session_factory
 from src.shared.events.bus import EventBus
@@ -62,6 +66,13 @@ class NoHistoryError(Exception):
     """No candle history in the requested range — run the backfill job first."""
 
 
+class NoSymbolSpecError(Exception):
+    """No broker facts (point/digits/stops_level/contract_size/volume_*) known
+    for this symbol — neither a `symbol_specs` DB row (populated by
+    `POST /market-data/backfill`) nor a legacy `configs/symbols/<symbol>.yaml`
+    exist."""
+
+
 async def run_backtest(
     strategy_name: str,
     symbol: str,
@@ -81,7 +92,11 @@ async def run_backtest(
     if symbol not in strategy.spec.symbols:
         raise ValueError(f"strategy {strategy_name!r} does not trade {symbol}")
 
-    symbol_config = load_symbol_trading_config(symbol, configs_dir)
+    # Policy fields (max_spread_points/min_rr) are optional — a symbol with no
+    # legacy configs/symbols/<symbol>.yaml just runs with SpreadGate's own
+    # no-config fallback (no spread cap, DEFAULT_MIN_RR), same as manual
+    # trading on an unconfigured symbol already does live.
+    symbol_config = load_symbol_trading_config_if_exists(symbol, configs_dir)
     risk_caps = load_risk_caps(configs_dir)
     timezone = load_yaml_config("app", configs_dir).get("timezone", "UTC")
 
@@ -95,22 +110,30 @@ async def run_backtest(
     if not m5_bars:
         raise NoHistoryError(
             f"no M5 candle history for {symbol} in {start.date()}..{end.date()} — "
-            "run the historical backfill job first (POST /market-data/backfill)"
+            "run the historical backfill job first (POST /market-data/backfill, "
+            f"with start={start.date()} to pull the full range)"
+        )
+    # A backtest replaying less history than requested produces a misleadingly
+    # short report instead of an error (this is exactly what silently turned a
+    # 2025-07..2026-07 request into a 2-day replay before this check existed) —
+    # `POST /market-data/backfill` only pulls the most recent `count` bars
+    # unless `start` is passed, so a stale/partial DB is easy to end up with.
+    # 4 days tolerates weekend/holiday gaps without a per-symbol trading
+    # calendar.
+    earliest = m5_bars[0].time
+    if earliest - start > timedelta(days=4):
+        raise NoHistoryError(
+            f"{symbol} M5 history only goes back to {earliest.date()}, but the "
+            f"requested period starts {start.date()} — call "
+            f"POST /market-data/backfill with start={start.date()} to pull the "
+            "missing range before backtesting"
         )
 
-    spec = SymbolSpec(
-        point=symbol_config.point,
-        digits=symbol_config.digits,
-        stops_level=symbol_config.stops_level,
-        contract_size=symbol_config.contract_size,
-        volume_min=symbol_config.volume_min,
-        volume_max=symbol_config.volume_max,
-        volume_step=symbol_config.volume_step,
-    )
+    spec = _resolve_symbol_spec(symbol, session_factory, symbol_config)
     replay = ReplayMarketDataPort(symbol, candles, spec)
 
     event_bus = EventBus()
-    spread_gate = SpreadGate({symbol: symbol_config})
+    spread_gate = SpreadGate({symbol: symbol_config} if symbol_config is not None else {})
     broker = PaperBroker(replay)
     order_service = OrderService(
         broker=broker, market_data=replay, spread_gate=spread_gate, event_bus=event_bus
@@ -124,7 +147,7 @@ async def run_backtest(
     bookkeeper = BacktestBookkeeper(
         starting_balance=starting_balance,
         risk_manager=risk_manager,
-        contract_size=symbol_config.contract_size,
+        contract_size=spec.contract_size,
         clock=clock,
     )
     # The bookkeeper is the sole PositionClosed handler: it owns balance and
@@ -199,6 +222,37 @@ async def _force_close_open_positions(
         )
 
 
+def _resolve_symbol_spec(
+    symbol: str,
+    session_factory: sessionmaker[Session],
+    symbol_config: SymbolTradingConfig | None,
+) -> SymbolSpec:
+    """Physical broker facts, required (there's no sane default for lot
+    sizing). Prefers the `symbol_specs` DB row backfill snapshots from the
+    gateway's live symbol_info; falls back to the legacy YAML's physical
+    fields for symbols backfilled before that table existed. Raises
+    `NoSymbolSpecError` if neither source has this symbol."""
+    spec = SymbolSpecRepository(session_factory).get(symbol)
+    if spec is not None:
+        return spec
+    if symbol_config is not None:
+        return SymbolSpec(
+            point=symbol_config.point,
+            digits=symbol_config.digits,
+            stops_level=symbol_config.stops_level,
+            contract_size=symbol_config.contract_size,
+            volume_min=symbol_config.volume_min,
+            volume_max=symbol_config.volume_max,
+            volume_step=symbol_config.volume_step,
+        )
+    raise NoSymbolSpecError(
+        f"no broker facts known for {symbol!r} — run "
+        "POST /market-data/backfill for this symbol first (it snapshots "
+        "them from the gateway), or add a legacy configs/symbols/"
+        f"{symbol.lower()}.yaml"
+    )
+
+
 def _stop_hit(position: Position, candle: Candle) -> float | None:
     """SL checked before TP if a bar's range spans both — the standard
     conservative backtesting convention (assume the worse outcome)."""
@@ -221,7 +275,8 @@ def _default_registry(database_url: str) -> StrategyRegistry:
     the CLI can run a backtest against any AI-generated or hand-edited
     strategy, not just the hardcoded demo one."""
     registry = StrategyRegistry()
-    registry.register(BreakoutV1())
+    breakout_v1 = BreakoutV1()
+    registry.register(breakout_v1.spec.name, breakout_v1)
     session_factory = make_session_factory(database_url)
     strategy_versions = StrategyVersionService(
         repository=StrategyVersionRepository(session_factory),

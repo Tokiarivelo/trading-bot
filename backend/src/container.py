@@ -54,6 +54,7 @@ from src.journal.adapters.repository import JournalRepository
 from src.journal.application.trade_journal import TradeJournalService
 from src.market_data.adapters.candle_repository import CandleRepository
 from src.market_data.adapters.mt5_gateway import GatewayMarketData
+from src.market_data.adapters.symbol_spec_repository import SymbolSpecRepository
 from src.market_data.api.ws import WsBroadcaster
 from src.market_data.application.candle_stream import CandleStreamService
 from src.market_data.application.history import CandleHistoryService
@@ -86,16 +87,16 @@ from src.shared.events.definitions import (
     RefinementCompleted,
     TenTradesCompleted,
 )
+from src.skills.adapters.normal_skill_repository import NormalSkillRepository
 from src.skills.application.news_skill_selector import NewsSkillSelector
+from src.skills.application.skill_assignment import SkillAssignmentService
 from src.skills.application.skill_selector import SkillSelector
 from src.skills.domain.models import (
     NewsActivation,
     NewsActivationWindow,
     NewsSkill,
-    NormalSkill,
     PostEventRules,
     PreEventRules,
-    SessionWindow,
 )
 from src.skills.ports.skill_selector import SkillSelectorPort
 from src.strategies.adapters.repository import StrategyVersionRepository
@@ -131,6 +132,7 @@ class Container:
     strategy_registry: StrategyRegistry
     strategy_versions: StrategyVersionService
     skill_selector: SkillSelectorPort
+    skill_assignment: SkillAssignmentService
     pdf_to_strategy: PdfToStrategyService
     code_regeneration: CodeRegenerationService
     refinement_loop: RefinementLoopService
@@ -171,6 +173,7 @@ def build_container(settings: Settings | None = None) -> Container:
     session_factory = make_session_factory(settings.database_url)
     market_data = GatewayMarketData(gateway_client)
     candle_repository = CandleRepository(session_factory)
+    symbol_spec_repository = SymbolSpecRepository(session_factory)
     ws_broadcaster = WsBroadcaster()
     candle_stream = CandleStreamService(
         market_data=market_data,
@@ -180,7 +183,7 @@ def build_container(settings: Settings | None = None) -> Container:
         symbols=symbols,
         timeframes=list(Timeframe),
     )
-    candle_history = CandleHistoryService(market_data, candle_repository)
+    candle_history = CandleHistoryService(market_data, candle_repository, symbol_spec_repository)
     live_candle = LiveCandleService(market_data=market_data, broadcaster=ws_broadcaster)
 
     account = AccountService(
@@ -266,7 +269,8 @@ def build_container(settings: Settings | None = None) -> Container:
     )
 
     strategy_registry = StrategyRegistry()
-    strategy_registry.register(BreakoutV1())
+    breakout_v1 = BreakoutV1()
+    strategy_registry.register(breakout_v1.spec.name, breakout_v1)
 
     strategy_version_repository = StrategyVersionRepository(session_factory)
     strategy_versions = StrategyVersionService(
@@ -305,8 +309,16 @@ def build_container(settings: Settings | None = None) -> Container:
         llm_router=llm_router,
     )
 
+    normal_skill_repository = NormalSkillRepository(_SKILLS_DIR)
     normal_skill_selector = SkillSelector(
-        skills={symbol: _load_normal_skill(symbol) for symbol in symbols}, timezone=timezone
+        skills=normal_skill_repository.load_all(symbols), timezone=timezone
+    )
+    skill_assignment = SkillAssignmentService(
+        repository=normal_skill_repository,
+        selector=normal_skill_selector,
+        strategy_registry=strategy_registry,
+        symbols=symbols,
+        configs_dir=settings.configs_dir,
     )
 
     news_config = load_news_config(settings.configs_dir)
@@ -399,6 +411,7 @@ def build_container(settings: Settings | None = None) -> Container:
         strategy_registry=strategy_registry,
         strategy_versions=strategy_versions,
         skill_selector=skill_selector,
+        skill_assignment=skill_assignment,
         pdf_to_strategy=pdf_to_strategy,
         code_regeneration=code_regeneration,
         refinement_loop=refinement_loop,
@@ -505,20 +518,6 @@ def _build_provider_factories(
         "claude_code": _claude_code,
         "openclaw": _openclaw,
     }
-
-
-def _load_normal_skill(symbol: str) -> NormalSkill:
-    path = _SKILLS_DIR / f"{symbol.lower()}.yaml"
-    with path.open() as f:
-        data = yaml.safe_load(f)
-    sessions = tuple(SessionWindow.parse(s["start"], s["end"]) for s in data.get("sessions", []))
-    return NormalSkill(
-        name=data["name"],
-        symbol=data["symbol"],
-        strategy=data["strategy"],
-        risk_multiplier=data.get("risk_multiplier", 1.0),
-        sessions=sessions,
-    )
 
 
 def _load_news_skills() -> dict[str, NewsSkill]:

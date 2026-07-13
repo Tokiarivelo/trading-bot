@@ -339,7 +339,7 @@ class StrategyVersionService:
         activated = replace(version, status=VersionStatus.ACTIVE, paused=False)
         self._repository.save(activated)
         self._registry.resume(version.name)
-        self._registry.register(instance)
+        self._registry.register(version.name, instance)
         logger.info(
             "strategy version activated: name=%s version=%d id=%s",
             version.name,
@@ -459,7 +459,7 @@ class StrategyVersionService:
                     version.version,
                 )
                 continue
-            self._registry.register(instance)
+            self._registry.register(version.name, instance)
             if version.paused:
                 self._registry.pause(version.name)
             logger.info(

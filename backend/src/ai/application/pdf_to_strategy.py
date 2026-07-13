@@ -111,6 +111,31 @@ class PdfToStrategyService:
         )
         return draft
 
+    async def create_draft_from_text(
+        self, description: str, symbol: str | None = None
+    ) -> StrategyDraft:
+        """Same pipeline as `create_draft_from_pdf`, minus the PDF: the
+        trader's own typed description stands in for PDF-extracted text."""
+        message = render_prompt("extract_method_from_prompt.md", description=description)
+        llm = self._llm_router.for_task("pdf_extraction")
+        raw = await llm.complete(message)
+        spec = ExtractedStrategySpec.from_dict(_parse_json(raw))
+        edited_spec = replace(spec, symbols=(symbol,)) if symbol else None
+        draft = StrategyDraft(
+            id=str(uuid.uuid4()),
+            source_filename="(typed prompt)",
+            created_at=datetime.now(UTC),
+            extracted_spec=spec,
+            edited_spec=edited_spec,
+        )
+        await asyncio.to_thread(self._drafts.save, draft)
+        logger.info(
+            "strategy draft created from prompt: id=%s symbol=%s",
+            draft.id,
+            symbol or spec.symbols,
+        )
+        return draft
+
     async def get_draft(self, draft_id: str) -> StrategyDraft | None:
         return await asyncio.to_thread(self._drafts.get, draft_id)
 
@@ -217,7 +242,7 @@ class PdfToStrategyService:
             logger.error("auto-backtest skipped, code no longer validates: %s", errors)
             return None
         registry = StrategyRegistry()
-        registry.register(instance)
+        registry.register(spec.name, instance)
         symbol = spec.symbols[0]
         kwargs: dict[str, object] = {}
         if self._backtest_database_url is not None:

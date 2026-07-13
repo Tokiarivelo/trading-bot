@@ -144,10 +144,20 @@ async def get_broker_symbols(
     response_model=BackfillResponse,
     summary="Backfill candle history into the local database",
     description=(
-        "Fetches `count` bars per symbol/timeframe from the gateway and upserts "
-        "them into the local database, so `GET /candles` has data to fall back "
-        "to when the gateway later goes offline. Safe to call repeatedly — "
-        "existing bars are overwritten in place, not duplicated."
+        "Fetches bars per symbol/timeframe from the gateway and upserts them "
+        "into the local database, so `GET /candles` has data to fall back to "
+        "when the gateway later goes offline, and so `POST /backtest/run` has "
+        "history to replay. Without `start`, fetches only the most recent "
+        "`count` bars. With `start`, pages backward until history reaches "
+        "that date — use this before backtesting a multi-month/year period, "
+        "since a backtest can only replay candles already in the database. "
+        "Safe to call repeatedly — existing bars are overwritten in place, "
+        "not duplicated. Also snapshots "
+        "each symbol's broker facts (point, digits, stops_level, contract_size, "
+        "volume min/max/step) from the gateway's live `symbol_info` into the "
+        "`symbol_specs` table — this is what lets `POST /backtest/run` replay "
+        "any symbol offline afterward without a hand-authored "
+        "`configs/symbols/<symbol>.yaml`."
     ),
     responses=_UNAVAILABLE,
 )
@@ -158,8 +168,11 @@ async def backfill(request: Request, body: BackfillRequest) -> BackfillResponse:
     stored: dict[str, int] = {}
     try:
         for symbol in symbols:
+            await container.candle_history.sync_symbol_spec(symbol)
             for timeframe in timeframes:
-                bars = await container.candle_history.backfill(symbol, timeframe, body.count)
+                bars = await container.candle_history.backfill(
+                    symbol, timeframe, body.count, body.start
+                )
                 stored[f"{symbol}:{timeframe.value}"] = bars
     except MarketDataUnavailable as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc

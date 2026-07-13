@@ -10,7 +10,12 @@ from __future__ import annotations
 
 from fastapi import APIRouter, File, Form, HTTPException, Path, Request, UploadFile
 
-from src.ai.api.schemas import GeneratedCodeOut, StrategyDraftOut, UpdateDraftSpecIn
+from src.ai.api.schemas import (
+    CreateDraftFromPromptIn,
+    GeneratedCodeOut,
+    StrategyDraftOut,
+    UpdateDraftSpecIn,
+)
 from src.ai.application.llm_router import LLMProviderNotConfiguredError
 from src.ai.application.pdf_to_strategy import InvalidDraftStateError, PdfToStrategyService
 from src.ai.ports.llm import LLMCallError
@@ -79,6 +84,38 @@ async def upload_pdf(
     try:
         draft = await _service(request).create_draft_from_pdf(
             file.filename or "upload.pdf", pdf_bytes, symbol=symbol or None
+        )
+    except LLMProviderNotConfiguredError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except LLMCallError as exc:
+        raise HTTPException(status_code=504, detail=str(exc)) from exc
+    return StrategyDraftOut.from_domain(draft)
+
+
+@router.post(
+    "/from-prompt",
+    response_model=StrategyDraftOut,
+    summary="Generate a StrategySpec draft from a typed description, no PDF",
+    description=(
+        "Runs the trader's own free-text description of a manual trading method through the "
+        "same `pdf_extraction` task LLM as PDF upload, producing an identical human-reviewable "
+        "`StrategyDraft`. Use this when there's no document to upload — just a description "
+        "typed straight in. Never generates code and never touches the strategy registry; the "
+        "spec must still be reviewed, optionally edited (`PATCH .../drafts/{id}`), and approved "
+        "(`POST .../drafts/{id}/approve`) before `POST .../drafts/{id}/generate-code` can run. "
+        "If `symbol` is given, it overrides the LLM's own symbol guess, same as PDF upload."
+    ),
+    responses={
+        **_PROVIDER_NOT_CONFIGURED,
+        **_LLM_CALL_FAILED,
+    },
+)
+async def create_draft_from_prompt(
+    request: Request, body: CreateDraftFromPromptIn
+) -> StrategyDraftOut:
+    try:
+        draft = await _service(request).create_draft_from_text(
+            body.description, symbol=body.symbol or None
         )
     except LLMProviderNotConfiguredError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc

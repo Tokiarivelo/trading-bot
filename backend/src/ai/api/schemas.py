@@ -164,6 +164,21 @@ class UpdateDraftSpecIn(BaseModel):
     )
 
 
+class CreateDraftFromPromptIn(BaseModel):
+    description: str = Field(
+        description="Free-text description of a manual trading method, typed directly by the "
+        "trader instead of extracted from a PDF — e.g. 'buy when price pulls back to the "
+        "200 EMA on H1 with RSI below 40, stop below the last swing low, target 2R'.",
+        min_length=1,
+    )
+    symbol: str | None = Field(
+        default=None,
+        description="Broker symbol to scope this draft to, e.g. the symbol currently on the "
+        "chart. Overrides the LLM's extracted `symbols` guess in `edited_spec`, same as the "
+        "PDF upload's `symbol` field.",
+    )
+
+
 class GeneratedCodeOut(BaseModel):
     draft_id: str = Field(description="The draft this code was generated from.")
     code: str = Field(description="The generated Python source, whether or not it validated.")

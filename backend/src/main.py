@@ -39,6 +39,7 @@ from src.shared.auth.api.routes import router as auth_router
 from src.shared.auth.dependencies import require_session
 from src.shared.config.settings import load_yaml_config
 from src.shared.logging.setup import configure_logging
+from src.skills.api.routes import router as skills_router
 from src.strategies.api.routes import router as strategies_router
 
 API_DESCRIPTION = """
@@ -126,6 +127,13 @@ OPENAPI_TAGS = [
         "`configs/app.yaml`'s paper/live mode or any risk cap.",
     },
     {
+        "name": "skills",
+        "description": "Symbol -> strategy routing (§6.6): which strategy family trades each "
+        "symbol live, read by TradeEngine._try_enter via SkillSelector. Reassigning here "
+        "rewrites skills/normal/<symbol>.yaml and takes effect immediately (no restart), but "
+        "never activates or changes a StrategyVersion itself — see the `strategies` tag for that.",
+    },
+    {
         "name": "news",
         "description": "Economic calendar and active news-window status (F8) — read-only. "
         "The engine reacts to news windows internally: `NewsSkillSelector` blocks/overrides "
@@ -179,6 +187,7 @@ app.include_router(ai_refinement_router, dependencies=_SESSION_REQUIRED)
 app.include_router(ai_regeneration_router, dependencies=_SESSION_REQUIRED)
 app.include_router(ai_settings_router, dependencies=_SESSION_REQUIRED)
 app.include_router(strategies_router, dependencies=_SESSION_REQUIRED)
+app.include_router(skills_router, dependencies=_SESSION_REQUIRED)
 app.include_router(news_router, dependencies=_SESSION_REQUIRED)
 
 

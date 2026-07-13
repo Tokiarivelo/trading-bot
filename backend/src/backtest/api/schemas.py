@@ -54,3 +54,14 @@ class BacktestReportDetailOut(BacktestReportSummaryOut):
 
     trades: list[BacktestTradeOut]
     equity_curve: list[EquityPointOut]
+
+
+class BacktestReportListOut(BaseModel):
+    """One page of the saved-report list, newest first."""
+
+    items: list[BacktestReportSummaryOut] = Field(
+        description="Report summaries for this page, newest first."
+    )
+    total: int = Field(description="Total number of saved report files, across all pages.")
+    limit: int = Field(description="Page size that was applied.")
+    offset: int = Field(description="Number of newest reports skipped before this page.")

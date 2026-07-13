@@ -336,9 +336,50 @@ export interface BacktestReportDetail extends BacktestReportSummary {
   equity_curve: EquityPoint[];
 }
 
-export const getBacktestReports = () => api.get<BacktestReportSummary[]>("/backtest/reports");
+export interface BacktestReportPage {
+  items: BacktestReportSummary[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+export const getBacktestReports = (limit: number, offset: number) =>
+  api.get<BacktestReportPage>(
+    `/backtest/reports?${new URLSearchParams({ limit: String(limit), offset: String(offset) })}`,
+  );
 export const getBacktestReport = (id: string) =>
   api.get<BacktestReportDetail>(`/backtest/reports/${encodeURIComponent(id)}`);
+/** Hard-deletes this report's file. This cannot be undone. */
+export const deleteBacktestReport = (id: string) =>
+  api.delete<void>(`/backtest/reports/${encodeURIComponent(id)}`);
+
+// ── Backtest bots + on-demand run ─────────────────────────────────────────────
+
+export interface BacktestBot {
+  /** Stable identifier — pass this to `startBacktest`, never `name`. The
+   * literal string "breakout_v1" for the hardcoded baseline, or a strategy
+   * version id (UUID) for everything else. */
+  id: string;
+  /** Display label only — human-typed, not guaranteed unique or stable
+   * (a family can be renamed, or its generated code can hardcode the same
+   * internal name as an unrelated family). Never use this to look anything
+   * up; use `id`. */
+  name: string;
+  symbols: string[];
+}
+
+export interface BacktestJobStatus {
+  job_id: string;
+  status: "pending" | "running" | "done" | "error";
+  report_id: string | null;
+  error: string | null;
+}
+
+export const getBacktestBots = () => api.get<BacktestBot[]>("/backtest/bots");
+export const startBacktest = (strategyId: string, symbol: string, period: string) =>
+  api.post<BacktestJobStatus>("/backtest/run", { strategy_id: strategyId, symbol, period });
+export const getBacktestJobStatus = (jobId: string) =>
+  api.get<BacktestJobStatus>(`/backtest/run/${encodeURIComponent(jobId)}`);
 
 // ── AI: PDF -> StrategySpec pipeline (Phase 6, F4) ──────────────────────────
 
@@ -402,6 +443,11 @@ export const uploadStrategyPdf = (file: File, symbol?: string) => {
   if (symbol) form.append("symbol", symbol);
   return api.postForm<StrategyDraft>("/ai/pdf-strategy/upload", form);
 };
+
+/** Same draft pipeline as uploadStrategyPdf, but from a typed description —
+ * no PDF required. Lands on the same review/approve/generate-code flow. */
+export const createStrategyDraftFromText = (description: string, symbol?: string) =>
+  api.post<StrategyDraft>("/ai/pdf-strategy/from-prompt", { description, symbol });
 
 export const getStrategyDrafts = () => api.get<StrategyDraft[]>("/ai/pdf-strategy/drafts");
 export const getStrategyDraft = (id: string) =>
@@ -533,6 +579,65 @@ export const regenerateStrategyVersionCode = (
     instructions,
     spec,
     new_name: newName,
+  });
+
+export interface CustomSignal {
+  time: number;
+  direction: "buy" | "sell";
+  sl_points: number;
+  tp_points: number;
+  confidence: number;
+  reason: string;
+}
+
+export interface EvaluateCustomCodeResponse {
+  signals: CustomSignal[];
+  indicators: Record<string, (number | null)[]>;
+  candles: {
+    time: number;
+    open: number;
+    high: number;
+    low: number;
+    close: number;
+    tick_volume: number;
+  }[];
+  error: string | null;
+}
+
+export const evaluateCustomCode = (body: {
+  code: string;
+  symbol: string;
+  timeframe: string;
+  period: string;
+}) => api.post<EvaluateCustomCodeResponse>("/strategies/evaluate-custom", body);
+
+// ── Symbol -> strategy routing (§6.6) ───────────────────────────────────────
+
+export interface SessionWindowWire {
+  start: string; // HH:MM
+  end: string; // HH:MM
+}
+
+export interface NormalSkillAssignment {
+  name: string;
+  symbol: string;
+  strategy: string;
+  risk_multiplier: number;
+  sessions: SessionWindowWire[];
+}
+
+/** Every configured symbol's current strategy assignment — the real "which
+ * bot trades this symbol live" state (`TradeEngine._try_enter` reads this
+ * via `SkillSelector`), distinct from a version's `spec.symbols` membership. */
+export const getSkillAssignments = () => api.get<NormalSkillAssignment[]>("/skills/normal");
+
+/** Reroutes `symbol` to `strategyName` — writes skills/normal/<symbol>.yaml
+ * and hot-swaps the live SkillSelector, no restart needed. `strategyName`
+ * must currently have an active, non-paused StrategyVersion (422 otherwise);
+ * 404 if `symbol` has no configs/symbols/<symbol>.yaml. */
+export const assignStrategyToSymbol = (symbol: string, strategyName: string) =>
+  api.put<NormalSkillAssignment>(`/skills/normal/${encodeURIComponent(symbol)}`, {
+    strategy_name: strategyName,
   });
 
 // ── AI: 10-trade self-refinement loop (Phase 7, F5) ─────────────────────────

@@ -199,7 +199,7 @@ class ContainerForTest:
         risk_manager = RiskManager(caps=RISK_CAPS, timezone="UTC")
         position_manager = PositionManager(self.order_service, self.market_data)
         strategy_registry = StrategyRegistry()
-        strategy_registry.register(BreakoutV1())
+        strategy_registry.register("breakout_v1", BreakoutV1())
         skill_selector = SkillSelector(
             skills={
                 "XAUUSD": NormalSkill(

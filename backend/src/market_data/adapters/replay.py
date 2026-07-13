@@ -26,7 +26,11 @@ from src.market_data.domain.models import Candle, SymbolInfo, Tick, Timeframe
 
 @dataclass(frozen=True, kw_only=True)
 class SymbolSpec:
-    """Static broker facts for a symbol, from configs/symbols/<symbol>.yaml."""
+    """Static broker facts for a symbol — sourced dynamically from the
+    `symbol_specs` DB table (see `market_data/adapters/symbol_spec_repository.py`,
+    populated at backfill time from the gateway's MT5 `symbol_info`), with a
+    legacy `configs/symbols/<symbol>.yaml` fallback for symbols backfilled
+    before that table existed."""
 
     point: float
     digits: int

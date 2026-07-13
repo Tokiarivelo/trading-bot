@@ -35,6 +35,7 @@ import {
   FibRetracement,
   ParallelChannel,
 } from 'lightweight-charts-drawing';
+import Link from 'next/link';
 import { useEffect, useRef, useState } from 'react';
 import {
   getActiveNewsWindows,
@@ -50,9 +51,16 @@ import {
   type OrderSide,
   type PendingOrderType,
   type StrategyVersionSummary,
+  evaluateCustomCode,
+  type EvaluateCustomCodeResponse,
+  type CustomSignal,
 } from '@/shared/api/client';
+import { python } from '@codemirror/lang-python';
+import { githubDarkInit } from '@uiw/codemirror-theme-github';
+import CodeMirror from '@uiw/react-codemirror';
 import { subscribeRoom } from '@/shared/api/ws';
 import type { Trading } from '@/features/trading/useTrading';
+import { BacktestStrategyEditor } from '@/features/backtest/BacktestStrategyEditor';
 import { DrawingToolbar } from './DrawingToolbar';
 import { DrawingsList } from './DrawingsList';
 import { IndicatorsDock } from './IndicatorsDock';
@@ -439,6 +447,78 @@ function toBacktestSeriesMarkers(
   }
   return markers.sort((a, b) => (a.time as number) - (b.time as number));
 }
+
+const cmTheme = githubDarkInit({
+  settings: {
+    background: 'var(--color-bg)',
+    gutterBackground: 'var(--color-bg)',
+    lineHighlight: 'var(--color-panel)',
+    foreground: 'var(--color-ink)',
+    caret: 'var(--color-accent)',
+    selection: 'color-mix(in srgb, var(--color-accent) 30%, transparent)',
+  },
+});
+
+function toCustomSignalsSeriesMarkers(
+  signals: CustomSignal[],
+  colors: { ok: string; err: string }
+): SeriesMarker<Time>[] {
+  const markers: SeriesMarker<Time>[] = [];
+  for (const s of signals) {
+    markers.push({
+      time: s.time as UTCTimestamp,
+      position: s.direction === 'buy' ? 'belowBar' : 'aboveBar',
+      color: s.direction === 'buy' ? colors.ok : colors.err,
+      shape: s.direction === 'buy' ? 'arrowUp' : 'arrowDown',
+      text: `${s.direction.toUpperCase()}: ${s.reason}`,
+    });
+  }
+  return markers.sort((a, b) => (a.time as number) - (b.time as number));
+}
+
+const DEFAULT_CUSTOM_CODE_TEMPLATE = `import pandas as pd
+from src.strategies.domain.models import Direction, MarketContext, Signal, StrategySpec
+
+class CustomScriptStrategy:
+    def __init__(self) -> None:
+        self.spec = StrategySpec(
+            name="custom_script",
+            version=1,
+            symbols=("XAUUSD", "Volatility 75 Index"),
+            entry_timeframe="M5",
+            confirmation_timeframes=(),
+            params={}
+        )
+
+    def indicators(self, candles: dict[str, pd.DataFrame]) -> dict[str, list]:
+        df = candles[self.spec.entry_timeframe]
+        # Example: Calculate a 20-period Simple Moving Average (SMA)
+        sma_20 = df["close"].rolling(20).mean()
+        return {
+            "SMA 20": sma_20.tolist()
+        }
+
+    def evaluate(self, ctx: MarketContext) -> Signal | None:
+        df = ctx.candles[self.spec.entry_timeframe]
+        if len(df) < 21:
+            return None
+            
+        # Example logic: Close crosses above SMA 20
+        close_prev = df["close"].iloc[-2]
+        close_curr = df["close"].iloc[-1]
+        
+        # Calculate SMA 20 for previous and current bar
+        sma_20 = df["close"].rolling(20).mean()
+        sma_prev = sma_20.iloc[-2]
+        sma_curr = sma_20.iloc[-1]
+        
+        if close_prev <= sma_prev and close_curr > sma_curr:
+            return Signal(direction=Direction.BUY, sl_points=200, tp_points=400, reason="Cross above SMA 20")
+        elif close_prev >= sma_prev and close_curr < sma_curr:
+            return Signal(direction=Direction.SELL, sl_points=200, tp_points=400, reason="Cross below SMA 20")
+            
+        return None
+`;
 
 interface ChartContextMenuProps {
   x: number;
@@ -898,6 +978,7 @@ export function ChartPanel({
   activeStrategy,
   backtestReportId = null,
   onExitBacktestView,
+  onReportChange,
 }: {
   symbol: string;
   trading: Trading;
@@ -911,6 +992,11 @@ export function ChartPanel({
   /** Called when the user leaves backtest view (only rendered while
    * `backtestReportId` is set) — the caller owns clearing the id/URL param. */
   onExitBacktestView?: () => void;
+  /** Called with a new report id after the inline strategy editor (below)
+   * saves an edit and re-runs the backtest — the caller owns swapping
+   * `backtestReportId`/the URL to it so the chart picks up the new report's
+   * trades without leaving the chart. */
+  onReportChange?: (reportId: string) => void;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
@@ -944,6 +1030,48 @@ export function ChartPanel({
   // fetched, and an error flag for the "View on Chart" banner below.
   const [backtestTrades, setBacktestTrades] = useState<BacktestTrade[] | null>(null);
   const [backtestError, setBacktestError] = useState<string | null>(null);
+  // Strategy/symbol/period behind the current backtest report — fetched
+  // alongside `backtestTrades` (see `resolveInitialCandles` below), and fed
+  // to the inline strategy editor so it can be tested/tweaked right here
+  // instead of navigating back to the report page.
+  const [backtestMeta, setBacktestMeta] = useState<{
+    strategy: string;
+    symbol: string;
+    period: string;
+  } | null>(null);
+  const [showStrategyEditor, setShowStrategyEditor] = useState(false);
+  // Drawer position for the strategy code editor
+  type DrawerPosition = 'right' | 'left' | 'bottom' | 'top';
+  const [drawerPosition, setDrawerPosition] = useState<DrawerPosition>('right');
+  // Whether the strategy info pills are expanded
+  const [strategyInfoExpanded, setStrategyInfoExpanded] = useState(false);
+
+  const [showCustomCodeEditor, setShowCustomCodeEditor] = useState(false);
+  const [customCodeDraft, setCustomCodeDraft] = useState(() => {
+    if (typeof window !== 'undefined') {
+      const saved = localStorage.getItem('chart-custom-script-code');
+      if (saved) return saved;
+    }
+    return DEFAULT_CUSTOM_CODE_TEMPLATE;
+  });
+  const [customCodeResult, setCustomCodeResult] = useState<EvaluateCustomCodeResponse | null>(null);
+  const customCodeResultRef = useRef<EvaluateCustomCodeResponse | null>(null);
+  customCodeResultRef.current = customCodeResult;
+  const [customCodeBusy, setCustomCodeBusy] = useState(false);
+  const [customCodeError, setCustomCodeError] = useState<string | null>(null);
+  const [customCodeCopied, setCustomCodeCopied] = useState(false);
+
+  const handleCopyCustomCode = () => {
+    navigator.clipboard.writeText(customCodeDraft);
+    setCustomCodeCopied(true);
+    setTimeout(() => setCustomCodeCopied(false), 2000);
+  };
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('chart-custom-script-code', customCodeDraft);
+    } catch {}
+  }, [customCodeDraft]);
 
   const [timeframe, setTimeframe] = useState<Candle['timeframe']>(loadLastTimeframe);
 
@@ -1412,6 +1540,37 @@ export function ChartPanel({
           }
         }
       }
+
+      // If we have custom code results, plot their custom indicators
+      if (customCodeResultRef.current) {
+        const { indicators, candles: customCandles } = customCodeResultRef.current;
+        let colorIdx = 0;
+        const CUSTOM_INDICATOR_COLORS = ['#00f0ff', '#e0aaff', '#ffd166', '#06d6a0', '#ff70a6'];
+        for (const [name, values] of Object.entries(indicators)) {
+          const lineData = [];
+          for (let i = 0; i < customCandles.length; i++) {
+            const val = values[i];
+            if (val !== null && val !== undefined) {
+              lineData.push({
+                time: customCandles[i].time as UTCTimestamp,
+                value: val,
+              });
+            }
+          }
+          if (lineData.length > 0) {
+            const series = chart.addSeries(LineSeries, {
+              color: CUSTOM_INDICATOR_COLORS[colorIdx % CUSTOM_INDICATOR_COLORS.length],
+              lineWidth: 2,
+              priceLineVisible: false,
+              lastValueVisible: false,
+              title: name,
+            });
+            series.setData(lineData);
+            indicatorSeriesRef.current.push(series);
+            colorIdx++;
+          }
+        }
+      }
     };
     recomputeIndicatorsRef.current = recomputeIndicators;
 
@@ -1851,6 +2010,7 @@ export function ChartPanel({
       const report = await getBacktestReport(backtestReportId);
       if (cancelled) return [];
       setBacktestTrades(report.trades);
+      setBacktestMeta({ strategy: report.strategy, symbol: report.symbol, period: report.period });
       const lastClose = report.trades.reduce((max, t) => Math.max(max, t.close_time), 0);
       const anchor = lastClose > 0 ? lastClose + 2 * TIMEFRAME_SECONDS[timeframe] : undefined;
       return getCandles(symbol, timeframe, CANDLE_COUNT, anchor);
@@ -2101,16 +2261,22 @@ export function ChartPanel({
   // trades (set below) instead of the live journal.
   useEffect(() => {
     if (backtestReportId) return;
+    const colors = {
+      ok: cssVar('--color-ok'),
+      err: cssVar('--color-err'),
+    };
+    if (customCodeResult) {
+      seriesMarkersRef.current?.setMarkers(
+        toCustomSignalsSeriesMarkers(customCodeResult.signals, colors)
+      );
+      return;
+    }
     let cancelled = false;
 
     const poll = () => {
       getTradeMarkers(symbol)
         .then((trades) => {
           if (cancelled) return;
-          const colors = {
-            ok: cssVar('--color-ok'),
-            err: cssVar('--color-err'),
-          };
           seriesMarkersRef.current?.setMarkers(toSeriesMarkers(trades, colors));
         })
         .catch(() => {
@@ -2124,15 +2290,21 @@ export function ChartPanel({
       cancelled = true;
       clearInterval(timer);
     };
-  }, [symbol, backtestReportId]);
+  }, [symbol, backtestReportId, customCodeResult]);
 
   // Render the backtest report's trades as markers once fetched (see the
   // history-loading effect above, which sets `backtestTrades`).
   useEffect(() => {
     if (!backtestReportId || backtestTrades === null) return;
     const colors = { ok: cssVar('--color-ok'), err: cssVar('--color-err') };
-    seriesMarkersRef.current?.setMarkers(toBacktestSeriesMarkers(backtestTrades, colors));
-  }, [backtestReportId, backtestTrades]);
+    if (customCodeResult) {
+      seriesMarkersRef.current?.setMarkers(
+        toCustomSignalsSeriesMarkers(customCodeResult.signals, colors)
+      );
+    } else {
+      seriesMarkersRef.current?.setMarkers(toBacktestSeriesMarkers(backtestTrades, colors));
+    }
+  }, [backtestReportId, backtestTrades, customCodeResult]);
 
   // News window shading (§8, F8): shade the pre/post-event window of any
   // active news window that affects this symbol. Pixel positions are
@@ -2499,7 +2671,52 @@ export function ChartPanel({
       return next;
     });
   }
+  async function runCustomCode() {
+    if (!customCodeDraft) return;
+    setCustomCodeBusy(true);
+    setCustomCodeError(null);
+    try {
+      const oldestCandle = candlesRef.current[0];
+      const newestCandle = candlesRef.current[candlesRef.current.length - 1];
+      if (!oldestCandle || !newestCandle) {
+        throw new Error("No historical candles loaded on the chart yet.");
+      }
 
+      const oldestDate = new Date(oldestCandle.time * 1000);
+      const newestDate = new Date(newestCandle.time * 1000);
+
+      const pad = (n: number) => String(n).padStart(2, '0');
+      const oldestStr = `${oldestDate.getUTCFullYear()}-${pad(oldestDate.getUTCMonth() + 1)}`;
+      const newestStr = `${newestDate.getUTCFullYear()}-${pad(newestDate.getUTCMonth() + 1)}`;
+      const periodParam = `${oldestStr}:${newestStr}`;
+
+      const res = await evaluateCustomCode({
+        code: customCodeDraft,
+        symbol,
+        timeframe,
+        period: periodParam
+      });
+
+      if (res.error) {
+        setCustomCodeError(res.error);
+      } else {
+        setCustomCodeResult(res);
+        customCodeResultRef.current = res;
+        recomputeIndicatorsRef.current();
+      }
+    } catch (err) {
+      setCustomCodeError(err instanceof Error ? err.message : "Execution failed");
+    } finally {
+      setCustomCodeBusy(false);
+    }
+  }
+
+  function clearCustomCode() {
+    setCustomCodeResult(null);
+    customCodeResultRef.current = null;
+    setCustomCodeError(null);
+    recomputeIndicatorsRef.current();
+  }
   return (
     <section className='flex min-h-0 flex-1 flex-col rounded-md border border-line bg-panel'>
       <header className='flex items-center gap-3 border-b border-line px-4 py-2'>
@@ -2533,6 +2750,21 @@ export function ChartPanel({
             Reset zoom
           </button>
         </div>
+        {/* Custom Script Code Editor toggle */}
+        <button
+          className={`cursor-pointer rounded border px-2 py-0.5 text-xs ${
+            showCustomCodeEditor
+              ? 'border-accent text-accent'
+              : 'border-line text-ink-muted'
+          }`}
+          onClick={() => {
+            setShowCustomCodeEditor((v) => !v);
+            setShowStrategyEditor(false); // Close strategy editor if custom is opened
+          }}
+          title='Write custom script and run directly on chart'
+        >
+          Code Editor
+        </button>
         {/* Drawings list toggle + placement hint */}
         <button
           className={`cursor-pointer rounded border px-2 py-0.5 text-xs ${
@@ -2578,6 +2810,25 @@ export function ChartPanel({
             {backtestTrades !== null && ` — ${backtestTrades.length} trade${backtestTrades.length === 1 ? '' : 's'}`}
             {backtestError && ` — ${backtestError}`}
           </span>
+          <Link
+            href={`/backtest/${encodeURIComponent(backtestReportId)}`}
+            className='rounded border border-accent px-2 py-0.5 text-accent hover:bg-accent/20'
+          >
+            ← Back to report
+          </Link>
+          {backtestMeta && (
+            <button
+              className={`cursor-pointer rounded border px-2 py-0.5 ${
+                showStrategyEditor
+                  ? 'border-accent bg-accent/20 text-accent'
+                  : 'border-accent text-accent hover:bg-accent/20'
+              }`}
+              onClick={() => setShowStrategyEditor((v) => !v)}
+              title="Edit this strategy's source code and re-run the backtest in place"
+            >
+              {showStrategyEditor ? 'Hide code' : 'Edit code'}
+            </button>
+          )}
           {onExitBacktestView && (
             <button
               className='ml-auto cursor-pointer rounded border border-accent px-2 py-0.5 text-accent hover:bg-accent/20'
@@ -2588,29 +2839,47 @@ export function ChartPanel({
           )}
         </div>
       )}
+      {/* Strategy info — collapsed by default, shows only name + toggle */}
       {activeStrategy?.spec &&
         (activeStrategy.spec.unrecognized_indicators.length > 0 ||
           activeStrategy.spec.chart_notes.length > 0) && (
-          <div className='flex flex-wrap items-center gap-1.5 border-b border-line px-4 py-1 text-xs text-ink-muted'>
-            <span className='text-ink-muted/70'>{activeStrategy.name} mentions (not auto-drawn):</span>
-            {activeStrategy.spec.unrecognized_indicators.map((name) => (
-              <span
-                key={`ind:${name}`}
-                className='rounded border border-line px-1.5 py-0.5'
-                title='Indicator outside the 5 plottable families (EMA/SMA/RSI/MACD/Bollinger)'
-              >
-                {name}
+          <div className='flex flex-col border-b border-line text-xs'>
+            <div className='flex items-center gap-2 px-4 py-1'>
+              <span className='font-semibold text-ink'>{activeStrategy.name}</span>
+              <span className='text-ink-muted/70 text-[10px]'>
+                {activeStrategy.spec.unrecognized_indicators.length + activeStrategy.spec.chart_notes.length} item(s) not auto-drawn
               </span>
-            ))}
-            {activeStrategy.spec.chart_notes.map((note) => (
-              <span
-                key={`note:${note}`}
-                className='rounded border border-line px-1.5 py-0.5'
-                title='No explicit price level in the source document — not turned into chart geometry'
+              <button
+                onClick={() => setStrategyInfoExpanded((v) => !v)}
+                className='ml-auto cursor-pointer rounded border border-line px-2 py-0.5 text-[10px] text-ink-muted hover:border-accent hover:text-accent transition-colors'
+                title={strategyInfoExpanded ? 'Collapse strategy info' : 'Expand strategy info'}
               >
-                {note}
-              </span>
-            ))}
+                {strategyInfoExpanded ? '▲ Hide info' : '▼ Show info'}
+              </button>
+            </div>
+            {strategyInfoExpanded && (
+              <div className='flex flex-wrap items-center gap-1.5 border-t border-line px-4 py-1.5 text-ink-muted bg-panel/50'>
+                <span className='text-ink-muted/70 mr-1'>Mentions (not auto-drawn):</span>
+                {activeStrategy.spec.unrecognized_indicators.map((name) => (
+                  <span
+                    key={`ind:${name}`}
+                    className='rounded border border-line px-1.5 py-0.5 bg-panel'
+                    title='Indicator outside the 5 plottable families (EMA/SMA/RSI/MACD/Bollinger)'
+                  >
+                    {name}
+                  </span>
+                ))}
+                {activeStrategy.spec.chart_notes.map((note) => (
+                  <span
+                    key={`note:${note}`}
+                    className='rounded border border-line px-1.5 py-0.5 bg-panel'
+                    title='No explicit price level in the source document — not turned into chart geometry'
+                  >
+                    {note}
+                  </span>
+                ))}
+              </div>
+            )}
           </div>
         )}
       {/* Drawings list panel — shown when the toggle is active */}
@@ -2648,6 +2917,173 @@ export function ChartPanel({
       )}
       <div className='relative min-h-0 flex-1'>
         <div ref={containerRef} className='h-full w-full' />
+        {/* Strategy code drawer — slides in from the configured edge */}
+        {backtestReportId && backtestMeta && showStrategyEditor && (
+          <div
+            className={`pointer-events-auto absolute z-40 flex flex-col bg-panel border-line shadow-2xl overflow-hidden ${
+              drawerPosition === 'right' ? 'right-0 top-0 h-full border-l' :
+              drawerPosition === 'left' ? 'left-0 top-0 h-full border-r' :
+              drawerPosition === 'bottom' ? 'bottom-0 left-0 w-full border-t' :
+              'top-0 left-0 w-full border-b'
+            }`}
+            style={{
+              width: drawerPosition === 'right' || drawerPosition === 'left' ? '420px' : '100%',
+              height: drawerPosition === 'bottom' || drawerPosition === 'top' ? '340px' : '100%',
+              maxWidth: drawerPosition === 'right' || drawerPosition === 'left' ? '55%' : undefined,
+              maxHeight: drawerPosition === 'bottom' || drawerPosition === 'top' ? '55%' : undefined,
+            }}
+          >
+            {/* Drawer header */}
+            <div className='flex items-center gap-2 border-b border-line px-3 py-1.5 bg-panel shrink-0'>
+              <span className='text-xs font-semibold text-ink truncate'>Edit Strategy Code</span>
+              {/* Position controls */}
+              <div className='flex items-center gap-0.5 ml-auto'>
+                {(['right', 'bottom', 'left', 'top'] as const).map((pos) => (
+                  <button
+                    key={pos}
+                    onClick={() => setDrawerPosition(pos)}
+                    title={`Move to ${pos}`}
+                    className={`cursor-pointer rounded px-1.5 py-0.5 text-[10px] border transition-colors ${
+                      drawerPosition === pos
+                        ? 'border-accent text-accent bg-accent/10'
+                        : 'border-line text-ink-muted hover:text-ink'
+                    }`}
+                  >
+                    {pos === 'right' ? '⇥' : pos === 'left' ? '⇤' : pos === 'bottom' ? '⇓' : '⇑'}
+                  </button>
+                ))}
+                <button
+                  onClick={() => setShowStrategyEditor(false)}
+                  className='cursor-pointer ml-1 rounded border border-line px-1.5 py-0.5 text-[10px] text-ink-muted hover:border-err hover:text-err transition-colors'
+                  title='Close drawer'
+                >
+                  ✕
+                </button>
+              </div>
+            </div>
+            {/* Drawer content */}
+            <div className='flex-1 flex flex-col p-2 min-h-0'>
+              <BacktestStrategyEditor
+                strategyName={backtestMeta.strategy}
+                symbol={backtestMeta.symbol}
+                period={backtestMeta.period}
+                className='flex-1 min-h-0'
+                onSaved={(newReportId) => {
+                  setShowStrategyEditor(false);
+                  onReportChange?.(newReportId);
+                }}
+              />
+            </div>
+          </div>
+        )}
+        {/* Custom script code drawer — slides in from the configured edge */}
+        {showCustomCodeEditor && (
+          <div
+            className={`pointer-events-auto absolute z-40 flex flex-col bg-panel border-line shadow-2xl overflow-hidden ${
+              drawerPosition === 'right' ? 'right-0 top-0 h-full border-l' :
+              drawerPosition === 'left' ? 'left-0 top-0 h-full border-r' :
+              drawerPosition === 'bottom' ? 'bottom-0 left-0 w-full border-t' :
+              'top-0 left-0 w-full border-b'
+            }`}
+            style={{
+              width: drawerPosition === 'right' || drawerPosition === 'left' ? '420px' : '100%',
+              height: drawerPosition === 'bottom' || drawerPosition === 'top' ? '340px' : '100%',
+              maxWidth: drawerPosition === 'right' || drawerPosition === 'left' ? '55%' : undefined,
+              maxHeight: drawerPosition === 'bottom' || drawerPosition === 'top' ? '55%' : undefined,
+            }}
+          >
+            {/* Drawer header */}
+            <div className='flex items-center gap-2 border-b border-line px-3 py-1.5 bg-panel shrink-0'>
+              <span className='text-xs font-semibold text-ink truncate'>Run Custom Code</span>
+              {/* Position controls */}
+              <div className='flex items-center gap-0.5 ml-auto'>
+                <button
+                  onClick={handleCopyCustomCode}
+                  className={`cursor-pointer mr-1.5 rounded px-2 py-0.5 text-[10px] border transition-colors ${
+                    customCodeCopied
+                      ? 'border-ok text-ok bg-ok/10'
+                      : 'border-line text-ink-muted hover:text-accent hover:border-accent'
+                  }`}
+                  title='Copy code'
+                >
+                  {customCodeCopied ? 'Copied!' : 'Copy'}
+                </button>
+                {(['right', 'bottom', 'left', 'top'] as const).map((pos) => (
+                  <button
+                    key={pos}
+                    onClick={() => setDrawerPosition(pos)}
+                    title={`Move to ${pos}`}
+                    className={`cursor-pointer rounded px-1.5 py-0.5 text-[10px] border transition-colors ${
+                      drawerPosition === pos
+                        ? 'border-accent text-accent bg-accent/10'
+                        : 'border-line text-ink-muted hover:text-ink'
+                    }`}
+                  >
+                    {pos === 'right' ? '⇥' : pos === 'left' ? '⇤' : pos === 'bottom' ? '⇓' : '⇑'}
+                  </button>
+                ))}
+                <button
+                  onClick={() => {
+                    setShowCustomCodeEditor(false);
+                    clearCustomCode();
+                  }}
+                  className='cursor-pointer ml-1 rounded border border-line px-1.5 py-0.5 text-[10px] text-ink-muted hover:border-err hover:text-err transition-colors'
+                  title='Close drawer'
+                >
+                  ✕
+                </button>
+              </div>
+            </div>
+            {/* Drawer content */}
+            <div className='flex-1 flex flex-col p-2 min-h-0'>
+              <div className='flex-1 flex flex-col min-h-0 rounded-md border border-line bg-panel'>
+                <CodeMirror
+                  value={customCodeDraft}
+                  height="100%"
+                  className="flex-1 min-h-0 overflow-auto"
+                  theme={cmTheme}
+                  extensions={[python()]}
+                  onChange={setCustomCodeDraft}
+                  editable={!customCodeBusy}
+                />
+                
+                {customCodeError && (
+                  <div className="border-t border-line px-3 py-2 text-xs text-err shrink-0 max-h-32 overflow-y-auto">
+                    <p>{customCodeError}</p>
+                  </div>
+                )}
+                
+                {customCodeResult && (
+                  <div className="border-t border-line px-3 py-1.5 text-xs text-ok shrink-0 bg-panel/30 flex items-center justify-between">
+                    <span>
+                      Success: {customCodeResult.signals.length} signal(s), {Object.keys(customCodeResult.indicators).length} indicator(s) calculated
+                    </span>
+                    <button
+                      onClick={clearCustomCode}
+                      className="cursor-pointer px-1.5 py-0.5 rounded border border-line hover:border-ink hover:text-ink text-[10px] text-ink-muted"
+                    >
+                      Reset Graph
+                    </button>
+                  </div>
+                )}
+                
+                <div className="flex items-center gap-2 border-t border-line p-3 shrink-0">
+                  <button
+                    type="button"
+                    className="cursor-pointer rounded border border-accent px-3 py-1 text-xs text-accent hover:bg-accent hover:text-bg disabled:cursor-not-allowed disabled:opacity-50"
+                    disabled={customCodeBusy}
+                    onClick={runCustomCode}
+                  >
+                    {customCodeBusy ? "Running code..." : "Run & Show on Graph"}
+                  </button>
+                  <span className="text-[10px] text-ink-muted">
+                    Evaluates custom Python strategy. Returns moving averages/indicators & buy/sell signals on graph.
+                  </span>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
         {/* Drawing toolbar — floats on the left edge of the chart canvas */}
         <DrawingToolbar
           activeTool={drawingTool}

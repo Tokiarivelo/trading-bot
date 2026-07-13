@@ -21,6 +21,12 @@ class SkillSelector:
         self._skills = skills
         self._tz = ZoneInfo(timezone)
 
+    def update(self, symbol: str, skill: NormalSkill) -> None:
+        """Hot-swaps the in-memory skill for `symbol` — used by
+        `SkillAssignmentService` so a reassigned strategy routes live trades
+        immediately, without an app restart."""
+        self._skills[symbol] = skill
+
     def select(self, symbol: str, now: datetime | None = None) -> SkillDecision:
         skill = self._skills.get(symbol)
         if skill is None:

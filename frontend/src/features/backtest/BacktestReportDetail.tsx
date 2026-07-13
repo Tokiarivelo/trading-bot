@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useEffect, useState } from "react";
 import { getBacktestReport, type BacktestReportDetail as ReportDetail } from "@/shared/api/client";
+import { BacktestStrategyEditor } from "./BacktestStrategyEditor";
 import { EquityChart } from "./EquityChart";
 import { StatTile } from "./StatTile";
 
@@ -65,6 +66,12 @@ export function BacktestReportDetail({ reportId }: { reportId: string }) {
         </header>
         <EquityChart points={report.equity_curve} />
       </section>
+
+      <BacktestStrategyEditor
+        strategyName={report.strategy}
+        symbol={report.symbol}
+        period={report.period}
+      />
 
       <section className="overflow-x-auto rounded-md border border-line bg-panel">
         <header className="border-b border-line px-3 py-2 text-sm text-ink-muted">Trades</header>

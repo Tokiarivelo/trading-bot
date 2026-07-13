@@ -279,7 +279,7 @@ class RefinementLoopService:
         baseline_bt = await self._run_backtest(strategy_name, symbol, self._strategy_registry)
         candidate_instance, _errors = validate_and_load(proposed_code)
         candidate_registry = StrategyRegistry()
-        candidate_registry.register(candidate_instance)
+        candidate_registry.register(strategy_name, candidate_instance)
         candidate_bt = await self._run_backtest(strategy_name, symbol, candidate_registry)
 
         baseline_report_id = await self._write_report(baseline_bt) if baseline_bt else None
