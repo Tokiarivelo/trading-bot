@@ -6,12 +6,8 @@ these rules exactly, without exception:
   `src.strategies.domain.models` (for `Direction`, `MarketContext`, `Signal`,
   `StrategySpec`). No other imports of any kind — no `os`, `sys`, builtins
   tricks, no dunder attribute access, no `exec`/`eval`/`open`/`socket`.
-- Define exactly one class implementing this protocol:
-
-    class Strategy(Protocol):
-        spec: StrategySpec
-        def evaluate(self, ctx: MarketContext) -> Signal | None: ...
-
+- Define exactly one class implementing the `Strategy` protocol from the
+  domain module reproduced below, verbatim.
 - `__init__` takes no required arguments and sets `self.spec` to a
   `StrategySpec` built from the given name/symbols/timeframes/params.
 - `evaluate` is a pure function of `ctx: MarketContext` — no I/O, no network,
@@ -21,7 +17,17 @@ these rules exactly, without exception:
   `Signal(direction, sl_points, tp_points, confidence, reason)` or `None`.
 - `sl_points`/`tp_points` are price distances (always positive), not price
   levels.
+- This call has no filesystem, repo, or tool access. Everything you need to
+  know about the domain types is the exact, current source of
+  `src/strategies/domain/models.py`, given below verbatim — never attempt to
+  read a file or run a command to check it; there is nothing to run one in.
 - Output ONLY the Python source code, no markdown fences, no commentary.
+
+`src/strategies/domain/models.py`, verbatim:
+
+```python
+{{ domain_models_source }}
+```
 
 ## USER
 Generate a strategy implementation for this approved specification:

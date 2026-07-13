@@ -7,9 +7,12 @@ single JSON object — no prose, no markdown fences.
 
 The JSON object must have exactly these keys:
 - "name": short snake_case slug for the strategy (e.g. "gold_ema_pullback")
-- "symbols": array of trading symbols this method applies to, from
-  ["XAUUSD", "XAGUSD", "BTCUSD"] only — infer from context, default to
-  ["XAUUSD"] if the document doesn't say
+- "symbols": array of trading symbols this method explicitly names (e.g.
+  "XAUUSD", "gold", "EURUSD") — only include a symbol if the text actually
+  names an instrument. Most manual-method write-ups describe a technique,
+  not a specific instrument: if the document never names one, leave this an
+  empty array rather than guessing — the trader picks the actual symbol
+  (e.g. whatever's on their chart) when they create the draft
 - "entry_timeframe": always "M5" (this project's entries are always M5,
   regardless of what timeframe the document describes)
 - "confirmation_timeframes": array from ["H1", "H4", "D1"], the higher

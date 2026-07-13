@@ -8,7 +8,7 @@ never generates code, and code generation only ever produces a `validated`
 
 from __future__ import annotations
 
-from fastapi import APIRouter, File, HTTPException, Path, Request, UploadFile
+from fastapi import APIRouter, File, Form, HTTPException, Path, Request, UploadFile
 
 from src.ai.api.schemas import GeneratedCodeOut, StrategyDraftOut, UpdateDraftSpecIn
 from src.ai.application.llm_router import LLMProviderNotConfiguredError
@@ -42,7 +42,11 @@ def _service(request: Request) -> PdfToStrategyService:
         "human-reviewable spec (symbols, timeframes, indicators, entry/exit rules). This "
         "never generates code and never touches the strategy registry; the spec must be "
         "reviewed, optionally edited (`PATCH .../drafts/{id}`), and approved "
-        "(`POST .../drafts/{id}/approve`) before `POST .../drafts/{id}/generate-code` can run."
+        "(`POST .../drafts/{id}/approve`) before `POST .../drafts/{id}/generate-code` can run. "
+        "If `symbol` is given, it overrides the LLM's own symbol guess (which defaults to "
+        "XAUUSD whenever the document doesn't name a broker instrument) in `edited_spec`, so "
+        "the draft — and the auto-backtest that `generate-code` later runs — is scoped to "
+        "whatever symbol was active on the chart when the upload was started."
     ),
     responses={400: {"description": "File is not a PDF."}, **_PROVIDER_NOT_CONFIGURED},
 )
@@ -51,13 +55,18 @@ async def upload_pdf(
     file: UploadFile = File(  # noqa: B008 — FastAPI's documented param-default pattern
         description="A PDF describing a manual trading method."
     ),
+    symbol: str | None = Form(  # noqa: B008 — FastAPI's documented param-default pattern
+        default=None,
+        description="Broker symbol to scope this draft to, e.g. the symbol currently on the "
+        "chart. Overrides the LLM's extracted `symbols` guess in `edited_spec`.",
+    ),
 ) -> StrategyDraftOut:
     if not (file.filename or "").lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="file must be a PDF")
     pdf_bytes = await file.read()
     try:
         draft = await _service(request).create_draft_from_pdf(
-            file.filename or "upload.pdf", pdf_bytes
+            file.filename or "upload.pdf", pdf_bytes, symbol=symbol or None
         )
     except LLMProviderNotConfiguredError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc

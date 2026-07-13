@@ -137,6 +137,21 @@ async def test_create_draft_from_pdf_extracts_spec(service):
     assert draft.effective_spec == draft.extracted_spec
 
 
+async def test_create_draft_from_pdf_with_symbol_overrides_extraction(service):
+    # The LLM's extraction (EXTRACTED_SPEC_JSON) always guesses XAUUSD since
+    # the fake PDF text never names an instrument — the caller's symbol (the
+    # one active on the chart) must win in effective_spec, while the raw
+    # extraction is kept untouched for audit.
+    draft = await service.create_draft_from_pdf("method.pdf", _fake_pdf_bytes(), symbol="EURUSD")
+    assert draft.extracted_spec.symbols == ("XAUUSD",)
+    assert draft.edited_spec is not None
+    assert draft.edited_spec.symbols == ("EURUSD",)
+    assert draft.effective_spec.symbols == ("EURUSD",)
+    # Only symbols is overridden — the rest of the extraction carries through.
+    assert draft.effective_spec.name == draft.extracted_spec.name
+    assert draft.effective_spec.indicators == draft.extracted_spec.indicators
+
+
 async def test_create_draft_from_pdf_extracts_structured_indicators_and_levels(service):
     draft = await service.create_draft_from_pdf("method.pdf", _fake_pdf_bytes())
     spec = draft.extracted_spec

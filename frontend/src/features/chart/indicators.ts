@@ -129,3 +129,48 @@ export function bollinger(candles: Candle[], period: number, stdDev: number): Bo
   }
   return { upper, middle, lower };
 }
+
+/**
+ * Cumulative VWAP over whatever candles are currently loaded (not a true
+ * session VWAP reset at a fixed calendar boundary — matches how every other
+ * indicator here is recomputed over the full in-memory window on each
+ * `recomputeIndicators()` pass, see ChartPanel.tsx). Uses `tick_volume` as
+ * the volume proxy, same convention as the volume histogram series.
+ */
+export function vwap(candles: Candle[]): LinePoint[] {
+  const points: LinePoint[] = [];
+  let cumulativePv = 0;
+  let cumulativeVolume = 0;
+  for (const candle of candles) {
+    const typicalPrice = (candle.high + candle.low + candle.close) / 3;
+    cumulativePv += typicalPrice * candle.tick_volume;
+    cumulativeVolume += candle.tick_volume;
+    points.push(toPoint(candle, cumulativeVolume === 0 ? typicalPrice : cumulativePv / cumulativeVolume));
+  }
+  return points;
+}
+
+/** Average True Range with Wilder smoothing (same scheme as `rsi` above). */
+export function atr(candles: Candle[], period: number): LinePoint[] {
+  if (candles.length < period + 1) return [];
+  const trueRanges: number[] = [];
+  for (let i = 1; i < candles.length; i++) {
+    const prevClose = candles[i - 1].close;
+    trueRanges.push(
+      Math.max(
+        candles[i].high - candles[i].low,
+        Math.abs(candles[i].high - prevClose),
+        Math.abs(candles[i].low - prevClose),
+      ),
+    );
+  }
+
+  const points: LinePoint[] = [];
+  let value = trueRanges.slice(0, period).reduce((sum, tr) => sum + tr, 0) / period;
+  points.push(toPoint(candles[period], value));
+  for (let i = period; i < trueRanges.length; i++) {
+    value = (value * (period - 1) + trueRanges[i]) / period;
+    points.push(toPoint(candles[i + 1], value));
+  }
+  return points;
+}

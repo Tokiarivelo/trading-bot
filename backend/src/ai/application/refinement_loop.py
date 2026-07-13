@@ -24,6 +24,7 @@ from zoneinfo import ZoneInfo
 
 from src.ai.adapters.report_repository import AnalysisReportRepository, RefinementProposalRepository
 from src.ai.application.llm_router import LLMRouter
+from src.ai.application.llm_text import extract_python_code, strip_fences
 from src.ai.application.pdf_to_strategy import default_backtest_period
 from src.ai.domain.models import (
     AnalysisReport,
@@ -410,7 +411,7 @@ def _serialize_snapshot(candle: CandleSnapshot) -> dict:
 
 
 def _parse_json(raw: str) -> dict:
-    return json.loads(_strip_fences(raw))
+    return json.loads(strip_fences(raw))
 
 
 def _parse_rationale_and_code(raw: str) -> tuple[str, str]:
@@ -421,14 +422,4 @@ def _parse_rationale_and_code(raw: str) -> tuple[str, str]:
         code = rest if sep else ""
     else:
         rationale, code = "", text
-    return rationale, _strip_fences(code.strip())
-
-
-def _strip_fences(raw: str) -> str:
-    text = raw.strip()
-    if text.startswith("```"):
-        lines = text.splitlines()[1:]
-        if lines and lines[-1].strip() == "```":
-            lines = lines[:-1]
-        text = "\n".join(lines)
-    return text.strip()
+    return rationale, extract_python_code(code.strip())

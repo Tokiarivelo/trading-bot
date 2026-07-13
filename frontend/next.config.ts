@@ -19,6 +19,13 @@ const nextConfig: NextConfig = {
     // routinely exceed that. Applies to requests proxied through the /api
     // rewrite above, e.g. POST /api/ai/pdf-strategy/upload.
     proxyClientMaxBodySize: "50mb",
+    // Next's dev proxy kills any /api rewrite after 30s by default. PDF
+    // extraction runs a real LLM call over the extracted text and routinely
+    // takes longer than that on a big PDF, so the proxy was resetting the
+    // socket (ECONNRESET) while the backend kept working in the background —
+    // the draft would show up on refresh even though the upload request
+    // itself errored client-side. 3 minutes covers slow LLM extraction.
+    proxyTimeout: 180_000,
   },
 };
 

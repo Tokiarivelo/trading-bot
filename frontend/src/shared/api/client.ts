@@ -395,9 +395,10 @@ export interface GeneratedCode {
   backtest_report_id: string | null;
 }
 
-export const uploadStrategyPdf = (file: File) => {
+export const uploadStrategyPdf = (file: File, symbol?: string) => {
   const form = new FormData();
   form.append("file", file);
+  if (symbol) form.append("symbol", symbol);
   return api.postForm<StrategyDraft>("/ai/pdf-strategy/upload", form);
 };
 

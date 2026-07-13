@@ -125,6 +125,19 @@ async def test_upload_extracts_draft(api):
     assert draft["edited_spec"] is None
 
 
+async def test_upload_with_symbol_overrides_extraction(api):
+    response = await api.post(
+        "/ai/pdf-strategy/upload",
+        files={"file": ("method.pdf", _fake_pdf_bytes(), "application/pdf")},
+        data={"symbol": "EURUSD"},
+    )
+    assert response.status_code == 200
+    draft = response.json()
+    assert draft["extracted_spec"]["symbols"] == ["XAUUSD"]
+    assert draft["edited_spec"]["symbols"] == ["EURUSD"]
+    assert draft["effective_spec"]["symbols"] == ["EURUSD"]
+
+
 async def test_upload_rejects_non_pdf(api):
     response = await api.post(
         "/ai/pdf-strategy/upload", files={"file": ("method.txt", b"not a pdf", "text/plain")}

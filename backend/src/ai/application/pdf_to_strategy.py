@@ -11,6 +11,7 @@ auto-backtest afterwards — a missing candle history just skips the backtest
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
 import uuid
@@ -21,11 +22,13 @@ import fitz  # PyMuPDF
 
 from src.ai.adapters.repository import DraftRepository
 from src.ai.application.llm_router import LLMRouter
+from src.ai.application.llm_text import extract_python_code, strip_fences
 from src.ai.domain.models import DraftStatus, ExtractedStrategySpec, GeneratedCode, StrategyDraft
 from src.ai.prompts.loader import render_prompt
 from src.backtest.application.run_backtest import NoHistoryError, run_backtest
 from src.backtest.reports.writer import write_report
 from src.strategies.application.versioning import StrategyValidationError, StrategyVersionService
+from src.strategies.domain import models as strategy_domain_models
 from src.strategies.domain.versioning import CodeSource
 from src.strategies.registry import StrategyRegistry
 from src.strategies.sandbox import validate_and_load
@@ -75,20 +78,36 @@ class PdfToStrategyService:
         # history instead of the real `data/trading.db`.
         self._backtest_database_url = backtest_database_url
 
-    async def create_draft_from_pdf(self, filename: str, pdf_bytes: bytes) -> StrategyDraft:
+    async def create_draft_from_pdf(
+        self, filename: str, pdf_bytes: bytes, symbol: str | None = None
+    ) -> StrategyDraft:
         text = await asyncio.to_thread(extract_pdf_text, pdf_bytes)
         message = render_prompt("extract_method_from_pdf.md", filename=filename, pdf_text=text)
         llm = self._llm_router.for_task("pdf_extraction")
         raw = await llm.complete(message)
         spec = ExtractedStrategySpec.from_dict(_parse_json(raw))
+        # The document rarely names a broker instrument at all, so the LLM's
+        # own guess (extracted_spec.symbols) defaults to XAUUSD almost every
+        # time regardless of what the trader actually wants this method for.
+        # The caller's symbol — the one active on the chart when they chose
+        # "create a bot from this PDF" — is authoritative and goes into
+        # edited_spec, which effective_spec (and generate_code's auto-backtest)
+        # reads first; extracted_spec is left untouched for audit.
+        edited_spec = replace(spec, symbols=(symbol,)) if symbol else None
         draft = StrategyDraft(
             id=str(uuid.uuid4()),
             source_filename=filename,
             created_at=datetime.now(UTC),
             extracted_spec=spec,
+            edited_spec=edited_spec,
         )
         await asyncio.to_thread(self._drafts.save, draft)
-        logger.info("strategy draft created from PDF: id=%s filename=%s", draft.id, filename)
+        logger.info(
+            "strategy draft created from PDF: id=%s filename=%s symbol=%s",
+            draft.id,
+            filename,
+            symbol or spec.symbols,
+        )
         return draft
 
     async def get_draft(self, draft_id: str) -> StrategyDraft | None:
@@ -135,10 +154,11 @@ class PdfToStrategyService:
             spec_json=json.dumps(spec.to_dict(), indent=2),
             class_name=_class_name(spec.name),
             file_name=f"{spec.name}_vN.py",
+            domain_models_source=inspect.getsource(strategy_domain_models),
         )
         llm = self._llm_router.for_task("code_generation")
         raw = await llm.complete(message, max_tokens=8192)
-        code = _strip_fences(raw)
+        code = extract_python_code(raw)
 
         try:
             version = await asyncio.to_thread(
@@ -217,14 +237,4 @@ def _class_name(slug: str) -> str:
 
 
 def _parse_json(raw: str) -> dict:
-    return json.loads(_strip_fences(raw))
-
-
-def _strip_fences(raw: str) -> str:
-    text = raw.strip()
-    if text.startswith("```"):
-        lines = text.splitlines()[1:]
-        if lines and lines[-1].strip() == "```":
-            lines = lines[:-1]
-        text = "\n".join(lines)
-    return text.strip()
+    return json.loads(strip_fences(raw))

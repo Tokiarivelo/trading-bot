@@ -71,7 +71,9 @@ class ExtractedStrategySpecSchema(BaseModel):
 
     name: str = Field(description="Short snake_case slug, e.g. 'gold_ema_pullback'.")
     symbols: list[str] = Field(
-        description="Symbols this method applies to (subset of XAUUSD/XAGUSD/BTCUSD)."
+        description="Broker symbols this method applies to. Empty when the source PDF never "
+        "named an instrument and no symbol override was given at upload time — a human must "
+        "set one (via PATCH) before code generation's auto-backtest can run."
     )
     entry_timeframe: str = Field(
         description="Entry timeframe — always 'M5' for this project regardless of what the "

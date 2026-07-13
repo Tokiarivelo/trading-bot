@@ -7,6 +7,7 @@ import { ChartPanel } from "@/features/chart/ChartPanel";
 import { SymbolPicker } from "@/features/chart/SymbolPicker";
 import { EngineControlPanel } from "@/features/engine/EngineControlPanel";
 import { ActiveNewsWindowsSummary } from "@/features/news/ActiveNewsWindowsSummary";
+import { BotSelector } from "@/features/strategies/BotSelector";
 import { useActiveStrategyForSymbol } from "@/features/strategies/useActiveStrategyForSymbol";
 import { OrdersDock } from "@/features/trading/OrdersDock";
 import { TradePanel } from "@/features/trading/TradePanel";
@@ -252,7 +253,10 @@ export default function Home() {
             onToggleFavorite={toggleFavorite}
           />
         </nav>
-        <Link href="/strategies" className="ml-auto text-sm text-ink-muted hover:text-accent">
+        <Link
+          href={symbol ? `/strategies?symbol=${encodeURIComponent(symbol)}` : "/strategies"}
+          className="ml-auto text-sm text-ink-muted hover:text-accent"
+        >
           Strategies
         </Link>
         <Link href="/backtest" className="text-sm text-ink-muted hover:text-accent">
@@ -304,10 +308,13 @@ export default function Home() {
           )}
           <Panel>Journal (Phase 3)</Panel>
           <Panel>
-            <Link href="/strategies" className="text-accent hover:underline">
-              Strategies →
-            </Link>{" "}
-            PDF upload, spec review, AI codegen, versions
+            {symbol ? (
+              <BotSelector symbol={symbol} activeStrategy={activeStrategy} />
+            ) : (
+              <Link href="/strategies" className="text-accent hover:underline">
+                Strategies →
+              </Link>
+            )}
           </Panel>
           <Panel>
             <Link href="/ai-reports" className="text-accent hover:underline">

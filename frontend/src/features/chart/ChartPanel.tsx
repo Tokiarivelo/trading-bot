@@ -53,12 +53,26 @@ import { subscribeRoom } from '@/shared/api/ws';
 import type { Trading } from '@/features/trading/useTrading';
 import { DrawingToolbar } from './DrawingToolbar';
 import { DrawingsList } from './DrawingsList';
-import { bollinger, ema, macd, rsi, sma } from './indicators';
+import { IndicatorsDock } from './IndicatorsDock';
+import { atr, bollinger, ema, macd, rsi, sma, vwap } from './indicators';
 
 // Prefix for drawings this component adds itself (from the active strategy's
 // PDF-derived price levels) so they can be told apart from the user's own —
 // never persisted to localStorage, never removed by "Clear All".
 const STRATEGY_DRAWING_PREFIX = 'strategy-derived:';
+
+/** Manually added indicator (via IndicatorsDock), independent of whatever
+ * the active strategy's spec auto-draws — see `recomputeIndicators` below,
+ * which plots both together. */
+export type ManualIndicatorType = 'ema' | 'sma' | 'rsi' | 'macd' | 'bollinger' | 'vwap' | 'atr';
+
+export interface ManualIndicator {
+  id: string;
+  type: ManualIndicatorType;
+  period: number;
+  color: string;
+  label: string;
+}
 
 /** Tool type strings accepted by DrawingManager.setActiveTool() */
 export type DrawingToolType =
@@ -168,6 +182,25 @@ function loadDrawingsFromStorage(
     });
   } catch {
     // Corrupt or missing localStorage data is silently ignored.
+  }
+}
+
+/** Restores manually-added indicators for `symbol` from localStorage. */
+function loadManualIndicators(symbol: string): ManualIndicator[] {
+  try {
+    const raw = localStorage.getItem(`chart-indicators:${symbol}`);
+    if (!raw) return [];
+    return JSON.parse(raw) as ManualIndicator[];
+  } catch {
+    return [];
+  }
+}
+
+function saveManualIndicators(symbol: string, indicators: ManualIndicator[]): void {
+  try {
+    localStorage.setItem(`chart-indicators:${symbol}`, JSON.stringify(indicators));
+  } catch {
+    // localStorage quota or serialisation errors are non-fatal.
   }
 }
 
@@ -814,6 +847,9 @@ export function ChartPanel({
   const indicatorSeriesRef = useRef<ISeriesApi<'Line' | 'Histogram'>[]>([]);
   const activeStrategyRef = useRef<StrategyVersionSummary | null>(activeStrategy);
   activeStrategyRef.current = activeStrategy;
+  // User-added indicators (via the IndicatorsDock), read fresh inside
+  // recomputeIndicators the same way activeStrategyRef is.
+  const manualIndicatorsRef = useRef<ManualIndicator[]>([]);
   // Set inside the chart-creation effect (has access to `chart`/`manager`),
   // invoked from the history/live-update effect below whenever new candle
   // data lands, and from the activeStrategy-change effect.
@@ -839,6 +875,13 @@ export function ChartPanel({
   // DrawingsList panel re-renders whenever drawings are added/removed.
   const [drawingsList, setDrawingsList] = useState<IDrawing[]>([]);
   const [showDrawingsList, setShowDrawingsList] = useState(false);
+  // Manually added indicators (independent of the active strategy's spec),
+  // persisted per-symbol in localStorage — same convention as drawings.
+  const [manualIndicators, setManualIndicators] = useState<ManualIndicator[]>(() =>
+    loadManualIndicators(symbol),
+  );
+  manualIndicatorsRef.current = manualIndicators;
+  const [showIndicatorsDock, setShowIndicatorsDock] = useState(false);
   // How many anchor points the user has placed for the current in-progress
   // drawing (0 = none yet). Displayed as a hint in the header.
   const [pendingAnchorCount, setPendingAnchorCount] = useState(0);
@@ -1001,12 +1044,13 @@ export function ChartPanel({
 
       const spec = activeStrategyRef.current?.spec;
       const candles = candlesRef.current;
-      if (!spec || candles.length === 0) return;
+      if (candles.length === 0) return;
 
       let rsiScaleReady = false;
       let macdScaleReady = false;
+      let atrScaleReady = false;
 
-      for (const indicator of spec.indicators) {
+      for (const indicator of spec?.indicators ?? []) {
         switch (indicator.type) {
           case 'ema': {
             const series = chart.addSeries(LineSeries, {
@@ -1120,18 +1164,158 @@ export function ChartPanel({
         }
       }
 
-      const anchorTime = candles[0].time as UTCTimestamp;
-      spec.price_levels.forEach((level, i) => {
-        const color = level.type === 'support' ? '#26a69a' : '#ab47bc';
-        const drawing = HorizontalLine.create(
-          `${STRATEGY_DRAWING_PREFIX}${symbolRef.current}:${i}`,
-          level.price,
-          anchorTime,
-          { lineColor: color, lineWidth: 1, lineDash: [4, 4] },
-          { locked: true, showPrice: true, showLabel: true, labelText: level.label },
-        );
-        manager.addDrawing(drawing);
-      });
+      if (spec) {
+        const anchorTime = candles[0].time as UTCTimestamp;
+        spec.price_levels.forEach((level, i) => {
+          const color = level.type === 'support' ? '#26a69a' : '#ab47bc';
+          const drawing = HorizontalLine.create(
+            `${STRATEGY_DRAWING_PREFIX}${symbolRef.current}:${i}`,
+            level.price,
+            anchorTime,
+            { lineColor: color, lineWidth: 1, lineDash: [4, 4] },
+            { locked: true, showPrice: true, showLabel: true, labelText: level.label },
+          );
+          manager.addDrawing(drawing);
+        });
+      }
+
+      // User-added indicators from IndicatorsDock — plotted alongside
+      // whatever the strategy spec above already drew. RSI/MACD reuse the
+      // same panes (`strategy-rsi`/`strategy-macd`) as the strategy-derived
+      // ones so oscillators from both sources stack in one place rather than
+      // each opening a second pane.
+      for (const manualIndicator of manualIndicatorsRef.current) {
+        switch (manualIndicator.type) {
+          case 'ema': {
+            const series = chart.addSeries(LineSeries, {
+              color: manualIndicator.color,
+              lineWidth: 1,
+              priceLineVisible: false,
+              lastValueVisible: false,
+              title: manualIndicator.label,
+            });
+            series.setData(ema(candles, manualIndicator.period));
+            indicatorSeriesRef.current.push(series);
+            break;
+          }
+          case 'sma': {
+            const series = chart.addSeries(LineSeries, {
+              color: manualIndicator.color,
+              lineWidth: 1,
+              priceLineVisible: false,
+              lastValueVisible: false,
+              title: manualIndicator.label,
+            });
+            series.setData(sma(candles, manualIndicator.period));
+            indicatorSeriesRef.current.push(series);
+            break;
+          }
+          case 'vwap': {
+            const series = chart.addSeries(LineSeries, {
+              color: manualIndicator.color,
+              lineWidth: 1,
+              priceLineVisible: false,
+              lastValueVisible: false,
+              title: manualIndicator.label,
+            });
+            series.setData(vwap(candles));
+            indicatorSeriesRef.current.push(series);
+            break;
+          }
+          case 'rsi': {
+            const series = chart.addSeries(LineSeries, {
+              color: manualIndicator.color,
+              lineWidth: 1,
+              priceScaleId: 'strategy-rsi',
+              priceLineVisible: false,
+              lastValueVisible: false,
+              title: manualIndicator.label,
+              autoscaleInfoProvider: () => ({
+                priceRange: { minValue: 0, maxValue: 100 },
+              }),
+            });
+            if (!rsiScaleReady) {
+              series.priceScale().applyOptions({ scaleMargins: { top: 0.55, bottom: 0.25 } });
+              rsiScaleReady = true;
+            }
+            series.setData(rsi(candles, manualIndicator.period));
+            indicatorSeriesRef.current.push(series);
+            break;
+          }
+          case 'atr': {
+            const series = chart.addSeries(LineSeries, {
+              color: manualIndicator.color,
+              lineWidth: 1,
+              priceScaleId: 'manual-atr',
+              priceLineVisible: false,
+              lastValueVisible: false,
+              title: manualIndicator.label,
+            });
+            if (!atrScaleReady) {
+              // Own band, clear of RSI (0.55-0.75), MACD (0.3-0.5) and
+              // volume (0.8-1.0).
+              series.priceScale().applyOptions({ scaleMargins: { top: 0.05, bottom: 0.75 } });
+              atrScaleReady = true;
+            }
+            series.setData(atr(candles, manualIndicator.period));
+            indicatorSeriesRef.current.push(series);
+            break;
+          }
+          case 'macd': {
+            const { macdLine, signalLine, histogram } = macd(candles, 12, 26, 9);
+            const macdSeries = chart.addSeries(LineSeries, {
+              color: manualIndicator.color,
+              lineWidth: 1,
+              priceScaleId: 'strategy-macd',
+              priceLineVisible: false,
+              lastValueVisible: false,
+              title: `${manualIndicator.label} macd`,
+            });
+            const signalSeries = chart.addSeries(LineSeries, {
+              color: '#ef5350',
+              lineWidth: 1,
+              priceScaleId: 'strategy-macd',
+              priceLineVisible: false,
+              lastValueVisible: false,
+              title: `${manualIndicator.label} signal`,
+            });
+            const histSeries = chart.addSeries(HistogramSeries, {
+              priceScaleId: 'strategy-macd',
+              priceLineVisible: false,
+              lastValueVisible: false,
+              title: `${manualIndicator.label} hist`,
+            });
+            if (!macdScaleReady) {
+              macdSeries.priceScale().applyOptions({ scaleMargins: { top: 0.3, bottom: 0.5 } });
+              macdScaleReady = true;
+            }
+            macdSeries.setData(macdLine);
+            signalSeries.setData(signalLine);
+            histSeries.setData(histogram);
+            indicatorSeriesRef.current.push(macdSeries, signalSeries, histSeries);
+            break;
+          }
+          case 'bollinger': {
+            const { upper, middle, lower } = bollinger(candles, manualIndicator.period, 2);
+            for (const [data, opacity] of [
+              [upper, 1],
+              [middle, 0.6],
+              [lower, 1],
+            ] as const) {
+              const series = chart.addSeries(LineSeries, {
+                color: hexToRgba(manualIndicator.color, opacity),
+                lineWidth: 1,
+                priceLineVisible: false,
+                lastValueVisible: false,
+                title: manualIndicator.label,
+              });
+              series.setData(data);
+              indicatorSeriesRef.current.push(series);
+            }
+            break;
+          }
+        }
+      }
     };
     recomputeIndicatorsRef.current = recomputeIndicators;
 
@@ -1626,16 +1810,17 @@ export function ChartPanel({
     };
   }, [symbol, timeframe]);
 
-  // Recompute overlays when the active strategy itself changes (activated,
-  // deactivated, or a different one picked up for this symbol) without
-  // waiting for the next candle to arrive.
+  // Recompute overlays when the active strategy changes (activated,
+  // deactivated, or a different one picked up for this symbol) or the user
+  // adds/removes a manual indicator — without waiting for the next candle.
   useEffect(() => {
     recomputeIndicatorsRef.current();
-  }, [activeStrategy]);
+  }, [activeStrategy, manualIndicators]);
 
   // When the symbol changes, save the current symbol's drawings and load the
   // new symbol's drawings. The chart-creation effect only handles the initial
   // symbol; this effect keeps things in sync on subsequent symbol switches.
+  // Manual indicators follow the same per-symbol load convention.
   useEffect(() => {
     const manager = drawingManagerRef.current;
     if (!manager) return;
@@ -1643,6 +1828,7 @@ export function ChartPanel({
     clearUserDrawings(manager);
     loadDrawingsFromStorage(manager, symbol);
     isSwitchingSymbolRef.current = false;
+    setManualIndicators(loadManualIndicators(symbol));
   }, [symbol]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Interactive drawing placement.
@@ -2150,6 +2336,22 @@ export function ChartPanel({
     }
   }
 
+  function handleAddManualIndicator(indicator: ManualIndicator) {
+    setManualIndicators((prev) => {
+      const next = [...prev, indicator];
+      saveManualIndicators(symbolRef.current, next);
+      return next;
+    });
+  }
+
+  function handleRemoveManualIndicator(id: string) {
+    setManualIndicators((prev) => {
+      const next = prev.filter((ind) => ind.id !== id);
+      saveManualIndicators(symbolRef.current, next);
+      return next;
+    });
+  }
+
   return (
     <section className='flex min-h-0 flex-1 flex-col rounded-md border border-line bg-panel'>
       <header className='flex items-center gap-3 border-b border-line px-4 py-2'>
@@ -2194,6 +2396,18 @@ export function ChartPanel({
           title='Show / hide drawings list'
         >
           Drawings {drawingsList.length > 0 && `(${drawingsList.length})`}
+        </button>
+        {/* Manual indicators dock toggle */}
+        <button
+          className={`cursor-pointer rounded border px-2 py-0.5 text-xs ${
+            showIndicatorsDock
+              ? 'border-accent text-accent'
+              : 'border-line text-ink-muted'
+          }`}
+          onClick={() => setShowIndicatorsDock((v) => !v)}
+          title='Add / remove indicators'
+        >
+          Indicators {manualIndicators.length > 0 && `(${manualIndicators.length})`}
         </button>
         <span className='ml-auto text-xs text-ink-muted'>
           {drawingTool && pendingAnchorCount > 0 && (
@@ -2257,6 +2471,14 @@ export function ChartPanel({
             }
           }}
           onColorChange={handleModifyDrawingColor}
+        />
+      )}
+      {/* Indicators dock — shown when the toggle is active */}
+      {showIndicatorsDock && (
+        <IndicatorsDock
+          indicators={manualIndicators}
+          onAdd={handleAddManualIndicator}
+          onRemove={handleRemoveManualIndicator}
         />
       )}
       <div className='relative min-h-0 flex-1'>
