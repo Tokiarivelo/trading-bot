@@ -30,6 +30,7 @@ from src.backtest.api.schemas import (
 )
 from src.backtest.application.period import parse_period
 from src.backtest.application.run_backtest import (
+    DEFAULT_STARTING_BALANCE,
     HISTORY_BUFFER,
     NoHistoryError,
     NoSymbolSpecError,
@@ -63,29 +64,49 @@ _STRATEGIES_GENERATED_DIR = (
 
 
 def _discover_bots() -> list[dict[str, Any]]:
-    """One entry per strategy family the backtester can run: `breakout_v1`
-    (the hardcoded baseline) plus every non-archived `StrategyVersion`
-    family in the DB, deduplicated active-first — the same version each
-    family would actually resolve to at `_build_full_registry` time.
+    """One entry per strategy family the backtester can run: `breakout_v1`,
+    `trend_structure_v1`, `trend_structure_v2`, and `mean_reversion_v1` (the
+    hardcoded baselines) plus every non-archived `StrategyVersion` family in
+    the DB, deduplicated active-first — the same version each family would
+    actually resolve to at `_build_full_registry` time.
 
     `id` is a stable identifier — pass it back to `POST /backtest/run`; it's
-    the literal string `"breakout_v1"` for the baseline, or a
-    `StrategyVersion.id` (a UUID) for everything else. `name` is the family's
-    display label only: it's human-typed, not guaranteed unique, can be
-    renamed (`rename_family`) or collide with another family's internal
-    `spec.name` (see `strategies/registry.py`'s module docstring) — never
-    used to look anything up here.
+    the literal string `"breakout_v1"`/`"trend_structure_v1"`/
+    `"trend_structure_v2"`/`"mean_reversion_v1"` for the baselines, or a
+    `StrategyVersion.id` (a UUID) for everything else.
+    `name` is the family's display label only: it's human-typed, not
+    guaranteed unique, can be renamed (`rename_family`) or collide with
+    another family's internal `spec.name` (see `strategies/registry.py`'s
+    module docstring) — never used to look anything up here.
     """
     from src.shared.config.settings import Settings
     from src.shared.db.base import make_session_factory
     from src.strategies.adapters.repository import StrategyVersionRepository
     from src.strategies.domain.versioning import VersionStatus
     from src.strategies.generated.breakout_v1 import BreakoutV1
+    from src.strategies.generated.mean_reversion_v1 import MeanReversionV1
+    from src.strategies.generated.trend_structure_v1 import TrendStructureV1
+    from src.strategies.generated.trend_structure_v2 import TrendStructureV2
     from src.strategies.sandbox import validate_and_load
 
     settings = Settings()
     bots: list[dict[str, Any]] = [
-        {"id": "breakout_v1", "name": "breakout_v1", "symbols": list(BreakoutV1().spec.symbols)}
+        {"id": "breakout_v1", "name": "breakout_v1", "symbols": list(BreakoutV1().spec.symbols)},
+        {
+            "id": "trend_structure_v1",
+            "name": "trend_structure_v1",
+            "symbols": list(TrendStructureV1().spec.symbols),
+        },
+        {
+            "id": "trend_structure_v2",
+            "name": "trend_structure_v2",
+            "symbols": list(TrendStructureV2().spec.symbols),
+        },
+        {
+            "id": "mean_reversion_v1",
+            "name": "mean_reversion_v1",
+            "symbols": list(MeanReversionV1().spec.symbols),
+        },
     ]
 
     try:
@@ -126,8 +147,13 @@ def _resolve_strategy_name(strategy_id: str, database_url: str) -> str:
     the family name `run_backtest`/`StrategyRegistry` actually key strategies
     by. Raises `ValueError` if `strategy_id` doesn't match anything, which
     `_run_job` already treats as a normal job failure."""
-    if strategy_id == "breakout_v1":
-        return "breakout_v1"
+    if strategy_id in (
+        "breakout_v1",
+        "trend_structure_v1",
+        "trend_structure_v2",
+        "mean_reversion_v1",
+    ):
+        return strategy_id
 
     from src.shared.db.base import make_session_factory
     from src.strategies.adapters.repository import StrategyVersionRepository
@@ -147,6 +173,10 @@ async def _run_job(
     symbol: str,
     period: str,
     candle_history: CandleHistoryService,
+    starting_balance: float = DEFAULT_STARTING_BALANCE,
+    min_lot_fallback_enabled: bool | None = None,
+    max_risk_per_trade_pct: float | None = None,
+    min_rr: float | None = None,
 ) -> None:
     _jobs[job_id]["status"] = _JobStatus.RUNNING
     try:
@@ -165,6 +195,10 @@ async def _run_job(
                 period,
                 database_url=settings.database_url,
                 strategy_source=registry,
+                starting_balance=starting_balance,
+                min_lot_fallback_enabled=min_lot_fallback_enabled,
+                max_risk_per_trade_pct=max_risk_per_trade_pct,
+                min_rr=min_rr,
             )
         except NoHistoryError:
             # The local DB is missing (part of) the requested range — pull it
@@ -181,6 +215,10 @@ async def _run_job(
                 period,
                 database_url=settings.database_url,
                 strategy_source=registry,
+                starting_balance=starting_balance,
+                min_lot_fallback_enabled=min_lot_fallback_enabled,
+                max_risk_per_trade_pct=max_risk_per_trade_pct,
+                min_rr=min_rr,
             )
         path = write_report(report)
         _jobs[job_id]["status"] = _JobStatus.DONE
@@ -362,6 +400,38 @@ class RunBacktestIn(BaseModel):
     period: str = Field(
         description="'YYYY-MM:YYYY-MM' — must match candle history already in the DB."
     )
+    starting_balance: float = Field(
+        default=DEFAULT_STARTING_BALANCE,
+        gt=0,
+        description="Simulated account balance the bookkeeper starts from. "
+        f"Defaults to {DEFAULT_STARTING_BALANCE:.0f} when omitted.",
+    )
+    min_lot_fallback_enabled: bool | None = Field(
+        default=None,
+        description="Override configs/risk.yaml's min-lot fallback for this run only — "
+        "trades the broker minimum lot even when risk_per_trade_pct alone computes "
+        "less, as long as max_risk_per_trade_pct allows it (see RiskManager.size_position). "
+        "Null (default) uses whatever is currently configured (file default, or the live "
+        "engine override from PUT /engine/risk-caps/min-lot-fallback).",
+    )
+    max_risk_per_trade_pct: float | None = Field(
+        default=None,
+        gt=0,
+        le=100,
+        description="Override configs/risk.yaml's fallback risk ceiling (%) for this run "
+        "only. Only matters when min_lot_fallback_enabled ends up true. Null uses "
+        "whatever is currently configured.",
+    )
+    min_rr: float | None = Field(
+        default=None,
+        gt=0,
+        description="Override configs/symbols/<symbol>.yaml's min_rr (minimum spread-"
+        "adjusted reward:risk ratio) for this run only. A tighter-stop strategy (e.g. a "
+        "scalping variant) can fail the RR floor a swing-trading min_rr was tuned for — "
+        "this lets you find a working value before flipping it on live via "
+        "PUT /broker/symbols/{symbol}/min-rr. Null uses whatever is currently configured. "
+        "No effect if the symbol has no configs/symbols/ file at all.",
+    )
 
 
 class RunBacktestOut(BaseModel):
@@ -416,7 +486,16 @@ async def start_backtest(
     _jobs[job_id] = {"status": _JobStatus.PENDING, "report_id": None, "error": None}
     candle_history = request.app.state.container.candle_history
     background_tasks.add_task(
-        _run_job, job_id, body.strategy_id, body.symbol, body.period, candle_history
+        _run_job,
+        job_id,
+        body.strategy_id,
+        body.symbol,
+        body.period,
+        candle_history,
+        body.starting_balance,
+        body.min_lot_fallback_enabled,
+        body.max_risk_per_trade_pct,
+        body.min_rr,
     )
     return RunBacktestOut(job_id=job_id, status=_JobStatus.PENDING)
 
@@ -494,6 +573,7 @@ async def get_report(
         **_summary(data, report_id).model_dump(),
         trades=[_trade_out(t) for t in data["trades"]],
         equity_curve=_equity_curve_out(data["equity_curve"]),
+        activity_log=[_activity_log_entry_out(e) for e in data.get("activity_log", [])],
     )
 
 
@@ -537,19 +617,46 @@ def _summary(data: dict[str, Any], report_id: str) -> BacktestReportSummaryOut:
         worst_losing_streak=data["worst_losing_streak"],
         starting_balance=data["starting_balance"],
         ending_balance=data["ending_balance"],
+        min_rr=data.get("min_rr", 1.0),
+        risk_per_trade_pct=data.get("risk_per_trade_pct", 0.5),
+        daily_loss_limit_pct=data.get("daily_loss_limit_pct", 2.0),
+        max_open_positions=data.get("max_open_positions", 100),
+        max_trades_per_day=data.get("max_trades_per_day", 8),
+        consecutive_loss_pause=data.get("consecutive_loss_pause", 10),
+        min_lot_fallback_enabled=data.get("min_lot_fallback_enabled", False),
+        max_risk_per_trade_pct=data.get("max_risk_per_trade_pct"),
     )
 
 
 def _trade_out(trade: dict[str, Any]) -> dict[str, Any]:
+    zone = trade.get("zone")
+    structure = trade.get("structure") or []
     return {
         **trade,
         "open_time": _epoch(trade["open_time"]),
         "close_time": _epoch(trade["close_time"]),
+        "zone": _zone_out(zone) if zone is not None else None,
+        "structure": [
+            {"label": label, "price": price, "time": _epoch(time_iso)}
+            for label, price, time_iso in structure
+        ],
+    }
+
+
+def _zone_out(zone: dict[str, Any]) -> dict[str, Any]:
+    return {
+        **zone,
+        "time_start": _epoch(zone["time_start"]),
+        "time_end": _epoch(zone["time_end"]),
     }
 
 
 def _epoch(iso: str) -> int:
     return int(datetime.fromisoformat(iso).astimezone(UTC).timestamp())
+
+
+def _activity_log_entry_out(entry: dict[str, Any]) -> dict[str, Any]:
+    return {**entry, "time": _epoch(entry["time"])}
 
 
 def _equity_curve_out(points: list[dict[str, Any]]) -> list[dict[str, Any]]:

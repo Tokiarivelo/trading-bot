@@ -6,3 +6,12 @@ daily_loss_limit_pct: 2.0
 max_open_positions: 100
 max_trades_per_day: 8
 consecutive_loss_pause: 10 # circuit breaker: pause engine + notify after N straight losses
+# On a small balance, risk_per_trade_pct alone can compute a lot size below
+# the broker's minimum (0.01), which used to just reject every trade. When
+# min_lot_fallback_enabled is true, the engine instead falls back to the
+# broker minimum lot as long as *that lot's* effective risk stays under
+# max_risk_per_trade_pct. Also editable live from Settings -> Risk (that
+# only updates the running engine in memory; edit this file to change the
+# default the bot starts with after a restart).
+min_lot_fallback_enabled: true
+max_risk_per_trade_pct: 2.0

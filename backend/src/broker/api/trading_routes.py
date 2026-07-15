@@ -23,6 +23,8 @@ from src.broker.api.schemas import (
     PendingOrderOut,
     PlacePendingOrderRequest,
     PositionOut,
+    SymbolSpreadConfigOut,
+    UpdateMinRrIn,
 )
 from src.broker.domain.account import BrokerUnavailable
 from src.broker.domain.trading import (
@@ -54,6 +56,10 @@ def _service(request: Request) -> Any:
 
 def _gate(request: Request) -> Any:
     return request.app.state.container.manual_trade_gate
+
+
+def _spread_gate(request: Request) -> Any:
+    return request.app.state.container.spread_gate
 
 
 def _execution_out(result: ExecutionResult) -> ExecutionResultOut:
@@ -295,3 +301,53 @@ async def cancel_pending_order(request: Request, ticket: int) -> ModifyOrderResp
     except (BrokerUnavailable, MarketDataUnavailable) as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     return ModifyOrderResponse(status="ok")
+
+
+@router.get(
+    "/symbols/{symbol}/spread-config",
+    response_model=SymbolSpreadConfigOut,
+    summary="Get a symbol's live spread/RR gate config",
+    description=(
+        "Returns the spread cap and minimum RR the running `SpreadGate` is enforcing for "
+        "`symbol` right now. Matches `configs/symbols/<symbol>.yaml` on disk unless "
+        "`PUT .../min-rr` has been called since the last backend restart."
+    ),
+    responses={404: {"description": "No spread/RR config for this symbol yet."}},
+)
+async def get_symbol_spread_config(
+    request: Request, symbol: str
+) -> SymbolSpreadConfigOut:
+    config = _spread_gate(request).get_config(symbol)
+    if config is None:
+        raise HTTPException(status_code=404, detail=f"no spread/RR config for {symbol!r}")
+    return SymbolSpreadConfigOut(
+        symbol=symbol, max_spread_points=config.max_spread_points, min_rr=config.min_rr
+    )
+
+
+@router.put(
+    "/symbols/{symbol}/min-rr",
+    response_model=SymbolSpreadConfigOut,
+    summary="Update a symbol's minimum RR, live",
+    description=(
+        "Updates, on the running engine, the minimum spread-adjusted reward:risk ratio "
+        "`SpreadGate.check()` requires to open a position on `symbol` — the gate a tighter-"
+        "stop strategy (e.g. a scalping variant) can fail even with a valid signal, since a "
+        "fixed-points spread eats a bigger share of a smaller take-profit. Takes effect on "
+        "the very next order for this symbol, live and paper alike. Only `min_rr` changes — "
+        "`max_spread_points` and broker facts are untouched. **Not persisted** — a backend "
+        "restart reverts to `configs/symbols/<symbol>.yaml`, which the human edits directly "
+        "to change the default."
+    ),
+    responses={404: {"description": "No spread/RR config for this symbol yet."}},
+)
+async def update_symbol_min_rr(
+    request: Request, symbol: str, body: UpdateMinRrIn
+) -> SymbolSpreadConfigOut:
+    try:
+        config = _spread_gate(request).update_min_rr(symbol, body.min_rr)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=f"no spread/RR config for {symbol!r}") from exc
+    return SymbolSpreadConfigOut(
+        symbol=symbol, max_spread_points=config.max_spread_points, min_rr=config.min_rr
+    )

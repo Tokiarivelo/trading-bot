@@ -9,6 +9,7 @@ import {
   getStrategyVersion,
   type StrategyVersionDetail as VersionDetail,
 } from "@/shared/api/client";
+import { downloadJson } from "@/shared/utils/download";
 import { CodeEditorPanel } from "./CodeEditorPanel";
 import { DuplicateVersionForm } from "./DuplicateVersionForm";
 import { RenameVersionInline } from "./RenameVersionInline";
@@ -88,6 +89,13 @@ export function StrategyVersionDetail({ versionId }: { versionId: string }) {
           onChanged={load}
           onDeleted={() => router.push("/strategies")}
         />
+        <button
+          type="button"
+          onClick={() => downloadJson(version, `${version.name}_v${version.version}_${version.id}.json`)}
+          className="cursor-pointer rounded border border-line px-2 py-1 text-xs hover:border-accent hover:text-accent transition-colors"
+        >
+          Export JSON
+        </button>
         {version.parent_version_id && (
           <Link
             href={`/strategies/versions/${version.parent_version_id}`}

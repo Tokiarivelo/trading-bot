@@ -24,6 +24,7 @@ changes behavior for the manual path.
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 from dataclasses import dataclass
 
@@ -42,6 +43,36 @@ class SpreadVeto:
 class SpreadGate:
     def __init__(self, configs: dict[str, SymbolTradingConfig]) -> None:
         self._configs = configs
+
+    def set_config(self, symbol: str, config: SymbolTradingConfig) -> None:
+        """Hot-adds `symbol`'s spread/RR config — used by
+        `SkillAssignmentService.assign()` when activating a symbol for live
+        trading at runtime, so it gets a real spread cap immediately instead
+        of falling back to `DEFAULT_MIN_RR` with no cap until a restart."""
+        self._configs[symbol] = config
+
+    def get_config(self, symbol: str) -> SymbolTradingConfig | None:
+        return self._configs.get(symbol)
+
+    def update_min_rr(self, symbol: str, min_rr: float) -> SymbolTradingConfig:
+        """Live-updates just `min_rr` on `symbol`'s config — e.g. a scalping
+        variant's tighter SL/TP distances can fail the spread-adjusted RR
+        floor a swing-trading min_rr was tuned for (see `check()`'s
+        docstring), so this lets that be retuned without a restart. Every
+        other field (max_spread_points, broker facts) stays whatever
+        `configs/symbols/<symbol>.yaml` set. Not persisted — a restart
+        reverts to the file, which the human edits directly to change the
+        default (see CLAUDE.md: this file is user-owned).
+
+        Raises `KeyError` if `symbol` has no config yet — there's nothing
+        sane to base a partial update on."""
+        config = self._configs.get(symbol)
+        if config is None:
+            raise KeyError(symbol)
+        updated = dataclasses.replace(config, min_rr=min_rr)
+        self._configs[symbol] = updated
+        logger.info("spread gate: min_rr updated live for %s -> %.2f", symbol, min_rr)
+        return updated
 
     def check(
         self,

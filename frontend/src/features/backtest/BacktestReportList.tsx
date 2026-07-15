@@ -5,9 +5,11 @@ import { useCallback, useEffect, useState } from "react";
 import {
   ApiError,
   deleteBacktestReport,
+  getBacktestReport,
   getBacktestReports,
   type BacktestReportSummary,
 } from "@/shared/api/client";
+import { downloadJson } from "@/shared/utils/download";
 import { RunBacktestPanel } from "./RunBacktestPanel";
 
 const PAGE_SIZE = 10;
@@ -22,6 +24,19 @@ export function BacktestReportList() {
   const [error, setError] = useState<string | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [downloadingId, setDownloadingId] = useState<string | null>(null);
+
+  async function handleDownload(id: string, strategy: string, symbol: string) {
+    setDownloadingId(id);
+    try {
+      const detail = await getBacktestReport(id);
+      downloadJson(detail, `backtest_${strategy}_${symbol}_${id}.json`);
+    } catch (err) {
+      console.error("Failed to download backtest report:", err);
+    } finally {
+      setDownloadingId(null);
+    }
+  }
 
   const fetchReports = useCallback((pageToLoad: number) => {
     getBacktestReports(PAGE_SIZE, pageToLoad * PAGE_SIZE)
@@ -113,7 +128,11 @@ export function BacktestReportList() {
                   <Th align="right">Trades</Th>
                   <Th align="right">Win rate</Th>
                   <Th align="right">Profit factor</Th>
+                  <Th align="right">Avg R</Th>
+                  <Th align="right">Min RR</Th>
+                  <Th align="right">Risk %</Th>
                   <Th align="right">Max DD</Th>
+                  <Th align="right">Initial balance</Th>
                   <Th align="right">Ending balance</Th>
                   <Th align="right">{""}</Th>
                 </tr>
@@ -139,7 +158,13 @@ export function BacktestReportList() {
                     <Td align="right">
                       {r.profit_factor === null ? "∞" : r.profit_factor.toFixed(2)}
                     </Td>
+                    <Td align="right" tone={r.avg_r >= 0 ? "ok" : "err"}>
+                      {r.avg_r.toFixed(2)}
+                    </Td>
+                    <Td align="right">{r.min_rr.toFixed(2)}</Td>
+                    <Td align="right">{r.risk_per_trade_pct.toFixed(2)}%</Td>
                     <Td align="right">{r.max_drawdown_pct.toFixed(2)}%</Td>
+                    <Td align="right">{r.starting_balance.toFixed(2)}</Td>
                     <Td
                       align="right"
                       tone={r.ending_balance >= r.starting_balance ? "ok" : "err"}
@@ -147,15 +172,26 @@ export function BacktestReportList() {
                       {r.ending_balance.toFixed(2)}
                     </Td>
                     <Td align="right">
-                      <button
-                        type="button"
-                        className="report-list-delete-btn"
-                        disabled={deletingId !== null}
-                        onClick={() => handleDelete(r.id, `${r.strategy} / ${r.symbol} / ${r.period}`)}
-                        title="Delete this report"
-                      >
-                        {deletingId === r.id ? "…" : "Delete"}
-                      </button>
+                      <div className="flex justify-end items-center gap-2">
+                        <button
+                          type="button"
+                          className="report-list-download-btn"
+                          disabled={downloadingId !== null}
+                          onClick={() => handleDownload(r.id, r.strategy, r.symbol)}
+                          title="Download report details as JSON"
+                        >
+                          {downloadingId === r.id ? "…" : "Download"}
+                        </button>
+                        <button
+                          type="button"
+                          className="report-list-delete-btn"
+                          disabled={deletingId !== null}
+                          onClick={() => handleDelete(r.id, `${r.strategy} / ${r.symbol} / ${r.period}`)}
+                          title="Delete this report"
+                        >
+                          {deletingId === r.id ? "…" : "Delete"}
+                        </button>
+                      </div>
                     </Td>
                   </tr>
                 ))}
@@ -299,6 +335,25 @@ export function BacktestReportList() {
           border-color: rgba(248,113,113,.4);
         }
         .report-list-delete-btn:disabled {
+          opacity: .4;
+          cursor: not-allowed;
+        }
+        .report-list-download-btn {
+          padding: 3px 8px;
+          background: rgba(255,255,255,.05);
+          border: 1px solid rgba(255,255,255,.1);
+          border-radius: 6px;
+          color: var(--ink-muted, #94a3b8);
+          font-size: 11px;
+          cursor: pointer;
+          transition: all .15s;
+        }
+        .report-list-download-btn:hover:not(:disabled) {
+          background: rgba(99,102,241,.15);
+          color: #818cf8;
+          border-color: rgba(99,102,241,.4);
+        }
+        .report-list-download-btn:disabled {
           opacity: .4;
           cursor: not-allowed;
         }

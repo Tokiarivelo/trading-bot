@@ -210,6 +210,50 @@ async def test_ad_hoc_watched_symbol_is_polled_and_broadcast(setup, candle_facto
     assert any(m["candle"]["symbol"] == "EURUSD" for m in broadcaster.messages)
 
 
+def test_add_symbol_permanently_activates_it(setup):
+    service, *_ = setup
+
+    added = service.add_symbol("EURUSD")
+
+    assert added is True
+    assert service.active_symbols == ["XAUUSD", "EURUSD"]
+
+
+def test_add_symbol_is_idempotent(setup):
+    service, *_ = setup
+    service.add_symbol("EURUSD")
+
+    added_again = service.add_symbol("EURUSD")
+
+    assert added_again is False
+    assert service.active_symbols == ["XAUUSD", "EURUSD"]
+
+
+def test_add_symbol_is_noop_for_already_permanent_symbol(setup):
+    service, *_ = setup
+
+    added = service.add_symbol("XAUUSD")
+
+    assert added is False
+    assert service.active_symbols == ["XAUUSD"]
+
+
+def test_add_symbol_folds_an_ad_hoc_watch_into_permanent(setup):
+    # A chart tab was watching EURUSD (ref-counted); activating it for
+    # automated trading should promote it, not double-track it, and a later
+    # unwatch() from that same chart tab must still no-op cleanly rather than
+    # corrupting a refcount that no longer exists.
+    service, *_ = setup
+    service.watch("EURUSD")
+
+    added = service.add_symbol("EURUSD")
+
+    assert added is True
+    assert service.active_symbols == ["XAUUSD", "EURUSD"]
+    service.unwatch("EURUSD")
+    assert service.active_symbols == ["XAUUSD", "EURUSD"]
+
+
 async def test_multiple_closed_bars_since_last_poll_are_all_emitted(setup, candle_factory):
     # If a poll is delayed, more than one bar of a fine timeframe (e.g. M1)
     # can close in between — every one of them must still be emitted, not

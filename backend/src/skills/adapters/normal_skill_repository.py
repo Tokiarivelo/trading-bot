@@ -10,6 +10,7 @@ from pathlib import Path
 
 import yaml
 
+from src.shared.config.atomic_write import atomic_write_text
 from src.skills.domain.models import NormalSkill, SessionWindow
 
 
@@ -26,13 +27,23 @@ class NormalSkillRepository:
         same as the loader this replaces."""
         return {symbol: self._load(symbol) for symbol in symbols}
 
+    def list_all(self) -> list[NormalSkill]:
+        """Every skill file currently on disk — the live routing table as it
+        actually is, independent of `configs/app.yaml: symbols` (a symbol
+        activated at runtime via `assign()` has a file here immediately,
+        whether or not app.yaml has been re-read since)."""
+        return [self._load_path(path) for path in sorted(self._dir.glob("*.yaml"))]
+
     def get(self, symbol: str) -> NormalSkill | None:
         if not self._path(symbol).exists():
             return None
         return self._load(symbol)
 
     def _load(self, symbol: str) -> NormalSkill:
-        with self._path(symbol).open() as f:
+        return self._load_path(self._path(symbol))
+
+    def _load_path(self, path: Path) -> NormalSkill:
+        with path.open() as f:
             data = yaml.safe_load(f)
         sessions = tuple(
             SessionWindow.parse(s["start"], s["end"]) for s in data.get("sessions", [])
@@ -57,5 +68,4 @@ class NormalSkillRepository:
             ],
         }
         self._dir.mkdir(parents=True, exist_ok=True)
-        with self._path(skill.symbol).open("w") as f:
-            yaml.safe_dump(data, f, sort_keys=False)
+        atomic_write_text(self._path(skill.symbol), yaml.safe_dump(data, sort_keys=False))

@@ -54,6 +54,8 @@ import {
   evaluateCustomCode,
   type EvaluateCustomCodeResponse,
   type CustomSignal,
+  computeIndicator,
+  type ComputeIndicatorResponse,
 } from '@/shared/api/client';
 import { python } from '@codemirror/lang-python';
 import { githubDarkInit } from '@uiw/codemirror-theme-github';
@@ -61,20 +63,76 @@ import CodeMirror from '@uiw/react-codemirror';
 import { subscribeRoom } from '@/shared/api/ws';
 import type { Trading } from '@/features/trading/useTrading';
 import { BacktestStrategyEditor } from '@/features/backtest/BacktestStrategyEditor';
+import { ActivityLogDock } from './ActivityLogDock';
 import { DrawingToolbar } from './DrawingToolbar';
 import { DrawingsList } from './DrawingsList';
 import { IndicatorsDock } from './IndicatorsDock';
-import { atr, bollinger, ema, macd, rsi, sma, vwap } from './indicators';
+import {
+  atr,
+  bollinger,
+  detectPatterns,
+  ema,
+  macd,
+  quasimodoLevels,
+  rsi,
+  sma,
+  swingStructure,
+  vwap,
+} from './indicators';
 
 // Prefix for drawings this component adds itself (from the active strategy's
 // PDF-derived price levels) so they can be told apart from the user's own —
 // never persisted to localStorage, never removed by "Clear All".
 const STRATEGY_DRAWING_PREFIX = 'strategy-derived:';
+// Prefix for drawings rendered from a backtest report's trades (zone
+// rectangles, SL/TP segments) — same "not user data" treatment as
+// STRATEGY_DRAWING_PREFIX, but cleared/rebuilt on its own lifecycle (when
+// the backtest report's trades change) rather than on every candle tick.
+const BACKTEST_DRAWING_PREFIX = 'backtest-derived:';
+// Prefix for the entry->exit oblique line drawn for closed *live* trades
+// (journal-backed) — same "not user data" treatment as BACKTEST_DRAWING_PREFIX,
+// but rebuilt on the live trade-markers poll cadence instead of the backtest
+// report lifecycle.
+const LIVE_TRADE_DRAWING_PREFIX = 'live-trade-derived:';
+// Prefix for daily/period separators drawn on the chart.
+const SEPARATOR_DRAWING_PREFIX = 'separator:';
+
+/** True for any drawing this component added itself (strategy price levels,
+ * backtest zone/SL annotations, live closed-trade lines, or period
+ * separators) — never user data, so excluded from persistence, the
+ * drawings-list panel, and "Clear All". */
+function isProgrammaticDrawingId(id: string): boolean {
+  return (
+    id.startsWith(STRATEGY_DRAWING_PREFIX) ||
+    id.startsWith(BACKTEST_DRAWING_PREFIX) ||
+    id.startsWith(LIVE_TRADE_DRAWING_PREFIX) ||
+    id.startsWith(SEPARATOR_DRAWING_PREFIX)
+  );
+}
 
 /** Manually added indicator (via IndicatorsDock), independent of whatever
  * the active strategy's spec auto-draws — see `recomputeIndicators` below,
  * which plots both together. */
-export type ManualIndicatorType = 'ema' | 'sma' | 'rsi' | 'macd' | 'bollinger' | 'vwap' | 'atr';
+export type ManualIndicatorType =
+  | 'ema'
+  | 'sma'
+  | 'rsi'
+  | 'macd'
+  | 'bollinger'
+  | 'vwap'
+  | 'atr'
+  | 'structure'
+  | 'qml'
+  | 'patterns'
+  | 'custom';
+
+// Shared swing-detection constants for the 'structure'/'qml' indicators,
+// matching the backend vix75 strategy's defaults (atr_period: 14,
+// structure_margin_atr_mult: 0.1) so the chart's reading of "HH"/"QML"
+// agrees with what the strategy itself computes per trade. Swing lookback
+// itself is user-editable per instance (ManualIndicator.period).
+const STRUCTURE_ATR_PERIOD = 14;
+const STRUCTURE_MARGIN_ATR_MULT = 0.1;
 
 export interface ManualIndicator {
   id: string;
@@ -82,6 +140,9 @@ export interface ManualIndicator {
   period: number;
   color: string;
   label: string;
+  /** Set only when type === 'custom': the saved backend indicator's id
+   * (GET /indicators/{id}) whose compute() output this instance plots. */
+  indicatorId?: string;
 }
 
 /** Tool type strings accepted by DrawingManager.setActiveTool() */
@@ -94,7 +155,17 @@ export type DrawingToolType =
   | 'fib-retracement'
   | 'parallel-channel';
 
-const TIMEFRAMES: Candle['timeframe'][] = ['M1', 'M5', 'M15', 'M30', 'H1', 'H4', 'D1', 'W1', 'MN'];
+const TIMEFRAMES: Candle['timeframe'][] = [
+  'M1',
+  'M5',
+  'M15',
+  'M30',
+  'H1',
+  'H4',
+  'D1',
+  'W1',
+  'MN',
+];
 const LAST_TIMEFRAME_KEY = 'chart-last-timeframe';
 const TIMEFRAME_QUERY_KEY = 'timeframe';
 const CANDLE_COUNT = 300;
@@ -124,7 +195,9 @@ function isTimeframe(value: string | null): value is Candle['timeframe'] {
  */
 function loadLastTimeframe(): Candle['timeframe'] {
   try {
-    const urlTimeframe = new URLSearchParams(window.location.search).get(TIMEFRAME_QUERY_KEY);
+    const urlTimeframe = new URLSearchParams(window.location.search).get(
+      TIMEFRAME_QUERY_KEY,
+    );
     if (isTimeframe(urlTimeframe)) return urlTimeframe;
     const stored = localStorage.getItem(LAST_TIMEFRAME_KEY);
     return isTimeframe(stored) ? stored : 'M5';
@@ -160,17 +233,28 @@ function cssVar(name: string): string {
   if (val) return val;
   // Fallbacks in case the document stylesheets haven't parsed yet:
   switch (name) {
-    case "--color-bg":        return "#131722";
-    case "--color-panel":     return "#1e222d";
-    case "--color-line":      return "#2a2e39";
-    case "--color-ink":       return "#d1d4dc";
-    case "--color-ink-muted": return "#5d606b";
-    case "--color-accent":    return "#2962ff";
-    case "--color-ok":        return "#26a69a";
-    case "--color-err":       return "#ef5350";
-    case "--color-buy":       return "#42a5f5";
-    case "--color-sell":      return "#ff9800";
-    default:                  return "";
+    case '--color-bg':
+      return '#131722';
+    case '--color-panel':
+      return '#1e222d';
+    case '--color-line':
+      return '#2a2e39';
+    case '--color-ink':
+      return '#d1d4dc';
+    case '--color-ink-muted':
+      return '#5d606b';
+    case '--color-accent':
+      return '#2962ff';
+    case '--color-ok':
+      return '#26a69a';
+    case '--color-err':
+      return '#ef5350';
+    case '--color-buy':
+      return '#42a5f5';
+    case '--color-sell':
+      return '#ff9800';
+    default:
+      return '';
   }
 }
 
@@ -242,9 +326,15 @@ function loadManualIndicators(symbol: string): ManualIndicator[] {
   }
 }
 
-function saveManualIndicators(symbol: string, indicators: ManualIndicator[]): void {
+function saveManualIndicators(
+  symbol: string,
+  indicators: ManualIndicator[],
+): void {
   try {
-    localStorage.setItem(`chart-indicators:${symbol}`, JSON.stringify(indicators));
+    localStorage.setItem(
+      `chart-indicators:${symbol}`,
+      JSON.stringify(indicators),
+    );
   } catch {
     // localStorage quota or serialisation errors are non-fatal.
   }
@@ -256,7 +346,7 @@ function saveManualIndicators(symbol: string, indicators: ManualIndicator[]): vo
  * auto-plotted price levels. */
 function clearUserDrawings(manager: DrawingManager): void {
   for (const drawing of manager.getAllDrawings()) {
-    if (!drawing.id.startsWith(STRATEGY_DRAWING_PREFIX)) {
+    if (!isProgrammaticDrawingId(drawing.id)) {
       manager.removeDrawing(drawing.id);
     }
   }
@@ -365,6 +455,21 @@ function PositionEditPopover({
   );
 }
 
+/** "YYYY-MM:YYYY-MM" spanning the currently-loaded candle range — the
+ * period format `parse_period` (backend/src/backtest/application/period.py)
+ * expects. Returns null with nothing loaded yet. */
+function derivePeriodParam(candles: Candle[]): string | null {
+  const oldestCandle = candles[0];
+  const newestCandle = candles[candles.length - 1];
+  if (!oldestCandle || !newestCandle) return null;
+  const oldestDate = new Date(oldestCandle.time * 1000);
+  const newestDate = new Date(newestCandle.time * 1000);
+  const pad = (n: number) => String(n).padStart(2, '0');
+  const oldestStr = `${oldestDate.getUTCFullYear()}-${pad(oldestDate.getUTCMonth() + 1)}`;
+  const newestStr = `${newestDate.getUTCFullYear()}-${pad(newestDate.getUTCMonth() + 1)}`;
+  return `${oldestStr}:${newestStr}`;
+}
+
 function toBar(candle: Candle) {
   return {
     time: candle.time as UTCTimestamp,
@@ -420,10 +525,77 @@ function toSeriesMarkers(
   return markers.sort((a, b) => (a.time as number) - (b.time as number));
 }
 
+/** `lightweight-charts-drawing`'s anchors call the chart's native
+ * `timeToCoordinate`, which returns null (silently skipping the draw) unless
+ * the time exactly matches a loaded bar's timestamp. Backtest trades always
+ * open/close exactly on a candle close, so they match already — but a live
+ * trade's open/close time is the broker's real fill timestamp, essentially
+ * never aligned to a bar boundary on any timeframe. Snap it to the nearest
+ * loaded candle so the anchor resolves to a real coordinate. `candles` is
+ * ascending by time (see `candlesRef`). */
+function nearestCandleTime(
+  candles: Candle[],
+  target: number,
+): UTCTimestamp | null {
+  if (candles.length === 0) return null;
+  let lo = 0;
+  let hi = candles.length - 1;
+  if (target <= candles[lo].time) return candles[lo].time as UTCTimestamp;
+  if (target >= candles[hi].time) return candles[hi].time as UTCTimestamp;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (candles[mid].time < target) lo = mid + 1;
+    else hi = mid;
+  }
+  const after = candles[lo];
+  const before = candles[Math.max(0, lo - 1)];
+  return (
+    target - before.time <= after.time - target ? before.time : after.time
+  ) as UTCTimestamp;
+}
+
+/** Entry->exit oblique line for each closed live trade (LIVE_TRADE_DRAWING_PREFIX)
+ * — mirrors the SL/TP-style segments `buildBacktestZoneDrawings` draws for a
+ * backtest report, but sourced from the journal's `TradeMarker[]` poll so a
+ * closed live position is visible on the chart the same way. Open trades
+ * (close_time/close_price still null) are skipped — there's no exit yet. */
+function buildLiveTradeLineDrawings(
+  trades: TradeMarker[],
+  colors: { ok: string; err: string },
+  candles: Candle[],
+): IDrawing[] {
+  const drawings: IDrawing[] = [];
+  for (const t of trades) {
+    if (t.close_time === null || t.close_price === null) continue;
+    const openTime = nearestCandleTime(candles, t.open_time);
+    const closeTime = nearestCandleTime(candles, t.close_time);
+    if (openTime === null || closeTime === null) continue;
+    drawings.push(
+      buildExitLineDrawing(
+        LIVE_TRADE_DRAWING_PREFIX,
+        t.id,
+        openTime,
+        t.open_price,
+        closeTime,
+        t.close_price,
+        t.profit ?? 0,
+        colors,
+      ),
+    );
+  }
+  return drawings;
+}
+
 /** Same entry-arrow/exit-circle rendering as `toSeriesMarkers`, but for a
  * backtest report's closed trades (§F: "test the bot against candle
  * history") — a `BacktestTrade` always has a `close_time`/`close_price`
- * (the run is over), unlike a live `TradeMarker` which is null while open. */
+ * (the run is over), unlike a live `TradeMarker` which is null while open.
+ * Also folds in the trade's `pattern` into the entry marker's text when the
+ * strategy reports one. `t.structure` (the swing window that validated this
+ * trade's zone) is intentionally NOT drawn here — it only covers each
+ * trade's own ~100-bar lookback, so real swings between/around trades were
+ * silently missing; the 'structure' manual indicator draws HH/HL/LH/LL over
+ * the whole chart instead (see `swingStructure()` in indicators.ts). */
 function toBacktestSeriesMarkers(
   trades: BacktestTrade[],
   colors: { ok: string; err: string },
@@ -435,7 +607,9 @@ function toBacktestSeriesMarkers(
       position: t.side === 'buy' ? 'belowBar' : 'aboveBar',
       color: t.side === 'buy' ? colors.ok : colors.err,
       shape: t.side === 'buy' ? 'arrowUp' : 'arrowDown',
-      text: `${t.side.toUpperCase()} ${t.volume}`,
+      text: t.pattern
+        ? `${t.side.toUpperCase()} ${t.volume} · ${t.pattern}`
+        : `${t.side.toUpperCase()} ${t.volume}`,
     });
     markers.push({
       time: t.close_time as UTCTimestamp,
@@ -446,6 +620,109 @@ function toBacktestSeriesMarkers(
     });
   }
   return markers.sort((a, b) => (a.time as number) - (b.time as number));
+}
+
+/** Oblique line from a closed trade's entry (open_time, open_price) to its
+ * exit (close_time, close_price) — a closed position previously only left
+ * behind an entry arrow + a small exit circle, with nothing tying them
+ * together or showing the price path between them. Colored ok/err by
+ * profit, same as the exit marker. */
+function buildExitLineDrawing(
+  idPrefix: string,
+  tradeId: string,
+  openTime: UTCTimestamp,
+  openPrice: number,
+  closeTime: UTCTimestamp,
+  closePrice: number,
+  profit: number,
+  colors: { ok: string; err: string },
+): IDrawing {
+  return new TrendLine(
+    `${idPrefix}exit-line:${tradeId}`,
+    [
+      { time: openTime, price: openPrice },
+      { time: closeTime, price: closePrice },
+    ],
+    { lineColor: profit >= 0 ? colors.ok : colors.err, lineWidth: 2 },
+    { locked: true },
+  );
+}
+
+/** Zone rectangles + SL/TP segments for a backtest report's trades — each
+ * segment is bounded to that trade's own open→close time span (unlike live's
+ * full-chart `buildPriceLines()`), since a report can have many trades on
+ * screen at once. Only strategies that set `Signal.zone`/`sl`/`tp` produce
+ * anything here; trades without one are skipped for that piece. */
+function buildBacktestZoneDrawings(
+  trades: BacktestTrade[],
+  colors: { demand: string; supply: string; sl: string; tp: string },
+): IDrawing[] {
+  const drawings: IDrawing[] = [];
+  trades.forEach((t, i) => {
+    if (t.zone) {
+      const zoneColor =
+        t.zone.kind === 'demand' ? colors.demand : colors.supply;
+      drawings.push(
+        new Rectangle(
+          `${BACKTEST_DRAWING_PREFIX}zone:${i}`,
+          [
+            {
+              time: t.zone.time_start as UTCTimestamp,
+              price: t.zone.price_high,
+            },
+            { time: t.zone.time_end as UTCTimestamp, price: t.zone.price_low },
+          ],
+          {
+            lineColor: zoneColor,
+            lineWidth: 1,
+            fillColor: hexToRgba(zoneColor, 0.15),
+          },
+          { filled: true, locked: true },
+        ),
+      );
+    }
+    const openTime = t.open_time as UTCTimestamp;
+    const closeTime = t.close_time as UTCTimestamp;
+    drawings.push(
+      buildExitLineDrawing(
+        BACKTEST_DRAWING_PREFIX,
+        String(i),
+        openTime,
+        t.open_price,
+        closeTime,
+        t.close_price,
+        t.profit,
+        { ok: colors.tp, err: colors.sl },
+      ),
+    );
+    if (t.sl !== null) {
+      drawings.push(
+        new TrendLine(
+          `${BACKTEST_DRAWING_PREFIX}sl:${i}`,
+          [
+            { time: openTime, price: t.sl },
+            { time: closeTime, price: t.sl },
+          ],
+          { lineColor: colors.sl, lineWidth: 1, lineDash: [4, 4] },
+          { locked: true },
+        ),
+      );
+    }
+    if (t.tp !== null) {
+      drawings.push(
+        new TrendLine(
+          `${BACKTEST_DRAWING_PREFIX}tp:${i}`,
+          [
+            { time: openTime, price: t.tp },
+            { time: closeTime, price: t.tp },
+          ],
+          { lineColor: colors.tp, lineWidth: 1, lineDash: [4, 4] },
+          { locked: true },
+        ),
+      );
+    }
+  });
+  return drawings;
 }
 
 const cmTheme = githubDarkInit({
@@ -461,7 +738,7 @@ const cmTheme = githubDarkInit({
 
 function toCustomSignalsSeriesMarkers(
   signals: CustomSignal[],
-  colors: { ok: string; err: string }
+  colors: { ok: string; err: string },
 ): SeriesMarker<Time>[] {
   const markers: SeriesMarker<Time>[] = [];
   for (const s of signals) {
@@ -544,35 +821,35 @@ function ChartContextMenu({
 
   return (
     <div
-      id="chart-context-menu"
-      className="pointer-events-auto absolute z-30 flex w-40 flex-col rounded border border-line bg-panel py-1 text-xs shadow-xl backdrop-blur-sm bg-opacity-95"
+      id='chart-context-menu'
+      className='pointer-events-auto absolute z-30 flex w-40 flex-col rounded border border-line bg-panel py-1 text-xs shadow-xl backdrop-blur-sm bg-opacity-95'
       style={{ left: `${left}px`, top: `${top}px` }}
       onMouseDown={(e) => e.stopPropagation()}
     >
-      <div className="border-b border-line px-2 py-1 text-[10px] font-semibold text-ink-muted">
+      <div className='border-b border-line px-2 py-1 text-[10px] font-semibold text-ink-muted'>
         Price: {price.toFixed(5)}
       </div>
       <button
-        onClick={() => onSelectOption("buy", "limit")}
-        className="w-full text-left px-2 py-1.5 hover:bg-line text-ok transition-colors font-semibold"
+        onClick={() => onSelectOption('buy', 'limit')}
+        className='w-full text-left px-2 py-1.5 hover:bg-line text-ok transition-colors font-semibold'
       >
         Buy Limit
       </button>
       <button
-        onClick={() => onSelectOption("buy", "stop")}
-        className="w-full text-left px-2 py-1.5 hover:bg-line text-ok transition-colors font-semibold"
+        onClick={() => onSelectOption('buy', 'stop')}
+        className='w-full text-left px-2 py-1.5 hover:bg-line text-ok transition-colors font-semibold'
       >
         Buy Stop
       </button>
       <button
-        onClick={() => onSelectOption("sell", "limit")}
-        className="w-full text-left px-2 py-1.5 hover:bg-line text-err transition-colors font-semibold"
+        onClick={() => onSelectOption('sell', 'limit')}
+        className='w-full text-left px-2 py-1.5 hover:bg-line text-err transition-colors font-semibold'
       >
         Sell Limit
       </button>
       <button
-        onClick={() => onSelectOption("sell", "stop")}
-        className="w-full text-left px-2 py-1.5 hover:bg-line text-err transition-colors font-semibold"
+        onClick={() => onSelectOption('sell', 'stop')}
+        className='w-full text-left px-2 py-1.5 hover:bg-line text-err transition-colors font-semibold'
       >
         Sell Stop
       </button>
@@ -590,7 +867,12 @@ interface ChartOrderPopoverProps {
   containerHeight: number;
   busy: boolean;
   onClose: () => void;
-  onPlace: (volume: number, price: number, sl: number | null, tp: number | null) => Promise<void>;
+  onPlace: (
+    volume: number,
+    price: number,
+    sl: number | null,
+    tp: number | null,
+  ) => Promise<void>;
 }
 
 function ChartOrderPopover({
@@ -606,18 +888,20 @@ function ChartOrderPopover({
   onPlace,
 }: ChartOrderPopoverProps) {
   const [volume, setVolume] = useState(() => {
-    return localStorage.getItem("chart-last-volume") || "0.01";
+    return localStorage.getItem('chart-last-volume') || '0.01';
   });
   const [priceStr, setPriceStr] = useState(initialPrice.toFixed(5));
-  const [sl, setSl] = useState("");
-  const [tp, setTp] = useState("");
+  const [sl, setSl] = useState('');
+  const [tp, setTp] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [localBusy, setLocalBusy] = useState(false);
 
-  const isBuy = side === "buy";
-  const sideColorClass = isBuy ? "text-ok" : "text-err";
-  const buttonBgClass = isBuy ? "bg-ok hover:bg-opacity-90" : "bg-err hover:bg-opacity-90";
-  const buttonTextClass = isBuy ? "text-[#04211e]" : "text-[#2b0808]";
+  const isBuy = side === 'buy';
+  const sideColorClass = isBuy ? 'text-ok' : 'text-err';
+  const buttonBgClass = isBuy
+    ? 'bg-ok hover:bg-opacity-90'
+    : 'bg-err hover:bg-opacity-90';
+  const buttonTextClass = isBuy ? 'text-[#04211e]' : 'text-[#2b0808]';
 
   const popoverWidth = 180;
   const popoverHeight = 220;
@@ -628,21 +912,21 @@ function ChartOrderPopover({
     const v = Number(volume);
     const p = Number(priceStr);
     if (!v || isNaN(v) || v <= 0) {
-      setError("Invalid volume");
+      setError('Invalid volume');
       return;
     }
     if (!p || isNaN(p) || p <= 0) {
-      setError("Invalid price");
+      setError('Invalid price');
       return;
     }
     setError(null);
     setLocalBusy(true);
     try {
-      localStorage.setItem("chart-last-volume", volume);
+      localStorage.setItem('chart-last-volume', volume);
       await onPlace(v, p, numOrNull(sl), numOrNull(tp));
       onClose();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Order placement failed");
+      setError(err instanceof Error ? err.message : 'Order placement failed');
     } finally {
       setLocalBusy(false);
     }
@@ -652,67 +936,69 @@ function ChartOrderPopover({
 
   return (
     <div
-      id="chart-order-popover"
-      className="pointer-events-auto absolute z-30 flex w-44 flex-col gap-2 rounded border border-line bg-panel p-3 text-xs shadow-xl backdrop-blur-sm bg-opacity-95"
+      id='chart-order-popover'
+      className='pointer-events-auto absolute z-30 flex w-44 flex-col gap-2 rounded border border-line bg-panel p-3 text-xs shadow-xl backdrop-blur-sm bg-opacity-95'
       style={{ left: `${left}px`, top: `${top}px` }}
       onMouseDown={(e) => e.stopPropagation()}
     >
-      <div className="flex items-center justify-between border-b border-line pb-1">
+      <div className='flex items-center justify-between border-b border-line pb-1'>
         <span className={`font-bold uppercase ${sideColorClass}`}>
           {side} {orderType}
         </span>
         <button
           onClick={onClose}
-          className="cursor-pointer text-ink-muted hover:text-ink text-sm font-bold"
-          title="Cancel"
+          className='cursor-pointer text-ink-muted hover:text-ink text-sm font-bold'
+          title='Cancel'
           disabled={isBusy}
         >
           ×
         </button>
       </div>
 
-      {error && <div className="text-[10px] text-err leading-tight">{error}</div>}
+      {error && (
+        <div className='text-[10px] text-err leading-tight'>{error}</div>
+      )}
 
-      <div className="flex flex-col gap-1">
-        <label className="text-[10px] text-ink-muted">Volume (lots)</label>
+      <div className='flex flex-col gap-1'>
+        <label className='text-[10px] text-ink-muted'>Volume (lots)</label>
         <input
-          className="rounded border border-line bg-transparent px-1.5 py-0.5"
+          className='rounded border border-line bg-transparent px-1.5 py-0.5'
           value={volume}
           onChange={(e) => setVolume(e.target.value)}
-          placeholder="0.01"
+          placeholder='0.01'
           disabled={isBusy}
         />
       </div>
 
-      <div className="flex flex-col gap-1">
-        <label className="text-[10px] text-ink-muted">Price</label>
+      <div className='flex flex-col gap-1'>
+        <label className='text-[10px] text-ink-muted'>Price</label>
         <input
-          className="rounded border border-line bg-transparent px-1.5 py-0.5"
+          className='rounded border border-line bg-transparent px-1.5 py-0.5'
           value={priceStr}
           onChange={(e) => setPriceStr(e.target.value)}
-          placeholder="Price"
+          placeholder='Price'
           disabled={isBusy}
         />
       </div>
 
-      <div className="flex gap-2">
-        <div className="flex flex-1 flex-col gap-1">
-          <label className="text-[10px] text-ink-muted">SL (opt)</label>
+      <div className='flex gap-2'>
+        <div className='flex flex-1 flex-col gap-1'>
+          <label className='text-[10px] text-ink-muted'>SL (opt)</label>
           <input
-            className="w-full rounded border border-line bg-transparent px-1.5 py-0.5"
+            className='w-full rounded border border-line bg-transparent px-1.5 py-0.5'
             value={sl}
             onChange={(e) => setSl(e.target.value)}
-            placeholder="SL"
+            placeholder='SL'
             disabled={isBusy}
           />
         </div>
-        <div className="flex flex-1 flex-col gap-1">
-          <label className="text-[10px] text-ink-muted">TP (opt)</label>
+        <div className='flex flex-1 flex-col gap-1'>
+          <label className='text-[10px] text-ink-muted'>TP (opt)</label>
           <input
-            className="w-full rounded border border-line bg-transparent px-1.5 py-0.5"
+            className='w-full rounded border border-line bg-transparent px-1.5 py-0.5'
             value={tp}
             onChange={(e) => setTp(e.target.value)}
-            placeholder="TP"
+            placeholder='TP'
             disabled={isBusy}
           />
         </div>
@@ -723,7 +1009,7 @@ function ChartOrderPopover({
         disabled={isBusy}
         className={`mt-1 cursor-pointer rounded py-1 px-2 font-bold transition-opacity ${buttonBgClass} ${buttonTextClass} disabled:opacity-50`}
       >
-        {isBusy ? "Placing..." : "Place Order"}
+        {isBusy ? 'Placing...' : 'Place Order'}
       </button>
     </div>
   );
@@ -758,30 +1044,30 @@ function DrawingContextMenu({
     'extended-line': 'Extended Line',
     'horizontal-line': 'Horizontal Line',
     'vertical-line': 'Vertical Line',
-    'rectangle': 'Rectangle',
+    rectangle: 'Rectangle',
     'fib-retracement': 'Fibonacci Retr.',
     'parallel-channel': 'Parallel Channel',
   };
 
   return (
     <div
-      id="drawing-context-menu"
-      className="pointer-events-auto absolute z-30 flex w-40 flex-col rounded border border-line bg-panel py-1 text-xs shadow-xl backdrop-blur-sm bg-opacity-95"
+      id='drawing-context-menu'
+      className='pointer-events-auto absolute z-30 flex w-40 flex-col rounded border border-line bg-panel py-1 text-xs shadow-xl backdrop-blur-sm bg-opacity-95'
       style={{ left: `${left}px`, top: `${top}px` }}
       onMouseDown={(e) => e.stopPropagation()}
     >
-      <div className="border-b border-line px-2 py-1 text-[10px] font-semibold text-ink-muted">
+      <div className='border-b border-line px-2 py-1 text-[10px] font-semibold text-ink-muted'>
         {typeLabels[drawingType] || drawingType}
       </div>
       <button
         onClick={onSelectEdit}
-        className="w-full text-left px-2 py-1.5 hover:bg-line text-ink transition-colors font-semibold flex items-center gap-1.5 cursor-pointer"
+        className='w-full text-left px-2 py-1.5 hover:bg-line text-ink transition-colors font-semibold flex items-center gap-1.5 cursor-pointer'
       >
         <span>✏️</span> Edit Style
       </button>
       <button
         onClick={onDelete}
-        className="w-full text-left px-2 py-1.5 hover:bg-line text-err transition-colors font-semibold flex items-center gap-1.5 cursor-pointer"
+        className='w-full text-left px-2 py-1.5 hover:bg-line text-err transition-colors font-semibold flex items-center gap-1.5 cursor-pointer'
       >
         <span>🗑️</span> Delete
       </button>
@@ -826,16 +1112,17 @@ function DrawingEditPopover({
   const isVisible = drawing?.options?.visible !== false;
 
   const backup = originalStylesRef.current[drawingId];
-  const activeColor = backup?.lineColor || drawing?.style?.lineColor || '#2962ff';
+  const activeColor =
+    backup?.lineColor || drawing?.style?.lineColor || '#2962ff';
   const activeWidth = backup?.lineWidth || drawing?.style?.lineWidth || 2;
 
   const PRESET_COLORS = [
-    "#2962ff", // Blue
-    "#26a69a", // Green
-    "#ef5350", // Red
-    "#ff9800", // Orange
-    "#9c27b0", // Purple
-    "#ffffff", // White
+    '#2962ff', // Blue
+    '#26a69a', // Green
+    '#ef5350', // Red
+    '#ff9800', // Orange
+    '#9c27b0', // Purple
+    '#ffffff', // White
   ];
 
   const handleLockToggle = () => {
@@ -870,34 +1157,34 @@ function DrawingEditPopover({
     'extended-line': 'Extended Line',
     'horizontal-line': 'Horizontal Line',
     'vertical-line': 'Vertical Line',
-    'rectangle': 'Rectangle',
+    rectangle: 'Rectangle',
     'fib-retracement': 'Fibonacci Retr.',
     'parallel-channel': 'Parallel Channel',
   };
 
   return (
     <div
-      id="drawing-edit-popover"
-      className="pointer-events-auto absolute z-30 flex w-44 flex-col gap-2 rounded border border-line bg-panel p-3 text-xs shadow-xl backdrop-blur-sm bg-opacity-95"
+      id='drawing-edit-popover'
+      className='pointer-events-auto absolute z-30 flex w-44 flex-col gap-2 rounded border border-line bg-panel p-3 text-xs shadow-xl backdrop-blur-sm bg-opacity-95'
       style={{ left: `${left}px`, top: `${top}px` }}
       onMouseDown={(e) => e.stopPropagation()}
     >
-      <div className="flex items-center justify-between border-b border-line pb-1">
-        <span className="font-bold text-ink">
+      <div className='flex items-center justify-between border-b border-line pb-1'>
+        <span className='font-bold text-ink'>
           {typeLabels[drawingType] || 'Edit Drawing'}
         </span>
         <button
           onClick={onClose}
-          className="cursor-pointer text-ink-muted hover:text-ink text-sm font-bold"
-          title="Close"
+          className='cursor-pointer text-ink-muted hover:text-ink text-sm font-bold'
+          title='Close'
         >
           ×
         </button>
       </div>
 
-      <div className="flex flex-col gap-1">
-        <label className="text-[10px] text-ink-muted">Color</label>
-        <div className="flex items-center gap-1 flex-wrap">
+      <div className='flex flex-col gap-1'>
+        <label className='text-[10px] text-ink-muted'>Color</label>
+        <div className='flex items-center gap-1 flex-wrap'>
           {PRESET_COLORS.map((c) => (
             <button
               key={c}
@@ -914,19 +1201,25 @@ function DrawingEditPopover({
             />
           ))}
           <input
-            type="color"
+            type='color'
             value={activeColor}
             onChange={(e) => onColorChange(drawingId, e.target.value)}
-            className="color-picker-input cursor-pointer"
-            style={{ width: 16, height: 16, border: 'none', padding: 0, background: 'none' }}
-            title="Custom color"
+            className='color-picker-input cursor-pointer'
+            style={{
+              width: 16,
+              height: 16,
+              border: 'none',
+              padding: 0,
+              background: 'none',
+            }}
+            title='Custom color'
           />
         </div>
       </div>
 
-      <div className="flex flex-col gap-1">
-        <label className="text-[10px] text-ink-muted">Thickness</label>
-        <div className="flex gap-1">
+      <div className='flex flex-col gap-1'>
+        <label className='text-[10px] text-ink-muted'>Thickness</label>
+        <div className='flex gap-1'>
           {[1, 2, 3, 4].map((w) => (
             <button
               key={w}
@@ -943,7 +1236,7 @@ function DrawingEditPopover({
         </div>
       </div>
 
-      <div className="flex items-center justify-between mt-1 border-t border-line pt-2">
+      <div className='flex items-center justify-between mt-1 border-t border-line pt-2'>
         <button
           onClick={handleVisibleToggle}
           className={`flex items-center gap-1.5 px-2 py-1 rounded border text-[10px] cursor-pointer transition-colors ${
@@ -1003,16 +1296,37 @@ export function ChartPanel({
   const candleSeriesRef = useRef<ISeriesApi<'Candlestick'> | null>(null);
   const volumeSeriesRef = useRef<ISeriesApi<'Histogram'> | null>(null);
   const seriesMarkersRef = useRef<ISeriesMarkersPluginApi<Time> | null>(null);
+  // Separate marker-plugin instance for the manual 'structure'/'qml'
+  // indicators (see recomputeIndicators) — kept independent of
+  // seriesMarkersRef's trade-entry/exit markers so toggling structure on/off
+  // never touches the live/backtest/custom-code marker-setting effects.
+  const structureMarkersRef = useRef<ISeriesMarkersPluginApi<Time> | null>(
+    null,
+  );
   // Drawing tools: one manager instance, alive for the lifetime of the chart.
   const drawingManagerRef = useRef<DrawingManager | null>(null);
   // Series added for the active strategy's PDF-derived indicators (EMA/SMA/
   // RSI/MACD/Bollinger) — replaced wholesale on every recompute.
   const indicatorSeriesRef = useRef<ISeriesApi<'Line' | 'Histogram'>[]>([]);
-  const activeStrategyRef = useRef<StrategyVersionSummary | null>(activeStrategy);
+  const activeStrategyRef = useRef<StrategyVersionSummary | null>(
+    activeStrategy,
+  );
   activeStrategyRef.current = activeStrategy;
   // User-added indicators (via the IndicatorsDock), read fresh inside
   // recomputeIndicators the same way activeStrategyRef is.
   const manualIndicatorsRef = useRef<ManualIndicator[]>([]);
+  // Computed series for each 'custom' (saved, backend-Python) manual
+  // indicator instance, keyed by ManualIndicator.id — populated by
+  // computeCustomIndicatorsRef below (an API round trip, so it can't live
+  // inside the synchronous recomputeIndicators) and read fresh inside
+  // recomputeIndicators the same way customCodeResultRef already is.
+  const customIndicatorResultsRef = useRef<Record<string, ComputeIndicatorResponse>>({});
+  // Reassigned every render (see the assignment below) so it always closes
+  // over the current symbol/timeframe/manualIndicators — called both from
+  // the effect below (add/remove/symbol/timeframe changes) and from the
+  // chart-creation effect's `render()` once the initial history lands, so
+  // an indicator added before candles finish loading still computes.
+  const computeCustomIndicatorsRef = useRef<() => void>(() => {});
   // Set inside the chart-creation effect (has access to `chart`/`manager`),
   // invoked from the history/live-update effect below whenever new candle
   // data lands, and from the activeStrategy-change effect.
@@ -1028,7 +1342,9 @@ export function ChartPanel({
   const loadingMoreRef = useRef(false);
   // Backtest-view state (§F): the report's trades, converted to markers once
   // fetched, and an error flag for the "View on Chart" banner below.
-  const [backtestTrades, setBacktestTrades] = useState<BacktestTrade[] | null>(null);
+  const [backtestTrades, setBacktestTrades] = useState<BacktestTrade[] | null>(
+    null,
+  );
   const [backtestError, setBacktestError] = useState<string | null>(null);
   // Strategy/symbol/period behind the current backtest report — fetched
   // alongside `backtestTrades` (see `resolveInitialCandles` below), and fed
@@ -1054,7 +1370,8 @@ export function ChartPanel({
     }
     return DEFAULT_CUSTOM_CODE_TEMPLATE;
   });
-  const [customCodeResult, setCustomCodeResult] = useState<EvaluateCustomCodeResponse | null>(null);
+  const [customCodeResult, setCustomCodeResult] =
+    useState<EvaluateCustomCodeResponse | null>(null);
   const customCodeResultRef = useRef<EvaluateCustomCodeResponse | null>(null);
   customCodeResultRef.current = customCodeResult;
   const [customCodeBusy, setCustomCodeBusy] = useState(false);
@@ -1073,7 +1390,21 @@ export function ChartPanel({
     } catch {}
   }, [customCodeDraft]);
 
-  const [timeframe, setTimeframe] = useState<Candle['timeframe']>(loadLastTimeframe);
+  const [timeframe, setTimeframe] =
+    useState<Candle['timeframe']>(loadLastTimeframe);
+  const timeframeRef = useRef(timeframe);
+  timeframeRef.current = timeframe;
+
+  const [showSeparators, setShowSeparators] = useState<boolean>(() => {
+    try {
+      const stored = localStorage.getItem('chart-show-separators');
+      return stored ? stored === 'true' : false;
+    } catch {
+      return false;
+    }
+  });
+  const showSeparatorsRef = useRef(showSeparators);
+  showSeparatorsRef.current = showSeparators;
 
   // Keep `?timeframe=` and the last-picked timeframe in sync so a refresh (or
   // a bookmarked/bare link) resumes on the same timeframe — same convention
@@ -1101,11 +1432,12 @@ export function ChartPanel({
   const [showDrawingsList, setShowDrawingsList] = useState(false);
   // Manually added indicators (independent of the active strategy's spec),
   // persisted per-symbol in localStorage — same convention as drawings.
-  const [manualIndicators, setManualIndicators] = useState<ManualIndicator[]>(() =>
-    loadManualIndicators(symbol),
+  const [manualIndicators, setManualIndicators] = useState<ManualIndicator[]>(
+    () => loadManualIndicators(symbol),
   );
   manualIndicatorsRef.current = manualIndicators;
   const [showIndicatorsDock, setShowIndicatorsDock] = useState(false);
+  const [showActivityLogDock, setShowActivityLogDock] = useState(false);
   // How many anchor points the user has placed for the current in-progress
   // drawing (0 = none yet). Displayed as a hint in the header.
   const [pendingAnchorCount, setPendingAnchorCount] = useState(0);
@@ -1172,7 +1504,6 @@ export function ChartPanel({
   const drawingToolRef = useRef(drawingTool);
   drawingToolRef.current = drawingTool;
 
-
   // SL/TP/trigger-price draggable lines (F-manual-trading): dragging updates
   // this only for live visual feedback during the drag — the actual API
   // call fires once on mouseup, via `spec.commit`.
@@ -1238,6 +1569,7 @@ export function ChartPanel({
     candleSeriesRef.current = candleSeries;
     volumeSeriesRef.current = volumeSeries;
     seriesMarkersRef.current = createSeriesMarkers(candleSeries, []);
+    structureMarkersRef.current = createSeriesMarkers(candleSeries, []);
 
     // Attach the drawing manager to the chart and its primary series so the
     // drawing tools can convert pixel ↔ price/time coordinates and register
@@ -1261,10 +1593,16 @@ export function ChartPanel({
       }
       indicatorSeriesRef.current = [];
       for (const drawing of manager.getAllDrawings()) {
-        if (drawing.id.startsWith(STRATEGY_DRAWING_PREFIX)) {
+        if (
+          drawing.id.startsWith(STRATEGY_DRAWING_PREFIX) ||
+          drawing.id.startsWith(SEPARATOR_DRAWING_PREFIX)
+        ) {
           manager.removeDrawing(drawing.id);
         }
       }
+      // Note: BACKTEST_DRAWING_PREFIX drawings are intentionally left alone
+      // here — they're cleared/rebuilt by the backtest-trades effect only,
+      // not on every recomputeIndicators call (candle tick, symbol switch).
 
       const spec = activeStrategyRef.current?.spec;
       const candles = candlesRef.current;
@@ -1315,7 +1653,9 @@ export function ChartPanel({
             if (!rsiScaleReady) {
               // Own band above the volume series's band (top: 0.8, bottom: 0
               // — see the volume series setup above) so the two don't overlap.
-              series.priceScale().applyOptions({ scaleMargins: { top: 0.55, bottom: 0.25 } });
+              series
+                .priceScale()
+                .applyOptions({ scaleMargins: { top: 0.55, bottom: 0.25 } });
               rsiScaleReady = true;
             }
             series.setData(rsi(candles, indicator.period));
@@ -1356,18 +1696,28 @@ export function ChartPanel({
             if (!macdScaleReady) {
               // Own band above RSI's (0.55-0.75) and volume's (0.8-1.0), so
               // all three can coexist without overlapping.
-              macdSeries.priceScale().applyOptions({ scaleMargins: { top: 0.3, bottom: 0.5 } });
+              macdSeries
+                .priceScale()
+                .applyOptions({ scaleMargins: { top: 0.3, bottom: 0.5 } });
               macdScaleReady = true;
             }
             macdSeries.setData(macdLine);
             signalSeries.setData(signalLine);
             histSeries.setData(histogram);
-            indicatorSeriesRef.current.push(macdSeries, signalSeries, histSeries);
+            indicatorSeriesRef.current.push(
+              macdSeries,
+              signalSeries,
+              histSeries,
+            );
             break;
           }
           case 'bollinger': {
             const stdDev = indicator.params.std_dev ?? 2;
-            const { upper, middle, lower } = bollinger(candles, indicator.period, stdDev);
+            const { upper, middle, lower } = bollinger(
+              candles,
+              indicator.period,
+              stdDev,
+            );
             for (const [data, opacity] of [
               [upper, 1],
               [middle, 0.6],
@@ -1397,7 +1747,12 @@ export function ChartPanel({
             level.price,
             anchorTime,
             { lineColor: color, lineWidth: 1, lineDash: [4, 4] },
-            { locked: true, showPrice: true, showLabel: true, labelText: level.label },
+            {
+              locked: true,
+              showPrice: true,
+              showLabel: true,
+              labelText: level.label,
+            },
           );
           manager.addDrawing(drawing);
         });
@@ -1408,6 +1763,7 @@ export function ChartPanel({
       // same panes (`strategy-rsi`/`strategy-macd`) as the strategy-derived
       // ones so oscillators from both sources stack in one place rather than
       // each opening a second pane.
+      const structureMarkers: SeriesMarker<Time>[] = [];
       for (const manualIndicator of manualIndicatorsRef.current) {
         switch (manualIndicator.type) {
           case 'ema': {
@@ -1459,7 +1815,9 @@ export function ChartPanel({
               }),
             });
             if (!rsiScaleReady) {
-              series.priceScale().applyOptions({ scaleMargins: { top: 0.55, bottom: 0.25 } });
+              series
+                .priceScale()
+                .applyOptions({ scaleMargins: { top: 0.55, bottom: 0.25 } });
               rsiScaleReady = true;
             }
             series.setData(rsi(candles, manualIndicator.period));
@@ -1478,7 +1836,9 @@ export function ChartPanel({
             if (!atrScaleReady) {
               // Own band, clear of RSI (0.55-0.75), MACD (0.3-0.5) and
               // volume (0.8-1.0).
-              series.priceScale().applyOptions({ scaleMargins: { top: 0.05, bottom: 0.75 } });
+              series
+                .priceScale()
+                .applyOptions({ scaleMargins: { top: 0.05, bottom: 0.75 } });
               atrScaleReady = true;
             }
             series.setData(atr(candles, manualIndicator.period));
@@ -1486,7 +1846,12 @@ export function ChartPanel({
             break;
           }
           case 'macd': {
-            const { macdLine, signalLine, histogram } = macd(candles, 12, 26, 9);
+            const { macdLine, signalLine, histogram } = macd(
+              candles,
+              12,
+              26,
+              9,
+            );
             const macdSeries = chart.addSeries(LineSeries, {
               color: manualIndicator.color,
               lineWidth: 1,
@@ -1510,17 +1875,27 @@ export function ChartPanel({
               title: `${manualIndicator.label} hist`,
             });
             if (!macdScaleReady) {
-              macdSeries.priceScale().applyOptions({ scaleMargins: { top: 0.3, bottom: 0.5 } });
+              macdSeries
+                .priceScale()
+                .applyOptions({ scaleMargins: { top: 0.3, bottom: 0.5 } });
               macdScaleReady = true;
             }
             macdSeries.setData(macdLine);
             signalSeries.setData(signalLine);
             histSeries.setData(histogram);
-            indicatorSeriesRef.current.push(macdSeries, signalSeries, histSeries);
+            indicatorSeriesRef.current.push(
+              macdSeries,
+              signalSeries,
+              histSeries,
+            );
             break;
           }
           case 'bollinger': {
-            const { upper, middle, lower } = bollinger(candles, manualIndicator.period, 2);
+            const { upper, middle, lower } = bollinger(
+              candles,
+              manualIndicator.period,
+              2,
+            );
             for (const [data, opacity] of [
               [upper, 1],
               [middle, 0.6],
@@ -1538,14 +1913,76 @@ export function ChartPanel({
             }
             break;
           }
+          case 'structure': {
+            const points = swingStructure(
+              candles,
+              manualIndicator.period,
+              STRUCTURE_ATR_PERIOD,
+              STRUCTURE_MARGIN_ATR_MULT,
+            );
+            for (const p of points) {
+              structureMarkers.push({
+                time: p.time,
+                position:
+                  p.label === 'HH' || p.label === 'LH'
+                    ? 'aboveBar'
+                    : 'belowBar',
+                color: manualIndicator.color,
+                shape: 'circle',
+                size: 0,
+                text: p.label,
+              });
+            }
+            break;
+          }
+          case 'qml': {
+            const points = swingStructure(
+              candles,
+              manualIndicator.period,
+              STRUCTURE_ATR_PERIOD,
+              STRUCTURE_MARGIN_ATR_MULT,
+            );
+            for (const zone of quasimodoLevels(points)) {
+              structureMarkers.push({
+                time: zone.time,
+                position: 'atPriceMiddle',
+                price: zone.price,
+                color: manualIndicator.color,
+                shape: zone.kind === 'QML' ? 'arrowDown' : 'arrowUp',
+                text: zone.kind,
+              });
+            }
+            break;
+          }
+          case 'patterns': {
+            for (const p of detectPatterns(candles)) {
+              structureMarkers.push({
+                time: p.time,
+                position: p.label.startsWith('bullish')
+                  ? 'belowBar'
+                  : 'aboveBar',
+                color: manualIndicator.color,
+                shape: 'circle',
+                size: 0,
+                text: p.label,
+              });
+            }
+            break;
+          }
         }
       }
-
       // If we have custom code results, plot their custom indicators
       if (customCodeResultRef.current) {
-        const { indicators, candles: customCandles } = customCodeResultRef.current;
+        const { indicators, candles: customCandles } =
+          customCodeResultRef.current;
         let colorIdx = 0;
-        const CUSTOM_INDICATOR_COLORS = ['#00f0ff', '#e0aaff', '#ffd166', '#06d6a0', '#ff70a6'];
+        const CUSTOM_INDICATOR_COLORS = [
+          '#00f0ff',
+          '#e0aaff',
+          '#ffd166',
+          '#06d6a0',
+          '#ff70a6',
+        ];
         for (const [name, values] of Object.entries(indicators)) {
           const lineData = [];
           for (let i = 0; i < customCandles.length; i++) {
@@ -1559,7 +1996,10 @@ export function ChartPanel({
           }
           if (lineData.length > 0) {
             const series = chart.addSeries(LineSeries, {
-              color: CUSTOM_INDICATOR_COLORS[colorIdx % CUSTOM_INDICATOR_COLORS.length],
+              color:
+                CUSTOM_INDICATOR_COLORS[
+                  colorIdx % CUSTOM_INDICATOR_COLORS.length
+                ],
               lineWidth: 2,
               priceLineVisible: false,
               lastValueVisible: false,
@@ -1568,6 +2008,147 @@ export function ChartPanel({
             series.setData(lineData);
             indicatorSeriesRef.current.push(series);
             colorIdx++;
+          }
+        }
+      }
+
+      // Saved custom (backend-Python) indicators added via IndicatorsDock —
+      // computed asynchronously by the computeCustomIndicators effect below
+      // and cached per manual-indicator instance id in
+      // customIndicatorResultsRef, so this stays a synchronous read like
+      // every other case here. Silently skipped if the result hasn't
+      // arrived yet or carries an error (surfaced in IndicatorsDock instead
+      // of breaking the rest of the chart).
+      //
+      // A series name ending in `_marker_up`/`_marker_down`/`_marker` is a
+      // reserved convention (see the PoB pattern/confirmation indicators)
+      // for discrete one-off events — a candle pattern, a swing point, an
+      // entry retest — rather than a continuous line. Values for those bars
+      // would otherwise get silently connected by a straight line across
+      // whatever gap separates two occurrences (LineSeries has no concept
+      // of "these two points aren't related"), so they're routed through
+      // the same `structureMarkers`/`structureMarkersRef` plugin the
+      // built-in structure/QML/pattern indicators already use instead.
+      for (const manualIndicator of manualIndicatorsRef.current) {
+        if (manualIndicator.type !== 'custom' || !manualIndicator.indicatorId) continue;
+        const result = customIndicatorResultsRef.current[manualIndicator.id];
+        if (!result || result.error) continue;
+        let colorIdx = 0;
+        for (const [seriesName, values] of Object.entries(result.series)) {
+          const markerKind = seriesName.endsWith('_marker_up')
+            ? 'up'
+            : seriesName.endsWith('_marker_down')
+              ? 'down'
+              : seriesName.endsWith('_marker')
+                ? 'neutral'
+                : null;
+
+          if (markerKind) {
+            const label = seriesName
+              .replace(/_marker(_up|_down)?$/, '')
+              .replace(/_/g, ' ');
+            for (let i = 0; i < result.times.length; i++) {
+              const val = values[i];
+              if (val === null || val === undefined) continue;
+              structureMarkers.push({
+                time: result.times[i] as UTCTimestamp,
+                position:
+                  markerKind === 'up'
+                    ? 'belowBar'
+                    : markerKind === 'down'
+                      ? 'aboveBar'
+                      : 'atPriceMiddle',
+                price: markerKind === 'neutral' ? val : undefined,
+                color:
+                  markerKind === 'up'
+                    ? cssVar('--color-ok')
+                    : markerKind === 'down'
+                      ? cssVar('--color-err')
+                      : manualIndicator.color,
+                shape:
+                  markerKind === 'up'
+                    ? 'arrowUp'
+                    : markerKind === 'down'
+                      ? 'arrowDown'
+                      : 'circle',
+                size: markerKind === 'neutral' ? 0 : undefined,
+                text: label,
+              } as SeriesMarker<Time>);
+            }
+            continue;
+          }
+
+          const lineData: { time: UTCTimestamp; value: number }[] = [];
+          for (let i = 0; i < result.times.length; i++) {
+            const val = values[i];
+            if (val !== null && val !== undefined) {
+              lineData.push({ time: result.times[i] as UTCTimestamp, value: val });
+            }
+          }
+          if (lineData.length === 0) continue;
+          const series = chart.addSeries(LineSeries, {
+            color: hexToRgba(manualIndicator.color, colorIdx === 0 ? 1 : 0.6),
+            lineWidth: 1,
+            priceLineVisible: false,
+            lastValueVisible: false,
+            title: `${manualIndicator.label} ${seriesName}`,
+          });
+          series.setData(lineData);
+          indicatorSeriesRef.current.push(series);
+          colorIdx++;
+        }
+      }
+      structureMarkersRef.current?.setMarkers(
+        structureMarkers.sort(
+          (a, b) => (a.time as number) - (b.time as number),
+        ),
+      );
+
+      // Draw day/period separators if enabled
+      if (showSeparatorsRef.current) {
+        const tf = timeframeRef.current;
+        for (let i = 1; i < candles.length; i++) {
+          const prev = candles[i - 1];
+          const curr = candles[i];
+
+          let isNew = false;
+          const prevDate = new Date(prev.time * 1000);
+          const currDate = new Date(curr.time * 1000);
+
+          if (tf === 'W1') {
+            isNew =
+              prevDate.getUTCMonth() !== currDate.getUTCMonth() ||
+              prevDate.getUTCFullYear() !== currDate.getUTCFullYear();
+          } else if (tf === 'MN') {
+            isNew = prevDate.getUTCFullYear() !== currDate.getUTCFullYear();
+          } else if (tf === 'D1') {
+            const prevWeek = Math.floor((prev.time / 86400 + 3) / 7);
+            const currWeek = Math.floor((curr.time / 86400 + 3) / 7);
+            isNew = prevWeek !== currWeek;
+          } else {
+            // M1, M5, M15, M30, H1, H4
+            isNew =
+              prevDate.getUTCDate() !== currDate.getUTCDate() ||
+              prevDate.getUTCMonth() !== currDate.getUTCMonth() ||
+              prevDate.getUTCFullYear() !== currDate.getUTCFullYear();
+          }
+
+          if (isNew) {
+            const t = curr.time as UTCTimestamp;
+            const drawing = VerticalLine.create(
+              `${SEPARATOR_DRAWING_PREFIX}${symbolRef.current}:${i}`,
+              t,
+              curr.open,
+              {
+                lineColor: hexToRgba(cssVar('--color-ink'), 0.5),
+                lineWidth: 1,
+                lineDash: [4, 4],
+              },
+              {
+                locked: true,
+              }
+            );
+            manager.addDrawing(drawing);
           }
         }
       }
@@ -1611,7 +2192,7 @@ export function ChartPanel({
     // the persisted localStorage snapshot and the drawings-list panel.
     const syncList = () =>
       setDrawingsList(
-        manager.getAllDrawings().filter((d) => !d.id.startsWith(STRATEGY_DRAWING_PREFIX)),
+        manager.getAllDrawings().filter((d) => !isProgrammaticDrawingId(d.id)),
       );
     const saveAndSync = () => {
       if (isSwitchingSymbolRef.current) {
@@ -1628,7 +2209,7 @@ export function ChartPanel({
 
         const data = manager
           .exportDrawings()
-          .filter((d) => !d.id.startsWith(STRATEGY_DRAWING_PREFIX));
+          .filter((d) => !isProgrammaticDrawingId(d.id));
         localStorage.setItem(
           `chart-drawings:${symbolRef.current}`,
           JSON.stringify(data),
@@ -1709,14 +2290,14 @@ export function ChartPanel({
         x: e.clientX - rect.left,
         y: e.clientY - rect.top,
       };
-      
+
       const anchorIndex = manager.hitTestAnchor(point);
       if (anchorIndex !== null) {
         isDraggingAnchor = true;
         container.style.cursor = 'grabbing';
         // Disable chart panning and zooming so the chart doesn't move during drag.
         chart.applyOptions({ handleScroll: false, handleScale: false });
-        
+
         // Listen to mouseup on window to re-enable chart scrolling/scaling.
         const handleDragEnd = () => {
           isDraggingAnchor = false;
@@ -1737,10 +2318,12 @@ export function ChartPanel({
 
         dragStartPoint = { x: e.clientX, y: e.clientY };
         dragDrawing = hoveredDrawing;
-        
+
         const viewport = hoveredDrawing.getViewport();
         if (viewport) {
-          dragInitialPixels = hoveredDrawing.anchors.map(a => (hoveredDrawing as any).anchorToPixel(a, viewport));
+          dragInitialPixels = hoveredDrawing.anchors.map((a) =>
+            (hoveredDrawing as any).anchorToPixel(a, viewport),
+          );
         }
 
         container.style.cursor = 'grabbing';
@@ -1756,22 +2339,28 @@ export function ChartPanel({
             const pixel = dragInitialPixels[idx];
             if (!pixel) return anchor;
             const newPixel = { x: pixel.x + dx, y: pixel.y + dy };
-            const newAnchor = (dragDrawing as any).pixelToAnchor(newPixel, viewport);
+            const newAnchor = (dragDrawing as any).pixelToAnchor(
+              newPixel,
+              viewport,
+            );
             return newAnchor || anchor;
           });
 
           dragDrawing.anchors = newAnchors;
-          (manager as any).emit('drawing:updated', { drawingId: dragDrawing.id, drawing: dragDrawing });
+          (manager as any).emit('drawing:updated', {
+            drawingId: dragDrawing.id,
+            drawing: dragDrawing,
+          });
         };
 
         const handleBodyDragEnd = () => {
           window.removeEventListener('mousemove', handleBodyDrag);
           window.removeEventListener('mouseup', handleBodyDragEnd);
-          
+
           dragStartPoint = null;
           dragDrawing = null;
           dragInitialPixels = [];
-          
+
           container.style.cursor = '';
           chart.applyOptions({ handleScroll: true, handleScale: true });
           saveAndSync();
@@ -1781,7 +2370,9 @@ export function ChartPanel({
         window.addEventListener('mouseup', handleBodyDragEnd);
       }
     };
-    container.addEventListener('mousedown', handleDrawingDragStart, { capture: true });
+    container.addEventListener('mousedown', handleDrawingDragStart, {
+      capture: true,
+    });
 
     const handleContextMenu = (e: MouseEvent) => {
       if (drawingToolRef.current) {
@@ -1822,7 +2413,7 @@ export function ChartPanel({
       if (price === null) return;
 
       e.preventDefault();
-      
+
       setOrderPopover(null);
       setDrawingContextMenu(null);
       setDrawingEditPopover(null);
@@ -1871,13 +2462,19 @@ export function ChartPanel({
       // Default: let chart cursor rule
       container.style.cursor = '';
     };
-    container.addEventListener('mousemove', handleMouseMoveCursor, { capture: true });
+    container.addEventListener('mousemove', handleMouseMoveCursor, {
+      capture: true,
+    });
 
     return () => {
       observer.disconnect();
       container.removeEventListener('contextmenu', handleContextMenu);
-      container.removeEventListener('mousemove', handleMouseMoveCursor, { capture: true });
-      container.removeEventListener('mousedown', handleDrawingDragStart, { capture: true });
+      container.removeEventListener('mousemove', handleMouseMoveCursor, {
+        capture: true,
+      });
+      container.removeEventListener('mousedown', handleDrawingDragStart, {
+        capture: true,
+      });
       unsubAdd();
       unsubRemove();
       unsubClear();
@@ -1885,6 +2482,7 @@ export function ChartPanel({
       unsubSelect();
       unsubDeselect();
       seriesMarkersRef.current?.detach();
+      structureMarkersRef.current?.detach();
       manager.detach();
       drawingManagerRef.current = null;
       chart.remove();
@@ -1892,6 +2490,7 @@ export function ChartPanel({
       candleSeriesRef.current = null;
       volumeSeriesRef.current = null;
       seriesMarkersRef.current = null;
+      structureMarkersRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -1928,6 +2527,7 @@ export function ChartPanel({
       const downColor = cssVar('--color-err');
       candleSeriesRef.current?.setData(candlesRef.current.map(toBar));
       recomputeIndicatorsRef.current();
+      computeCustomIndicatorsRef.current();
       volumeSeriesRef.current?.setData(
         candlesRef.current.map((c) => toVolumeBar(c, upColor, downColor)),
       );
@@ -2010,9 +2610,19 @@ export function ChartPanel({
       const report = await getBacktestReport(backtestReportId);
       if (cancelled) return [];
       setBacktestTrades(report.trades);
-      setBacktestMeta({ strategy: report.strategy, symbol: report.symbol, period: report.period });
-      const lastClose = report.trades.reduce((max, t) => Math.max(max, t.close_time), 0);
-      const anchor = lastClose > 0 ? lastClose + 2 * TIMEFRAME_SECONDS[timeframe] : undefined;
+      setBacktestMeta({
+        strategy: report.strategy,
+        symbol: report.symbol,
+        period: report.period,
+      });
+      const lastClose = report.trades.reduce(
+        (max, t) => Math.max(max, t.close_time),
+        0,
+      );
+      const anchor =
+        lastClose > 0
+          ? lastClose + 2 * TIMEFRAME_SECONDS[timeframe]
+          : undefined;
       return getCandles(symbol, timeframe, CANDLE_COUNT, anchor);
     }
 
@@ -2038,8 +2648,13 @@ export function ChartPanel({
       })
       .catch(() => {
         if (cancelled) return;
-        setError(backtestReportId ? 'failed to load backtest report' : 'failed to load candles');
-        if (backtestReportId) setBacktestError('failed to load backtest report');
+        setError(
+          backtestReportId
+            ? 'failed to load backtest report'
+            : 'failed to load candles',
+        );
+        if (backtestReportId)
+          setBacktestError('failed to load backtest report');
       });
 
     // Live candle updates only make sense against "now" — in backtest view
@@ -2049,7 +2664,9 @@ export function ChartPanel({
       return () => {
         cancelled = true;
         historyLoadedRef.current = false;
-        chart?.timeScale().unsubscribeVisibleLogicalRangeChange(onVisibleRangeChange);
+        chart
+          ?.timeScale()
+          .unsubscribeVisibleLogicalRangeChange(onVisibleRangeChange);
       };
     }
 
@@ -2066,12 +2683,18 @@ export function ChartPanel({
         if (!historyLoadedRef.current) return;
         const { candle } = message;
         const bars = candlesRef.current;
-        const lastTime = bars.length > 0 ? bars[bars.length - 1].time : undefined;
+        const lastTime =
+          bars.length > 0 ? bars[bars.length - 1].time : undefined;
         if (lastTime !== undefined && candle.time < lastTime) {
           // Stale/out-of-order message (e.g. stream jitter) — pushing this
           // would break the ascending-time invariant every indicator and
           // lightweight-charts itself relies on, so drop it instead.
-          console.warn('chart: dropped out-of-order candle update', candle.time, 'last', lastTime);
+          console.warn(
+            'chart: dropped out-of-order candle update',
+            candle.time,
+            'last',
+            lastTime,
+          );
           return;
         }
         if (lastTime === candle.time) {
@@ -2108,11 +2731,70 @@ export function ChartPanel({
   }, [symbol, timeframe, backtestReportId]);
 
   // Recompute overlays when the active strategy changes (activated,
-  // deactivated, or a different one picked up for this symbol) or the user
-  // adds/removes a manual indicator — without waiting for the next candle.
+  // deactivated, or a different one picked up for this symbol), when the user
+  // adds/removes a manual indicator, or when the separators toggle changes —
+  // without waiting for the next candle.
   useEffect(() => {
     recomputeIndicatorsRef.current();
-  }, [activeStrategy, manualIndicators]);
+  }, [activeStrategy, manualIndicators, showSeparators]);
+
+  // Saved custom (backend-Python) indicators need an API round trip to
+  // compute, unlike every other manual-indicator type, so they can't live
+  // inside the synchronous recomputeIndicators above. Reassigned every
+  // render so `computeCustomIndicatorsRef.current()` (called below, and
+  // from the chart-creation effect's `render()`) always sees the latest
+  // symbol/timeframe/manualIndicators.
+  computeCustomIndicatorsRef.current = () => {
+    const customInstances = manualIndicators.filter(
+      (ind): ind is ManualIndicator & { indicatorId: string } =>
+        ind.type === 'custom' && !!ind.indicatorId,
+    );
+    if (customInstances.length === 0) return;
+    const periodParam = derivePeriodParam(candlesRef.current);
+    if (!periodParam) return;
+
+    Promise.all(
+      customInstances.map(async (ind) => {
+        try {
+          const result = await computeIndicator(ind.indicatorId, {
+            symbol,
+            timeframe,
+            period: periodParam,
+          });
+          return [ind.id, result] as const;
+        } catch (err) {
+          return [
+            ind.id,
+            {
+              times: [],
+              series: {},
+              error: err instanceof Error ? err.message : 'compute failed',
+            } as ComputeIndicatorResponse,
+          ] as const;
+        }
+      }),
+    ).then((entries) => {
+      const presentIds = new Set(customInstances.map((ind) => ind.id));
+      const next: Record<string, ComputeIndicatorResponse> = {};
+      for (const [id, result] of entries) next[id] = result;
+      // Keep results for instances still present that weren't in this
+      // batch (shouldn't happen given the filter above, but avoids
+      // silently dropping data if this is ever narrowed later).
+      for (const [id, result] of Object.entries(customIndicatorResultsRef.current)) {
+        if (presentIds.has(id) && !(id in next)) next[id] = result;
+      }
+      customIndicatorResultsRef.current = next;
+      recomputeIndicatorsRef.current();
+    });
+  };
+
+  // Add/remove a custom indicator, or switch symbol/timeframe, without
+  // waiting for the next candle. The initial-history-load case (candles not
+  // loaded yet on mount) is covered separately by `render()` inside the
+  // chart-creation effect below.
+  useEffect(() => {
+    computeCustomIndicatorsRef.current();
+  }, [manualIndicators, symbol, timeframe]);
 
   // When the symbol changes, save the current symbol's drawings and load the
   // new symbol's drawings. The chart-creation effect only handles the initial
@@ -2256,19 +2938,32 @@ export function ChartPanel({
     };
   }, [symbol]);
 
-  // Poll trade markers (F7): entry arrows + exit circles from the journal.
-  // Skipped in backtest view — those markers come from the report's own
-  // trades (set below) instead of the live journal.
+  // Poll trade markers (F7): entry arrows + exit circles from the journal,
+  // plus an entry->exit oblique line (LIVE_TRADE_DRAWING_PREFIX) for each
+  // closed trade so a closed position stays visible on the chart instead of
+  // just leaving behind a small circle. Skipped in backtest view — those
+  // markers/lines come from the report's own trades (set below) instead of
+  // the live journal.
   useEffect(() => {
     if (backtestReportId) return;
     const colors = {
       ok: cssVar('--color-ok'),
       err: cssVar('--color-err'),
     };
+    const clearLiveTradeLines = () => {
+      const manager = drawingManagerRef.current;
+      if (!manager) return;
+      for (const drawing of manager.getAllDrawings()) {
+        if (drawing.id.startsWith(LIVE_TRADE_DRAWING_PREFIX)) {
+          manager.removeDrawing(drawing.id);
+        }
+      }
+    };
     if (customCodeResult) {
       seriesMarkersRef.current?.setMarkers(
-        toCustomSignalsSeriesMarkers(customCodeResult.signals, colors)
+        toCustomSignalsSeriesMarkers(customCodeResult.signals, colors),
       );
+      clearLiveTradeLines();
       return;
     }
     let cancelled = false;
@@ -2278,9 +2973,20 @@ export function ChartPanel({
         .then((trades) => {
           if (cancelled) return;
           seriesMarkersRef.current?.setMarkers(toSeriesMarkers(trades, colors));
+          clearLiveTradeLines();
+          const manager = drawingManagerRef.current;
+          if (manager) {
+            for (const drawing of buildLiveTradeLineDrawings(
+              trades,
+              colors,
+              candlesRef.current,
+            )) {
+              manager.addDrawing(drawing);
+            }
+          }
         })
         .catch(() => {
-          // Journal unreachable — leave whatever markers are already drawn.
+          // Journal unreachable — leave whatever markers/lines are already drawn.
         });
     };
 
@@ -2293,16 +2999,49 @@ export function ChartPanel({
   }, [symbol, backtestReportId, customCodeResult]);
 
   // Render the backtest report's trades as markers once fetched (see the
-  // history-loading effect above, which sets `backtestTrades`).
+  // history-loading effect above, which sets `backtestTrades`), plus each
+  // trade's zone rectangle and SL/TP segments (BACKTEST_DRAWING_PREFIX) —
+  // cleared and rebuilt here on every report change rather than reusing
+  // recomputeIndicators's cadence, since this only needs to run when the
+  // report's trades actually change, not on every live candle tick.
   useEffect(() => {
+    const manager = drawingManagerRef.current;
+    if (manager) {
+      for (const drawing of manager.getAllDrawings()) {
+        if (
+          drawing.id.startsWith(BACKTEST_DRAWING_PREFIX) ||
+          // Also clear any live-view closed-trade lines left over from
+          // before switching into the backtest report.
+          drawing.id.startsWith(LIVE_TRADE_DRAWING_PREFIX)
+        ) {
+          manager.removeDrawing(drawing.id);
+        }
+      }
+    }
     if (!backtestReportId || backtestTrades === null) return;
     const colors = { ok: cssVar('--color-ok'), err: cssVar('--color-err') };
     if (customCodeResult) {
       seriesMarkersRef.current?.setMarkers(
-        toCustomSignalsSeriesMarkers(customCodeResult.signals, colors)
+        toCustomSignalsSeriesMarkers(customCodeResult.signals, colors),
       );
-    } else {
-      seriesMarkersRef.current?.setMarkers(toBacktestSeriesMarkers(backtestTrades, colors));
+      return;
+    }
+    seriesMarkersRef.current?.setMarkers(
+      toBacktestSeriesMarkers(backtestTrades, colors),
+    );
+    if (manager) {
+      const zoneColors = {
+        demand: cssVar('--color-buy'),
+        supply: cssVar('--color-sell'),
+        sl: cssVar('--color-err'),
+        tp: cssVar('--color-ok'),
+      };
+      for (const drawing of buildBacktestZoneDrawings(
+        backtestTrades,
+        zoneColors,
+      )) {
+        manager.addDrawing(drawing);
+      }
     }
   }, [backtestReportId, backtestTrades, customCodeResult]);
 
@@ -2437,7 +3176,13 @@ export function ChartPanel({
 
   // Close context menu / popover on click outside
   useEffect(() => {
-    if (!contextMenu && !orderPopover && !drawingContextMenu && !drawingEditPopover) return;
+    if (
+      !contextMenu &&
+      !orderPopover &&
+      !drawingContextMenu &&
+      !drawingEditPopover
+    )
+      return;
     const handleMouseDownOutside = (e: MouseEvent) => {
       const menuEl = document.getElementById('chart-context-menu');
       const popoverEl = document.getElementById('chart-order-popover');
@@ -2457,12 +3202,13 @@ export function ChartPanel({
       setDrawingEditPopover(null);
     };
     window.addEventListener('mousedown', handleMouseDownOutside);
-    return () => window.removeEventListener('mousedown', handleMouseDownOutside);
+    return () =>
+      window.removeEventListener('mousedown', handleMouseDownOutside);
   }, [contextMenu, orderPopover, drawingContextMenu, drawingEditPopover]);
 
   const handleColorChange = (newColor: string) => {
     setActiveColor(newColor);
-    
+
     // If a drawing is currently selected, update its style immediately
     const manager = drawingManagerRef.current;
     if (manager) {
@@ -2471,7 +3217,10 @@ export function ChartPanel({
         if (originalStylesRef.current[selected.id]) {
           originalStylesRef.current[selected.id].lineColor = newColor;
           originalStylesRef.current[selected.id].labelColor = newColor;
-          originalStylesRef.current[selected.id].fillColor = hexToRgba(newColor, 0.15);
+          originalStylesRef.current[selected.id].fillColor = hexToRgba(
+            newColor,
+            0.15,
+          );
         }
 
         selected.updateStyle({
@@ -2480,7 +3229,7 @@ export function ChartPanel({
           fillColor: hexToRgba(newColor, 0.25),
           lineWidth: 4,
         });
-        
+
         saveAndSyncRef.current();
       }
     }
@@ -2509,13 +3258,13 @@ export function ChartPanel({
             fillColor: hexToRgba(newColor, 0.15),
           });
         }
-        
+
         // If the modified drawing is the currently selected one, sync activeColor
         const selected = manager.getSelectedDrawing();
         if (selected && selected.id === id) {
           setActiveColor(newColor);
         }
-        
+
         saveAndSyncRef.current();
       }
     }
@@ -2671,30 +3420,22 @@ export function ChartPanel({
       return next;
     });
   }
-  async function runCustomCode() {
-    if (!customCodeDraft) return;
+  async function runCustomCode(codeOverride?: string) {
+    const code = codeOverride ?? customCodeDraft;
+    if (!code) return;
     setCustomCodeBusy(true);
     setCustomCodeError(null);
     try {
-      const oldestCandle = candlesRef.current[0];
-      const newestCandle = candlesRef.current[candlesRef.current.length - 1];
-      if (!oldestCandle || !newestCandle) {
-        throw new Error("No historical candles loaded on the chart yet.");
+      const periodParam = derivePeriodParam(candlesRef.current);
+      if (!periodParam) {
+        throw new Error('No historical candles loaded on the chart yet.');
       }
 
-      const oldestDate = new Date(oldestCandle.time * 1000);
-      const newestDate = new Date(newestCandle.time * 1000);
-
-      const pad = (n: number) => String(n).padStart(2, '0');
-      const oldestStr = `${oldestDate.getUTCFullYear()}-${pad(oldestDate.getUTCMonth() + 1)}`;
-      const newestStr = `${newestDate.getUTCFullYear()}-${pad(newestDate.getUTCMonth() + 1)}`;
-      const periodParam = `${oldestStr}:${newestStr}`;
-
       const res = await evaluateCustomCode({
-        code: customCodeDraft,
+        code,
         symbol,
         timeframe,
-        period: periodParam
+        period: periodParam,
       });
 
       if (res.error) {
@@ -2705,7 +3446,9 @@ export function ChartPanel({
         recomputeIndicatorsRef.current();
       }
     } catch (err) {
-      setCustomCodeError(err instanceof Error ? err.message : "Execution failed");
+      setCustomCodeError(
+        err instanceof Error ? err.message : 'Execution failed',
+      );
     } finally {
       setCustomCodeBusy(false);
     }
@@ -2787,7 +3530,38 @@ export function ChartPanel({
           onClick={() => setShowIndicatorsDock((v) => !v)}
           title='Add / remove indicators'
         >
-          Indicators {manualIndicators.length > 0 && `(${manualIndicators.length})`}
+          Indicators{' '}
+          {manualIndicators.length > 0 && `(${manualIndicators.length})`}
+        </button>
+        {/* Activity log dock toggle — signals/vetoes/fills for this symbol */}
+        <button
+          className={`cursor-pointer rounded border px-2 py-0.5 text-xs ${
+            showActivityLogDock
+              ? 'border-accent text-accent'
+              : 'border-line text-ink-muted'
+          }`}
+          onClick={() => setShowActivityLogDock((v) => !v)}
+          title='See what the bot is doing on this symbol and why'
+        >
+          Activity log
+        </button>
+        {/* Period separators toggle */}
+        <button
+          className={`cursor-pointer rounded border px-2 py-0.5 text-xs ${
+            showSeparators
+              ? 'border-accent text-accent'
+              : 'border-line text-ink-muted'
+          }`}
+          onClick={() => {
+            const next = !showSeparators;
+            setShowSeparators(next);
+            try {
+              localStorage.setItem('chart-show-separators', String(next));
+            } catch {}
+          }}
+          title='Show / hide day/period separators'
+        >
+          Separators
         </button>
         <span className='ml-auto text-xs text-ink-muted'>
           {drawingTool && pendingAnchorCount > 0 && (
@@ -2807,7 +3581,8 @@ export function ChartPanel({
         <div className='flex items-center gap-2 border-b border-line bg-accent/10 px-4 py-1 text-xs text-accent'>
           <span>
             Backtest view
-            {backtestTrades !== null && ` — ${backtestTrades.length} trade${backtestTrades.length === 1 ? '' : 's'}`}
+            {backtestTrades !== null &&
+              ` — ${backtestTrades.length} trade${backtestTrades.length === 1 ? '' : 's'}`}
             {backtestError && ` — ${backtestError}`}
           </span>
           <Link
@@ -2845,21 +3620,31 @@ export function ChartPanel({
           activeStrategy.spec.chart_notes.length > 0) && (
           <div className='flex flex-col border-b border-line text-xs'>
             <div className='flex items-center gap-2 px-4 py-1'>
-              <span className='font-semibold text-ink'>{activeStrategy.name}</span>
+              <span className='font-semibold text-ink'>
+                {activeStrategy.name}
+              </span>
               <span className='text-ink-muted/70 text-[10px]'>
-                {activeStrategy.spec.unrecognized_indicators.length + activeStrategy.spec.chart_notes.length} item(s) not auto-drawn
+                {activeStrategy.spec.unrecognized_indicators.length +
+                  activeStrategy.spec.chart_notes.length}{' '}
+                item(s) not auto-drawn
               </span>
               <button
                 onClick={() => setStrategyInfoExpanded((v) => !v)}
                 className='ml-auto cursor-pointer rounded border border-line px-2 py-0.5 text-[10px] text-ink-muted hover:border-accent hover:text-accent transition-colors'
-                title={strategyInfoExpanded ? 'Collapse strategy info' : 'Expand strategy info'}
+                title={
+                  strategyInfoExpanded
+                    ? 'Collapse strategy info'
+                    : 'Expand strategy info'
+                }
               >
                 {strategyInfoExpanded ? '▲ Hide info' : '▼ Show info'}
               </button>
             </div>
             {strategyInfoExpanded && (
               <div className='flex flex-wrap items-center gap-1.5 border-t border-line px-4 py-1.5 text-ink-muted bg-panel/50'>
-                <span className='text-ink-muted/70 mr-1'>Mentions (not auto-drawn):</span>
+                <span className='text-ink-muted/70 mr-1'>
+                  Mentions (not auto-drawn):
+                </span>
                 {activeStrategy.spec.unrecognized_indicators.map((name) => (
                   <span
                     key={`ind:${name}`}
@@ -2913,29 +3698,49 @@ export function ChartPanel({
           indicators={manualIndicators}
           onAdd={handleAddManualIndicator}
           onRemove={handleRemoveManualIndicator}
+          onCustomIndicatorCodeSaved={() => computeCustomIndicatorsRef.current()}
         />
       )}
+      {/* Activity log dock — shown when the toggle is active */}
+      {showActivityLogDock && <ActivityLogDock symbol={symbol} />}
       <div className='relative min-h-0 flex-1'>
         <div ref={containerRef} className='h-full w-full' />
         {/* Strategy code drawer — slides in from the configured edge */}
         {backtestReportId && backtestMeta && showStrategyEditor && (
           <div
             className={`pointer-events-auto absolute z-40 flex flex-col bg-panel border-line shadow-2xl overflow-hidden ${
-              drawerPosition === 'right' ? 'right-0 top-0 h-full border-l' :
-              drawerPosition === 'left' ? 'left-0 top-0 h-full border-r' :
-              drawerPosition === 'bottom' ? 'bottom-0 left-0 w-full border-t' :
-              'top-0 left-0 w-full border-b'
+              drawerPosition === 'right'
+                ? 'right-0 top-0 h-full border-l'
+                : drawerPosition === 'left'
+                  ? 'left-0 top-0 h-full border-r'
+                  : drawerPosition === 'bottom'
+                    ? 'bottom-0 left-0 w-full border-t'
+                    : 'top-0 left-0 w-full border-b'
             }`}
             style={{
-              width: drawerPosition === 'right' || drawerPosition === 'left' ? '420px' : '100%',
-              height: drawerPosition === 'bottom' || drawerPosition === 'top' ? '340px' : '100%',
-              maxWidth: drawerPosition === 'right' || drawerPosition === 'left' ? '55%' : undefined,
-              maxHeight: drawerPosition === 'bottom' || drawerPosition === 'top' ? '55%' : undefined,
+              width:
+                drawerPosition === 'right' || drawerPosition === 'left'
+                  ? '420px'
+                  : '100%',
+              height:
+                drawerPosition === 'bottom' || drawerPosition === 'top'
+                  ? '340px'
+                  : '100%',
+              maxWidth:
+                drawerPosition === 'right' || drawerPosition === 'left'
+                  ? '55%'
+                  : undefined,
+              maxHeight:
+                drawerPosition === 'bottom' || drawerPosition === 'top'
+                  ? '55%'
+                  : undefined,
             }}
           >
             {/* Drawer header */}
             <div className='flex items-center gap-2 border-b border-line px-3 py-1.5 bg-panel shrink-0'>
-              <span className='text-xs font-semibold text-ink truncate'>Edit Strategy Code</span>
+              <span className='text-xs font-semibold text-ink truncate'>
+                Edit Strategy Code
+              </span>
               {/* Position controls */}
               <div className='flex items-center gap-0.5 ml-auto'>
                 {(['right', 'bottom', 'left', 'top'] as const).map((pos) => (
@@ -2949,7 +3754,13 @@ export function ChartPanel({
                         : 'border-line text-ink-muted hover:text-ink'
                     }`}
                   >
-                    {pos === 'right' ? '⇥' : pos === 'left' ? '⇤' : pos === 'bottom' ? '⇓' : '⇑'}
+                    {pos === 'right'
+                      ? '⇥'
+                      : pos === 'left'
+                        ? '⇤'
+                        : pos === 'bottom'
+                          ? '⇓'
+                          : '⇑'}
                   </button>
                 ))}
                 <button
@@ -2972,6 +3783,11 @@ export function ChartPanel({
                   setShowStrategyEditor(false);
                   onReportChange?.(newReportId);
                 }}
+                onRunPreview={runCustomCode}
+                previewBusy={customCodeBusy}
+                previewError={customCodeError}
+                previewResult={customCodeResult}
+                onResetPreview={clearCustomCode}
               />
             </div>
           </div>
@@ -2980,21 +3796,38 @@ export function ChartPanel({
         {showCustomCodeEditor && (
           <div
             className={`pointer-events-auto absolute z-40 flex flex-col bg-panel border-line shadow-2xl overflow-hidden ${
-              drawerPosition === 'right' ? 'right-0 top-0 h-full border-l' :
-              drawerPosition === 'left' ? 'left-0 top-0 h-full border-r' :
-              drawerPosition === 'bottom' ? 'bottom-0 left-0 w-full border-t' :
-              'top-0 left-0 w-full border-b'
+              drawerPosition === 'right'
+                ? 'right-0 top-0 h-full border-l'
+                : drawerPosition === 'left'
+                  ? 'left-0 top-0 h-full border-r'
+                  : drawerPosition === 'bottom'
+                    ? 'bottom-0 left-0 w-full border-t'
+                    : 'top-0 left-0 w-full border-b'
             }`}
             style={{
-              width: drawerPosition === 'right' || drawerPosition === 'left' ? '420px' : '100%',
-              height: drawerPosition === 'bottom' || drawerPosition === 'top' ? '340px' : '100%',
-              maxWidth: drawerPosition === 'right' || drawerPosition === 'left' ? '55%' : undefined,
-              maxHeight: drawerPosition === 'bottom' || drawerPosition === 'top' ? '55%' : undefined,
+              width:
+                drawerPosition === 'right' || drawerPosition === 'left'
+                  ? '420px'
+                  : '100%',
+              height:
+                drawerPosition === 'bottom' || drawerPosition === 'top'
+                  ? '340px'
+                  : '100%',
+              maxWidth:
+                drawerPosition === 'right' || drawerPosition === 'left'
+                  ? '55%'
+                  : undefined,
+              maxHeight:
+                drawerPosition === 'bottom' || drawerPosition === 'top'
+                  ? '55%'
+                  : undefined,
             }}
           >
             {/* Drawer header */}
             <div className='flex items-center gap-2 border-b border-line px-3 py-1.5 bg-panel shrink-0'>
-              <span className='text-xs font-semibold text-ink truncate'>Run Custom Code</span>
+              <span className='text-xs font-semibold text-ink truncate'>
+                Run Custom Code
+              </span>
               {/* Position controls */}
               <div className='flex items-center gap-0.5 ml-auto'>
                 <button
@@ -3019,7 +3852,13 @@ export function ChartPanel({
                         : 'border-line text-ink-muted hover:text-ink'
                     }`}
                   >
-                    {pos === 'right' ? '⇥' : pos === 'left' ? '⇤' : pos === 'bottom' ? '⇓' : '⇑'}
+                    {pos === 'right'
+                      ? '⇥'
+                      : pos === 'left'
+                        ? '⇤'
+                        : pos === 'bottom'
+                          ? '⇓'
+                          : '⇑'}
                   </button>
                 ))}
                 <button
@@ -3039,45 +3878,48 @@ export function ChartPanel({
               <div className='flex-1 flex flex-col min-h-0 rounded-md border border-line bg-panel'>
                 <CodeMirror
                   value={customCodeDraft}
-                  height="100%"
-                  className="flex-1 min-h-0 overflow-auto"
+                  height='100%'
+                  className='flex-1 min-h-0 overflow-auto'
                   theme={cmTheme}
                   extensions={[python()]}
                   onChange={setCustomCodeDraft}
                   editable={!customCodeBusy}
                 />
-                
+
                 {customCodeError && (
-                  <div className="border-t border-line px-3 py-2 text-xs text-err shrink-0 max-h-32 overflow-y-auto">
+                  <div className='border-t border-line px-3 py-2 text-xs text-err shrink-0 max-h-32 overflow-y-auto'>
                     <p>{customCodeError}</p>
                   </div>
                 )}
-                
+
                 {customCodeResult && (
-                  <div className="border-t border-line px-3 py-1.5 text-xs text-ok shrink-0 bg-panel/30 flex items-center justify-between">
+                  <div className='border-t border-line px-3 py-1.5 text-xs text-ok shrink-0 bg-panel/30 flex items-center justify-between'>
                     <span>
-                      Success: {customCodeResult.signals.length} signal(s), {Object.keys(customCodeResult.indicators).length} indicator(s) calculated
+                      Success: {customCodeResult.signals.length} signal(s),{' '}
+                      {Object.keys(customCodeResult.indicators).length}{' '}
+                      indicator(s) calculated
                     </span>
                     <button
                       onClick={clearCustomCode}
-                      className="cursor-pointer px-1.5 py-0.5 rounded border border-line hover:border-ink hover:text-ink text-[10px] text-ink-muted"
+                      className='cursor-pointer px-1.5 py-0.5 rounded border border-line hover:border-ink hover:text-ink text-[10px] text-ink-muted'
                     >
                       Reset Graph
                     </button>
                   </div>
                 )}
-                
-                <div className="flex items-center gap-2 border-t border-line p-3 shrink-0">
+
+                <div className='flex items-center gap-2 border-t border-line p-3 shrink-0'>
                   <button
-                    type="button"
-                    className="cursor-pointer rounded border border-accent px-3 py-1 text-xs text-accent hover:bg-accent hover:text-bg disabled:cursor-not-allowed disabled:opacity-50"
+                    type='button'
+                    className='cursor-pointer rounded border border-accent px-3 py-1 text-xs text-accent hover:bg-accent hover:text-bg disabled:cursor-not-allowed disabled:opacity-50'
                     disabled={customCodeBusy}
-                    onClick={runCustomCode}
+                    onClick={() => runCustomCode()}
                   >
-                    {customCodeBusy ? "Running code..." : "Run & Show on Graph"}
+                    {customCodeBusy ? 'Running code...' : 'Run & Show on Graph'}
                   </button>
-                  <span className="text-[10px] text-ink-muted">
-                    Evaluates custom Python strategy. Returns moving averages/indicators & buy/sell signals on graph.
+                  <span className='text-[10px] text-ink-muted'>
+                    Evaluates custom Python strategy. Returns moving
+                    averages/indicators & buy/sell signals on graph.
                   </span>
                 </div>
               </div>
@@ -3134,7 +3976,7 @@ export function ChartPanel({
                 volume,
                 price,
                 sl,
-                tp
+                tp,
               );
             }}
           />
@@ -3158,7 +4000,9 @@ export function ChartPanel({
               setDrawingContextMenu(null);
             }}
             onDelete={() => {
-              drawingManagerRef.current?.removeDrawing(drawingContextMenu.drawingId);
+              drawingManagerRef.current?.removeDrawing(
+                drawingContextMenu.drawingId,
+              );
               setDrawingContextMenu(null);
             }}
           />

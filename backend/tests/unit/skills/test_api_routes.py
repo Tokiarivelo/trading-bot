@@ -9,6 +9,10 @@ import httpx
 import pytest
 from fastapi import FastAPI
 
+from src.broker.application.spread_gate import SpreadGate
+from src.market_data.application.candle_stream import CandleStreamService
+from src.market_data.domain.models import Timeframe
+from src.shared.events.bus import EventBus
 from src.skills.adapters.normal_skill_repository import NormalSkillRepository
 from src.skills.api.routes import router
 from src.skills.application.skill_assignment import SkillAssignmentService
@@ -18,6 +22,21 @@ from src.strategies.registry import StrategyRegistry
 
 class FakeStrategy:
     pass
+
+
+class FakeMarketData:
+    async def get_candles(self, symbol, timeframe, count):
+        return []
+
+
+class FakeRepository:
+    def upsert_many(self, candles):
+        return 0
+
+
+class FakeBroadcaster:
+    async def broadcast(self, message):
+        pass
 
 
 def _write_symbol_config(configs_dir, symbol: str) -> None:
@@ -43,11 +62,21 @@ def _write_skill_yaml(skills_dir, symbol: str, strategy: str) -> None:
     )
 
 
+def _write_app_config(configs_dir, symbols: list[str]) -> None:
+    configs_dir.mkdir(parents=True, exist_ok=True)
+    symbols_literal = ", ".join(f'"{s}"' if " " in s else s for s in symbols)
+    (configs_dir / "app.yaml").write_text(
+        "mode: live              # paper | live  — NEVER switch to live before Phase 9 criteria\n"
+        f"symbols: [{symbols_literal}]\n"
+    )
+
+
 @pytest.fixture
 async def api(tmp_path):
     configs_dir = tmp_path / "configs"
     skills_dir = tmp_path / "skills"
     _write_symbol_config(configs_dir, "XAUUSD")
+    _write_app_config(configs_dir, ["XAUUSD"])
     _write_skill_yaml(skills_dir, "XAUUSD", "breakout_v1")
 
     repository = NormalSkillRepository(skills_dir)
@@ -55,11 +84,21 @@ async def api(tmp_path):
     registry = StrategyRegistry()
     registry.register("breakout_v1", FakeStrategy())
     registry.register("gold_ema_pullback", FakeStrategy())
+    candle_stream = CandleStreamService(
+        market_data=FakeMarketData(),
+        repository=FakeRepository(),
+        event_bus=EventBus(),
+        broadcaster=FakeBroadcaster(),
+        symbols=["XAUUSD"],
+        timeframes=[Timeframe.M5],
+    )
+    spread_gate = SpreadGate({})
     service = SkillAssignmentService(
         repository=repository,
         selector=selector,
         strategy_registry=registry,
-        symbols=["XAUUSD"],
+        candle_stream=candle_stream,
+        spread_gate=spread_gate,
         configs_dir=configs_dir,
     )
 
@@ -68,6 +107,10 @@ async def api(tmp_path):
     app.state.container = SimpleNamespace(skill_assignment=service)
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://backend") as client:
+        # Attached for the one test that needs to activate a brand-new
+        # symbol mid-test (register its strategy, write its symbol config).
+        client.configs_dir = configs_dir
+        client.registry = registry
         yield client
 
 
@@ -77,6 +120,7 @@ async def test_list_normal_skills(api):
     (body,) = response.json()
     assert body["symbol"] == "XAUUSD"
     assert body["strategy"] == "breakout_v1"
+    assert body["newly_activated"] is False
 
 
 async def test_assign_strategy_succeeds(api):
@@ -85,6 +129,8 @@ async def test_assign_strategy_succeeds(api):
     )
     assert response.status_code == 200
     assert response.json()["strategy"] == "gold_ema_pullback"
+    # XAUUSD was already live — this is a reroute, not a new activation.
+    assert response.json()["newly_activated"] is False
 
 
 async def test_assign_strategy_unknown_symbol_404s(api):
@@ -97,3 +143,22 @@ async def test_assign_strategy_unknown_symbol_404s(api):
 async def test_assign_strategy_unknown_strategy_422s(api):
     response = await api.put("/skills/normal/XAUUSD", json={"strategy_name": "does_not_exist"})
     assert response.status_code == 422
+
+
+async def test_assign_strategy_to_new_symbol_activates_it_and_reports_it(api):
+    # This is the actual "Apply to <symbol>" flow for a symbol not yet
+    # configured for live trading — must show up as newly_activated and be
+    # visible in GET /skills/normal immediately after, no restart.
+    _write_symbol_config(api.configs_dir, "Volatility 75 Index")
+    api.registry.register("pob_price_action_snd for vix75", FakeStrategy())
+
+    response = await api.put(
+        "/skills/normal/Volatility%2075%20Index",
+        json={"strategy_name": "pob_price_action_snd for vix75"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["newly_activated"] is True
+
+    listing = await api.get("/skills/normal")
+    assert "Volatility 75 Index" in [s["symbol"] for s in listing.json()]

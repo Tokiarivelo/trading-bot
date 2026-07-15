@@ -140,13 +140,15 @@ class TradeEngine:
         now = self._clock()
         decision = self._skill_selector.select(symbol, now)
         if not decision.allowed:
-            logger.info("skill blocked entry: %s reason=%s", symbol, decision.reason)
+            logger.info("ENTRY BLOCKED (skill routing): %s — %s", symbol, decision.reason)
             return
 
         strategy = self._strategy_source.get(decision.strategy_name)
         if strategy is None:
             logger.warning(
-                "no strategy registered: symbol=%s wants=%s", symbol, decision.strategy_name
+                "ENTRY BLOCKED (no strategy registered): %s wants strategy=%s",
+                symbol,
+                decision.strategy_name,
             )
             return
         if symbol not in strategy.spec.symbols:
@@ -155,7 +157,7 @@ class TradeEngine:
         open_positions = await self._order_service.get_positions()
         pretrade = self._risk_manager.check_pretrade(len(open_positions), now)
         if not pretrade.approved:
-            logger.info("risk gate blocked entry: %s reason=%s", symbol, pretrade.reason)
+            logger.info("ENTRY BLOCKED (risk gate): %s — %s", symbol, pretrade.reason)
             return
 
         timeframes = (self._entry_timeframe, *self._confirmation_timeframes)
@@ -166,18 +168,28 @@ class TradeEngine:
             }
             info = await self._market_data.get_symbol_info(symbol)
         except MarketDataUnavailable as exc:
-            logger.warning("market data unavailable, skipping entry check: %s %s", symbol, exc)
+            logger.warning("ENTRY SKIPPED (no market data): %s — %s", symbol, exc)
             return
 
         ctx = build_market_context(symbol, candles_by_tf, info.spread_points)
         signal = strategy.evaluate(ctx)
         if signal is None:
             return
+        logger.info(
+            "SIGNAL: %s %s via strategy=%s — %s",
+            symbol,
+            signal.direction.value,
+            strategy.spec.name,
+            signal.reason,
+        )
 
         confirmed, veto_reason = confirm(signal.direction, ctx, self._confirmation_timeframes)
         if not confirmed:
             logger.info(
-                "signal vetoed by HTF: %s %s reason=%s", symbol, signal.direction.value, veto_reason
+                "ENTRY BLOCKED (HTF veto): %s %s — %s",
+                symbol,
+                signal.direction.value,
+                veto_reason,
             )
             return
 
@@ -189,7 +201,7 @@ class TradeEngine:
 
         balance = await self._current_balance()
         if balance is None:
-            logger.info("no account connected, skipping entry: %s", symbol)
+            logger.info("ENTRY SKIPPED (no account connected): %s", symbol)
             return
 
         sizing = self._risk_manager.size_position(
@@ -202,9 +214,27 @@ class TradeEngine:
             risk_multiplier=decision.risk_multiplier,
         )
         if not sizing.approved:
-            logger.info("risk sizing rejected entry: %s reason=%s", symbol, sizing.reason)
+            logger.info(
+                "ENTRY REJECTED (risk sizing): %s %s — %s (balance=%.2f, sl_distance=%.5f, "
+                "risk_multiplier=%.2f)",
+                symbol,
+                side.value,
+                sizing.reason,
+                balance,
+                abs(reference_price - sl_price),
+                decision.risk_multiplier,
+            )
             return
+        logger.info(
+            "SIZING OK: %s %s %.2f lots (balance=%.2f, risk_multiplier=%.2f)",
+            symbol,
+            side.value,
+            sizing.volume,
+            balance,
+            decision.risk_multiplier,
+        )
 
+        zone = signal.zone
         try:
             await self._order_service.open_position(
                 symbol,
@@ -216,6 +246,13 @@ class TradeEngine:
                 strategy_version=f"{strategy.spec.name}:v{strategy.spec.version}",
                 skill=decision.skill_name,
                 max_spread_points=decision.max_spread_points,
+                zone_kind=zone.kind.value if zone is not None else None,
+                zone_price_low=zone.price_low if zone is not None else None,
+                zone_price_high=zone.price_high if zone is not None else None,
+                zone_time_start=zone.time_start if zone is not None else None,
+                zone_time_end=zone.time_end if zone is not None else None,
+                pattern=signal.pattern,
+                structure=tuple((p.label.value, p.price, p.time) for p in signal.structure),
             )
         except OrderRejected:
             return  # spread/RR gate already logged the veto inside order_service

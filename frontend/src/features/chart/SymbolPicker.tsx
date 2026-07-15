@@ -3,9 +3,11 @@
 /**
  * Search/add any symbol the connected broker offers (chart/watchlist only —
  * picking one shows its chart on demand, including live candle-close
- * updates while it's open, but does not configure it for the automated
- * engine; see `configs/app.yaml: symbols` for the three the bot actually
- * trades).
+ * updates while it's open, but does not by itself put the automated engine
+ * live on it). A symbol only starts trading once a bot is applied to it via
+ * BotSelector's "Apply to <symbol>" — that's the one deliberate step that
+ * activates automated trading, persisting the symbol into
+ * `configs/app.yaml` and hot-starting candle streaming for it.
  */
 
 import { useEffect, useRef, useState } from "react";
@@ -194,7 +196,8 @@ export function SymbolPicker({
             </div>
           )}
           <p className="mt-2 border-t border-line pt-2 text-xs text-ink-muted">
-            Chart only — doesn&apos;t add the symbol to the bot&apos;s automated trading list.
+            Chart only — doesn&apos;t start automated trading. Applying a bot to this symbol
+            from its chart is the step that does.
           </p>
         </div>
       )}

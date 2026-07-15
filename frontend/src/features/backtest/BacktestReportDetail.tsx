@@ -2,7 +2,9 @@
 
 import Link from "next/link";
 import { useEffect, useState } from "react";
+import { ActivityLogTable } from "@/features/logs/ActivityLogTable";
 import { getBacktestReport, type BacktestReportDetail as ReportDetail } from "@/shared/api/client";
+import { downloadJson } from "@/shared/utils/download";
 import { BacktestStrategyEditor } from "./BacktestStrategyEditor";
 import { EquityChart } from "./EquityChart";
 import { StatTile } from "./StatTile";
@@ -34,13 +36,22 @@ export function BacktestReportDetail({ reportId }: { reportId: string }) {
           </h2>
           <p className="text-sm text-ink-muted">{report.period}</p>
         </div>
-        <Link
-          href={`/?symbol=${encodeURIComponent(report.symbol)}&backtestReport=${encodeURIComponent(report.id)}`}
-          className="shrink-0 rounded border border-accent px-3 py-1.5 text-sm text-accent hover:bg-accent/10"
-          title="See this report's trades plotted against the actual candles they traded on"
-        >
-          View on chart →
-        </Link>
+        <div className="flex gap-2">
+          <button
+            type="button"
+            onClick={() => downloadJson(report, `backtest_${report.strategy}_${report.symbol}_${report.id}.json`)}
+            className="shrink-0 cursor-pointer rounded border border-line px-3 py-1.5 text-sm text-ink hover:border-accent hover:text-accent transition-colors"
+          >
+            Download JSON
+          </button>
+          <Link
+            href={`/?symbol=${encodeURIComponent(report.symbol)}&backtestReport=${encodeURIComponent(report.id)}`}
+            className="shrink-0 rounded border border-accent px-3 py-1.5 text-sm text-accent hover:bg-accent/10"
+            title="See this report's trades plotted against the actual candles they traded on"
+          >
+            View on chart →
+          </Link>
+        </div>
       </div>
 
       <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-7">
@@ -110,6 +121,25 @@ export function BacktestReportDetail({ reportId }: { reportId: string }) {
             ))}
           </tbody>
         </table>
+      </section>
+
+      <section className="rounded-md border border-line bg-panel">
+        <header className="border-b border-line px-3 py-2 text-sm text-ink-muted">
+          Activity log — the bot's decision trail during the replay (signals, HTF vetoes, sizing
+          rejections, fills, circuit breakers). Explains a zero-trade report.
+        </header>
+        {report.activity_log.length === 0 ? (
+          <p className="px-3 py-2 text-sm text-ink-muted">
+            No activity captured for this report (older reports predate this feature — re-run the
+            backtest to get one).
+          </p>
+        ) : (
+          <div className="max-h-96 overflow-y-auto">
+            <ActivityLogTable
+              entries={report.activity_log.map((e, i) => ({ id: i, created_at: e.time, ...e }))}
+            />
+          </div>
+        )}
       </section>
     </div>
   );

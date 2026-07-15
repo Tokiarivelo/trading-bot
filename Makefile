@@ -151,6 +151,10 @@ backtest: ## Run a strategy backtest: make backtest strategy=breakout_v1 symbol=
 		{ echo 'usage: make backtest strategy=breakout_v1 symbol=XAUUSD period=2025-01:2025-06'; exit 1; }
 	cd backend && uv run python -m src.backtest.cli "$(strategy)" "$(symbol)" "$(period)"
 
+.PHONY: seed-indicators
+seed-indicators: ## Seed the 15 PoB pattern/confirmation indicators into the indicator DB (safe to re-run)
+	cd backend && uv run python -m scripts.seed_pob_indicators
+
 # ─── Quality gates (run `make check` before declaring any task done) ─────────
 
 .PHONY: check

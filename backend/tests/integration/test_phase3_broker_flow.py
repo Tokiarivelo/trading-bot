@@ -148,6 +148,7 @@ class ContainerForTest:
 
         broker = PaperBroker(self.market_data)
         spread_gate = SpreadGate({"XAUUSD": XAUUSD_CONFIG})
+        self.spread_gate = spread_gate
         self.order_service = OrderService(
             broker=broker,
             market_data=self.market_data,
@@ -433,3 +434,31 @@ async def test_pending_order_fills_when_price_crosses_and_is_journaled(api):
     assert len(trades) == 1
 
     assert api.container.risk_manager.status.trades_today == 1
+
+
+async def test_get_symbol_spread_config_reflects_configured_values(api):
+    body = (await api.get("/broker/symbols/XAUUSD/spread-config")).json()
+    assert body == {"symbol": "XAUUSD", "max_spread_points": 35, "min_rr": 1.5}
+
+
+async def test_get_symbol_spread_config_404s_for_unconfigured_symbol(api):
+    response = await api.get("/broker/symbols/EURUSD/spread-config")
+    assert response.status_code == 404
+
+
+async def test_update_min_rr_takes_effect_live(api):
+    updated = await api.put("/broker/symbols/XAUUSD/min-rr", json={"min_rr": 1.0})
+    assert updated.status_code == 200
+    body = updated.json()
+    assert body == {"symbol": "XAUUSD", "max_spread_points": 35, "min_rr": 1.0}
+
+    # The running SpreadGate (not just the API's echo) actually changed.
+    assert api.container.spread_gate.get_config("XAUUSD").min_rr == 1.0
+
+    again = (await api.get("/broker/symbols/XAUUSD/spread-config")).json()
+    assert again["min_rr"] == 1.0
+
+
+async def test_update_min_rr_404s_for_unconfigured_symbol(api):
+    response = await api.put("/broker/symbols/EURUSD/min-rr", json={"min_rr": 1.0})
+    assert response.status_code == 404

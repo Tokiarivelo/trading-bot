@@ -197,6 +197,7 @@ class ContainerForTest:
         self.event_bus.subscribe(PositionClosed, self.trade_journal.on_position_closed)
 
         risk_manager = RiskManager(caps=RISK_CAPS, timezone="UTC")
+        self.risk_manager = risk_manager
         position_manager = PositionManager(self.order_service, self.market_data)
         strategy_registry = StrategyRegistry()
         strategy_registry.register("breakout_v1", BreakoutV1())
@@ -306,6 +307,33 @@ async def test_kill_switch_endpoint_pauses_and_closes_positions(api):
 
     resumed = await api.post("/engine/resume")
     assert resumed.json()["paused"] is False
+
+
+async def test_get_risk_caps_reflects_configured_caps(api):
+    caps = (await api.get("/engine/risk-caps")).json()
+    assert caps["risk_per_trade_pct"] == RISK_CAPS.risk_per_trade_pct
+    assert caps["min_lot_fallback_enabled"] is False
+    assert caps["max_risk_per_trade_pct"] is None
+
+
+async def test_update_min_lot_fallback_takes_effect_live(api):
+    updated = await api.put(
+        "/engine/risk-caps/min-lot-fallback",
+        json={"enabled": True, "max_risk_per_trade_pct": 5.0},
+    )
+    assert updated.status_code == 200
+    body = updated.json()
+    assert body["min_lot_fallback_enabled"] is True
+    assert body["max_risk_per_trade_pct"] == 5.0
+    # Every other cap is untouched by the live update.
+    assert body["risk_per_trade_pct"] == RISK_CAPS.risk_per_trade_pct
+    assert body["max_open_positions"] == RISK_CAPS.max_open_positions
+
+    # The running RiskManager (not just the API's echo) actually changed.
+    assert api.container.risk_manager.caps.min_lot_fallback_enabled is True
+
+    again = (await api.get("/engine/risk-caps")).json()
+    assert again["min_lot_fallback_enabled"] is True
 
 
 async def test_engine_does_not_reenter_once_max_open_positions_reached(api):

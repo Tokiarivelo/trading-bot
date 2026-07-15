@@ -53,11 +53,24 @@ class OrderService:
         strategy_version: str | None = None,
         skill: str | None = None,
         max_spread_points: int | None = None,
+        zone_kind: str | None = None,
+        zone_price_low: float | None = None,
+        zone_price_high: float | None = None,
+        zone_time_start: datetime | None = None,
+        zone_time_end: datetime | None = None,
+        pattern: str | None = None,
+        structure: tuple[tuple[str, float, datetime], ...] = (),
     ) -> ExecutionResult:
         """`max_spread_points`, when set, overrides the symbol's configured
         cap for this order only — used by news skills to widen (or, in
         principle, tighten) the allowance during a post-event window
-        (`SkillDecision.max_spread_points`, §6.6)."""
+        (`SkillDecision.max_spread_points`, §6.6). `zone_*`/`pattern`/
+        `structure` are optional chart-annotation passthrough from the
+        strategy's Signal (see strategies/domain/models.py) — kept as flat
+        primitives here rather than importing that module's domain types, so
+        the broker layer stays independent of the strategies module; they
+        flow straight into the published `PositionOpened` event unused by
+        order placement itself."""
         info = await self._market_data.get_symbol_info(symbol)
         reference_price = info.ask if side is Side.BUY else info.bid
         sl_distance = abs(reference_price - sl) if sl is not None else None
@@ -73,7 +86,7 @@ class OrderService:
         )
         if veto is not None:
             logger.info(
-                "signal vetoed: %s %s spread=%dpts sl=%s tp=%s reason=%s",
+                "ENTRY REJECTED (spread/RR gate): %s %s spread=%dpts sl=%s tp=%s — %s",
                 side.value,
                 symbol,
                 info.spread_points,
@@ -86,7 +99,8 @@ class OrderService:
         order = OrderRequest(symbol=symbol, side=side, volume=volume, sl=sl, tp=tp, comment=comment)
         result = await self._broker.open_position(order)
         logger.info(
-            "order filled: ticket=%d %s %s %.2f lots @ %.5f sl=%s tp=%s spread=%dpts",
+            "ENTRY OPENED: ticket=%d %s %s %.2f lots @ %.5f sl=%s tp=%s spread=%dpts "
+            "strategy=%s skill=%s reason=%s",
             result.ticket,
             side.value,
             symbol,
@@ -95,6 +109,9 @@ class OrderService:
             sl,
             tp,
             result.spread_points,
+            strategy_version,
+            skill,
+            comment or "manual",
         )
         await self._event_bus.publish(
             PositionOpened(
@@ -109,6 +126,13 @@ class OrderService:
                 comment=result.comment,
                 strategy_version=strategy_version,
                 skill=skill,
+                zone_kind=zone_kind,
+                zone_price_low=zone_price_low,
+                zone_price_high=zone_price_high,
+                zone_time_start=zone_time_start,
+                zone_time_end=zone_time_end,
+                pattern=pattern,
+                structure=structure,
             )
         )
         return result

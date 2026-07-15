@@ -119,6 +119,71 @@ async def test_backtest_closes_one_trade_via_tp_and_one_via_sl(database_url):
     assert report.profit_factor == pytest.approx(tp_trade.profit / -sl_trade.profit)
     assert report.avg_r == pytest.approx((tp_trade.r_multiple + sl_trade.r_multiple) / 2)
 
+    # Activity log: the decision trail explaining the two trades, timestamped
+    # on the simulated clock (not wall-clock), not just their final outcome.
+    # (The very first line — "backtest starting" — is logged before the
+    # replay loop sets the clock to the first candle, so it's still stamped
+    # at the pre-warmup history_start; every line from the replay itself is
+    # bounded by the candle range.)
+    messages = [e.message for e in report.activity_log]
+    assert any("SIGNAL" in m and "buy" in m for m in messages)
+    assert any("ENTRY OPENED" in m for m in messages)
+    replay_entries = [e for e in report.activity_log if "backtest starting" not in e.message]
+    assert replay_entries
+    assert all(START <= e.time <= START + 44 * M5_STEP for e in replay_entries)
+
+
+async def test_run_backtest_min_rr_override(database_url):
+    """configs/symbols/xauusd.yaml's real min_rr=1.5 lets both signals from
+    `test_backtest_closes_one_trade_via_tp_and_one_via_sl` through. Overriding
+    min_rr to something far stricter for this call only should reject both at
+    the spread/RR gate instead, without touching the file."""
+    report = await run_backtest(
+        "breakout_v1", "XAUUSD", "2025-01:2025-01", database_url=database_url, min_rr=10.0
+    )
+    assert len(report.trades) == 0
+    assert report.min_rr == 10.0
+    assert any(
+        "spread/RR gate" in e.message and "min_rr=10" in e.message for e in report.activity_log
+    )
+
+
+async def test_run_backtest_records_configured_min_rr_without_override(database_url):
+    report = await run_backtest(
+        "breakout_v1", "XAUUSD", "2025-01:2025-01", database_url=database_url
+    )
+    assert report.min_rr == 1.5  # configs/symbols/xauusd.yaml's real value
+
+
+async def test_run_backtest_records_configured_risk_caps(database_url):
+    """The full RiskCaps actually enforced for the run is recorded on the
+    report, not just min_rr — configs/risk.yaml's real values here."""
+    report = await run_backtest(
+        "breakout_v1", "XAUUSD", "2025-01:2025-01", database_url=database_url
+    )
+    assert report.risk_per_trade_pct == 0.5
+    assert report.daily_loss_limit_pct == 2.0
+    assert report.max_open_positions == 100
+    assert report.max_trades_per_day == 8
+    assert report.consecutive_loss_pause == 10
+    assert report.min_lot_fallback_enabled is True
+    assert report.max_risk_per_trade_pct == 2.0
+
+
+async def test_run_backtest_records_risk_override(database_url):
+    report = await run_backtest(
+        "breakout_v1",
+        "XAUUSD",
+        "2025-01:2025-01",
+        database_url=database_url,
+        min_lot_fallback_enabled=False,
+        max_risk_per_trade_pct=7.5,
+    )
+    assert report.min_lot_fallback_enabled is False
+    assert report.max_risk_per_trade_pct == 7.5
+    # Untouched by the override.
+    assert report.risk_per_trade_pct == 0.5
+
 
 async def test_backtest_raises_when_no_history(database_url):
     from src.backtest.application.run_backtest import NoHistoryError
@@ -208,6 +273,34 @@ async def test_backtest_uses_db_backed_symbol_spec_without_any_yaml(tmp_path, da
     )
 
     assert len(report.trades) == 2
+
+
+async def test_run_backtest_min_lot_fallback_override(tmp_path, database_url):
+    """`_minimal_configs_dir`'s risk.yaml has no min_lot_fallback_enabled key
+    (defaults False) — a $50 balance is too small for breakout_v1's normal
+    risk % to reach volume_min, so sizing rejects both signals with the file
+    default. Passing the override params to run_backtest() turns the
+    fallback on for this call only, without touching the file, and the same
+    two signals now open."""
+    configs_dir = _minimal_configs_dir(tmp_path, xauusd_yaml=False)
+    engine = create_engine(database_url)
+    SymbolSpecRepository(sessionmaker(bind=engine, expire_on_commit=False)).upsert(
+        "XAUUSD", _spec()
+    )
+
+    report = await run_backtest(
+        "breakout_v1", "XAUUSD", "2025-01:2025-01", database_url=database_url,
+        configs_dir=configs_dir, starting_balance=50.0,
+    )
+    assert len(report.trades) == 0
+
+    report = await run_backtest(
+        "breakout_v1", "XAUUSD", "2025-01:2025-01", database_url=database_url,
+        configs_dir=configs_dir, starting_balance=50.0,
+        min_lot_fallback_enabled=True, max_risk_per_trade_pct=25.0,
+    )
+    assert len(report.trades) == 2
+    assert any("min-lot fallback" in e.message for e in report.activity_log)
 
 
 async def test_backtest_raises_no_symbol_spec_without_db_row_or_yaml(tmp_path, database_url):

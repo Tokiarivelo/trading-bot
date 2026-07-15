@@ -14,6 +14,7 @@ live journal DB.
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 from collections.abc import Callable
 from datetime import datetime, timedelta
@@ -25,10 +26,10 @@ from src.backtest.adapters.bookkeeper import BacktestBookkeeper
 from src.backtest.adapters.fixed_skill_selector import FixedSkillSelector
 from src.backtest.application import metrics
 from src.backtest.application.period import parse_period
-from src.backtest.domain.models import BacktestReport
+from src.backtest.domain.models import ActivityLogEntry, BacktestReport
 from src.broker.adapters.paper import PaperBroker
 from src.broker.application.order_service import OrderService
-from src.broker.application.spread_gate import SpreadGate
+from src.broker.application.spread_gate import DEFAULT_MIN_RR, SpreadGate
 from src.broker.domain.symbol_config import SymbolTradingConfig
 from src.broker.domain.trading import Position, Side
 from src.engine.application.position_manager import PositionManager
@@ -47,6 +48,9 @@ from src.shared.events.definitions import CandleClosed, PositionClosed, Position
 from src.strategies.adapters.repository import StrategyVersionRepository
 from src.strategies.application.versioning import StrategyVersionService
 from src.strategies.generated.breakout_v1 import BreakoutV1
+from src.strategies.generated.mean_reversion_v1 import MeanReversionV1
+from src.strategies.generated.trend_structure_v1 import TrendStructureV1
+from src.strategies.generated.trend_structure_v2 import TrendStructureV2
 from src.strategies.registry import StrategyRegistry
 
 logger = logging.getLogger(__name__)
@@ -60,6 +64,33 @@ DEFAULT_DATABASE_URL = "sqlite:///./data/trading.db"
 # backend/src/backtest/application/run_backtest.py -> backend/src
 _BACKEND_SRC_DIR = Path(__file__).resolve().parent.parent.parent
 _STRATEGIES_GENERATED_DIR = _BACKEND_SRC_DIR / "strategies" / "generated"
+
+
+class _ActivityCapture(logging.Handler):
+    """Mirrors every `src.*` INFO+ log line emitted during the replay loop
+    into an in-memory list, stamped with the *simulated* clock rather than
+    wall-clock time — this is what lets a zero-trade report still show why
+    (signals, HTF vetoes, sizing rejections) without the server's stdout.
+
+    Deliberately separate from `src.activity`'s DB-backed handler (see
+    `shared/logging/setup.py`): a backtest replays weeks of history in
+    seconds and must not flood the live "what is the bot doing right now"
+    activity log with replay noise."""
+
+    def __init__(self, clock: Callable[[], datetime]) -> None:
+        super().__init__(level=logging.INFO)
+        self._clock = clock
+        self.entries: list[ActivityLogEntry] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.entries.append(
+            ActivityLogEntry(
+                time=self._clock(),
+                level=record.levelname,
+                logger=record.name,
+                message=record.getMessage(),
+            )
+        )
 
 
 class NoHistoryError(Exception):
@@ -82,7 +113,24 @@ async def run_backtest(
     starting_balance: float = DEFAULT_STARTING_BALANCE,
     database_url: str = DEFAULT_DATABASE_URL,
     configs_dir: Path = CONFIGS_DIR,
+    min_lot_fallback_enabled: bool | None = None,
+    max_risk_per_trade_pct: float | None = None,
+    min_rr: float | None = None,
 ) -> BacktestReport:
+    """`min_lot_fallback_enabled`/`max_risk_per_trade_pct`, when given, override
+    `configs/risk.yaml`'s values for this run only — lets you try a different
+    min-lot fallback setting on a small-balance backtest before flipping it
+    on for the live bot via `PUT /engine/risk-caps/min-lot-fallback`. `None`
+    (the default for each) means "use what's configured in the file".
+
+    `min_rr` similarly overrides `configs/symbols/<symbol>.yaml`'s min_rr for
+    this run only — a tighter-stop strategy (e.g. a scalping variant) can
+    fail the spread-adjusted RR floor a swing-trading min_rr was tuned for,
+    since a fixed-points spread eats a bigger share of a smaller take-profit;
+    this lets you find a working value before flipping it on for the live
+    bot via `PUT /broker/symbols/{symbol}/min-rr`. Has no effect if `symbol`
+    has no `configs/symbols/<symbol>.yaml` at all (there's no config to
+    override — SpreadGate would already be using its own no-cap fallback)."""
     start, end = parse_period(period)
 
     registry = strategy_source or _default_registry(database_url)
@@ -97,8 +145,35 @@ async def run_backtest(
     # no-config fallback (no spread cap, DEFAULT_MIN_RR), same as manual
     # trading on an unconfigured symbol already does live.
     symbol_config = load_symbol_trading_config_if_exists(symbol, configs_dir)
+    if min_rr is not None:
+        if symbol_config is not None:
+            symbol_config = dataclasses.replace(symbol_config, min_rr=min_rr)
+        else:
+            logger.warning(
+                "min_rr override=%.2f requested but %s has no configs/symbols/ file — "
+                "nothing to override, SpreadGate's no-cap fallback still applies",
+                min_rr,
+                symbol,
+            )
+    resolved_min_rr = symbol_config.min_rr if symbol_config is not None else DEFAULT_MIN_RR
     risk_caps = load_risk_caps(configs_dir)
+    if min_lot_fallback_enabled is not None or max_risk_per_trade_pct is not None:
+        risk_caps = dataclasses.replace(
+            risk_caps,
+            min_lot_fallback_enabled=(
+                risk_caps.min_lot_fallback_enabled
+                if min_lot_fallback_enabled is None
+                else min_lot_fallback_enabled
+            ),
+            max_risk_per_trade_pct=(
+                risk_caps.max_risk_per_trade_pct
+                if max_risk_per_trade_pct is None
+                else max_risk_per_trade_pct
+            ),
+        )
     timezone = load_yaml_config("app", configs_dir).get("timezone", "UTC")
+
+    entry_tf = Timeframe(strategy.spec.entry_timeframe)
 
     session_factory = make_session_factory(database_url)
     repository = CandleRepository(session_factory)
@@ -106,10 +181,10 @@ async def run_backtest(
     candles: dict[Timeframe, list[Candle]] = {
         tf: repository.get_range(symbol, tf, history_start, end) for tf in Timeframe
     }
-    m5_bars = [c for c in candles[Timeframe.M5] if c.time >= start]
-    if not m5_bars:
+    entry_bars = [c for c in candles[entry_tf] if c.time >= start]
+    if not entry_bars:
         raise NoHistoryError(
-            f"no M5 candle history for {symbol} in {start.date()}..{end.date()} — "
+            f"no {entry_tf.value} candle history for {symbol} in {start.date()}..{end.date()} — "
             "run the historical backfill job first (POST /market-data/backfill, "
             f"with start={start.date()} to pull the full range)"
         )
@@ -120,10 +195,10 @@ async def run_backtest(
     # unless `start` is passed, so a stale/partial DB is easy to end up with.
     # 4 days tolerates weekend/holiday gaps without a per-symbol trading
     # calendar.
-    earliest = m5_bars[0].time
+    earliest = entry_bars[0].time
     if earliest - start > timedelta(days=4):
         raise NoHistoryError(
-            f"{symbol} M5 history only goes back to {earliest.date()}, but the "
+            f"{symbol} {entry_tf.value} history only goes back to {earliest.date()}, but the "
             f"requested period starts {start.date()} — call "
             f"POST /market-data/backfill with start={start.date()} to pull the "
             "missing range before backtesting"
@@ -170,23 +245,40 @@ async def run_backtest(
         clock=clock,
     )
 
-    logger.info(
-        "backtest starting: strategy=%s symbol=%s period=%s bars=%d starting_balance=%.2f",
-        strategy_name,
-        symbol,
-        period,
-        len(m5_bars),
-        starting_balance,
-    )
-    for candle in m5_bars:
-        replay.advance_to(candle.close_time)
-        clock_box["now"] = candle.close_time
-        await _check_stops(order_service, symbol, candle)
-        await trade_engine.on_candle_closed(
-            CandleClosed(symbol=symbol, timeframe="M5", occurred_at=candle.close_time)
+    activity_capture = _ActivityCapture(clock)
+    activity_logger = logging.getLogger("src")
+    activity_logger.addHandler(activity_capture)
+    # A caller that never ran `configure_logging`/`logging.basicConfig` (e.g.
+    # a test, or run_backtest() invoked directly) leaves the root logger at
+    # its default WARNING level, which silently drops every INFO decision
+    # log before it reaches this handler — force INFO here so activity_log
+    # is populated regardless of whether the process configured logging.
+    original_level = activity_logger.level
+    if original_level == logging.NOTSET or original_level > logging.INFO:
+        activity_logger.setLevel(logging.INFO)
+    try:
+        logger.info(
+            "backtest starting: strategy=%s symbol=%s period=%s entry_tf=%s bars=%d "
+            "starting_balance=%.2f",
+            strategy_name,
+            symbol,
+            period,
+            entry_tf.value,
+            len(entry_bars),
+            starting_balance,
         )
+        for candle in entry_bars:
+            replay.advance_to(candle.close_time)
+            clock_box["now"] = candle.close_time
+            await _check_stops(order_service, symbol, candle)
+            await trade_engine.on_candle_closed(
+                CandleClosed(symbol=symbol, timeframe=entry_tf.value, occurred_at=candle.close_time)
+            )
 
-    await _force_close_open_positions(order_service, symbol, m5_bars[-1])
+        await _force_close_open_positions(order_service, symbol, entry_bars[-1])
+    finally:
+        activity_logger.removeHandler(activity_capture)
+        activity_logger.setLevel(original_level)
 
     trades = tuple(bookkeeper.trades)
     equity_curve = tuple(bookkeeper.equity_curve)
@@ -203,6 +295,15 @@ async def run_backtest(
         max_drawdown_pct=metrics.max_drawdown_pct(equity_curve),
         avg_r=metrics.avg_r(trades),
         worst_losing_streak=metrics.worst_losing_streak(trades),
+        activity_log=tuple(activity_capture.entries),
+        min_rr=resolved_min_rr,
+        risk_per_trade_pct=risk_caps.risk_per_trade_pct,
+        daily_loss_limit_pct=risk_caps.daily_loss_limit_pct,
+        max_open_positions=risk_caps.max_open_positions,
+        max_trades_per_day=risk_caps.max_trades_per_day,
+        consecutive_loss_pause=risk_caps.consecutive_loss_pause,
+        min_lot_fallback_enabled=risk_caps.min_lot_fallback_enabled,
+        max_risk_per_trade_pct=risk_caps.max_risk_per_trade_pct,
     )
 
 
@@ -277,6 +378,12 @@ def _default_registry(database_url: str) -> StrategyRegistry:
     registry = StrategyRegistry()
     breakout_v1 = BreakoutV1()
     registry.register(breakout_v1.spec.name, breakout_v1)
+    trend_structure_v1 = TrendStructureV1()
+    registry.register(trend_structure_v1.spec.name, trend_structure_v1)
+    trend_structure_v2 = TrendStructureV2()
+    registry.register(trend_structure_v2.spec.name, trend_structure_v2)
+    mean_reversion_v1 = MeanReversionV1()
+    registry.register(mean_reversion_v1.spec.name, mean_reversion_v1)
     session_factory = make_session_factory(database_url)
     strategy_versions = StrategyVersionService(
         repository=StrategyVersionRepository(session_factory),

@@ -296,7 +296,74 @@ export const getTradeHistory = (filters: TradeHistoryFilters = {}) => {
   return api.get<TradeHistoryPage>(`/journal/history${qs ? `?${qs}` : ""}`);
 };
 
+// ── Activity log (persisted "what is the bot doing and why") ───────────────
+
+export interface LogEntry {
+  id: number;
+  created_at: number; // epoch seconds UTC
+  level: string; // "INFO" | "WARNING" | "ERROR" | ...
+  logger: string; // e.g. "src.engine.application.trade_loop"
+  message: string;
+}
+
+export interface LogHistoryPage {
+  items: LogEntry[];
+  total: number; // count matching the filters, before limit/offset
+}
+
+export interface LogHistoryFilters {
+  level?: string;
+  logger_contains?: string;
+  q?: string;
+  created_from?: number; // epoch seconds UTC
+  created_to?: number;
+  limit?: number;
+  offset?: number;
+}
+
+/** Filtered, paginated activity log across every backend module — the
+ * durable record of signals, vetoes, fills, and circuit breakers, beyond
+ * what scrolls past in stdout. */
+export const getActivityLog = (filters: LogHistoryFilters = {}) => {
+  const params = new URLSearchParams();
+  for (const [key, value] of Object.entries(filters)) {
+    if (value !== undefined && value !== "") params.set(key, String(value));
+  }
+  const qs = params.toString();
+  return api.get<LogHistoryPage>(`/activity/history${qs ? `?${qs}` : ""}`);
+};
+
+export interface LogDeleteResult {
+  deleted: number;
+}
+
+/** Deletes specific activity log rows by id — backs single-row delete and
+ * multi-select bulk delete in the activity log UI. */
+export const deleteActivityLogByIds = (ids: number[]) =>
+  api.post<LogDeleteResult>("/activity/history/delete-by-ids", { ids });
+
+/** Deletes every activity log row matching the given filters — backs
+ * "delete all matching" in the activity log UI. Mirrors `LogHistoryFilters`
+ * (minus pagination); omitting all fields deletes every row. */
+export const deleteActivityLogByFilter = (
+  filters: Omit<LogHistoryFilters, "limit" | "offset"> = {}
+) => api.post<LogDeleteResult>("/activity/history/delete-by-filter", filters);
+
 // ── Backtest (Phase 5 reports) ──────────────────────────────────────────────
+
+export interface Zone {
+  kind: "demand" | "supply";
+  price_low: number;
+  price_high: number;
+  time_start: number; // epoch seconds UTC
+  time_end: number; // epoch seconds UTC
+}
+
+export interface StructurePoint {
+  label: "HH" | "HL" | "LH" | "LL";
+  price: number;
+  time: number; // epoch seconds UTC
+}
 
 export interface BacktestTrade {
   side: "buy" | "sell";
@@ -309,11 +376,21 @@ export interface BacktestTrade {
   close_price: number;
   profit: number;
   r_multiple: number | null;
+  zone: Zone | null;
+  pattern: string | null;
+  structure: StructurePoint[];
 }
 
 export interface EquityPoint {
   time: number; // epoch seconds UTC
   balance: number;
+}
+
+export interface ActivityLogEntry {
+  time: number; // epoch seconds UTC — simulated bot clock, not wall-clock
+  level: string; // "INFO" | "WARNING" | "ERROR"
+  logger: string; // e.g. "src.engine.application.trade_loop"
+  message: string;
 }
 
 export interface BacktestReportSummary {
@@ -329,11 +406,29 @@ export interface BacktestReportSummary {
   worst_losing_streak: number;
   starting_balance: number;
   ending_balance: number;
+  /** Spread-adjusted minimum reward:risk ratio SpreadGate enforced for this
+   * run — a run parameter like starting_balance, not a fixed strategy
+   * property. */
+  min_rr: number;
+  // The full RiskCaps actually enforced for this run (configs/risk.yaml's
+  // values, or this run's own overrides) — see RiskManager.size_position /
+  // record_trade_closed. daily_loss_limit_pct and consecutive_loss_pause
+  // are circuit breakers that pause the engine and never auto-resume, so a
+  // low trade_count relative to the period often means one of these
+  // tripped early, not that no more setups occurred.
+  risk_per_trade_pct: number;
+  daily_loss_limit_pct: number;
+  max_open_positions: number;
+  max_trades_per_day: number;
+  consecutive_loss_pause: number;
+  min_lot_fallback_enabled: boolean;
+  max_risk_per_trade_pct: number | null;
 }
 
 export interface BacktestReportDetail extends BacktestReportSummary {
   trades: BacktestTrade[];
   equity_curve: EquityPoint[];
+  activity_log: ActivityLogEntry[];
 }
 
 export interface BacktestReportPage {
@@ -376,8 +471,33 @@ export interface BacktestJobStatus {
 }
 
 export const getBacktestBots = () => api.get<BacktestBot[]>("/backtest/bots");
-export const startBacktest = (strategyId: string, symbol: string, period: string) =>
-  api.post<BacktestJobStatus>("/backtest/run", { strategy_id: strategyId, symbol, period });
+export const startBacktest = (
+  strategyId: string,
+  symbol: string,
+  period: string,
+  startingBalance?: number,
+  /** Override configs/risk.yaml's min-lot fallback for this run only — null/omitted
+   * uses whatever's currently configured (file default, or the live engine override
+   * from putMinLotFallback). See RunBacktestPanel's "small balance" section. */
+  minLotFallbackEnabled?: boolean,
+  maxRiskPerTradePct?: number,
+  /** Override configs/symbols/<symbol>.yaml's min_rr for this run only — null/omitted
+   * uses whatever's currently configured (file default, or the live override from
+   * putSymbolMinRr). A tighter-stop strategy can fail the RR floor a swing-trading
+   * min_rr was tuned for. */
+  minRr?: number,
+) =>
+  api.post<BacktestJobStatus>("/backtest/run", {
+    strategy_id: strategyId,
+    symbol,
+    period,
+    ...(startingBalance != null ? { starting_balance: startingBalance } : {}),
+    ...(minLotFallbackEnabled != null
+      ? { min_lot_fallback_enabled: minLotFallbackEnabled }
+      : {}),
+    ...(maxRiskPerTradePct != null ? { max_risk_per_trade_pct: maxRiskPerTradePct } : {}),
+    ...(minRr != null ? { min_rr: minRr } : {}),
+  });
 export const getBacktestJobStatus = (jobId: string) =>
   api.get<BacktestJobStatus>(`/backtest/run/${encodeURIComponent(jobId)}`);
 
@@ -611,6 +731,75 @@ export const evaluateCustomCode = (body: {
   period: string;
 }) => api.post<EvaluateCustomCodeResponse>("/strategies/evaluate-custom", body);
 
+// ── Custom indicators (sandboxed Python, independent of the chart's ────────
+// ── built-in client-side indicators) ────────────────────────────────────────
+
+export interface IndicatorSummary {
+  id: string;
+  name: string;
+  code_hash: string;
+  default_params: Record<string, number>;
+  created_at: number; // epoch seconds UTC
+  updated_at: number; // epoch seconds UTC
+}
+
+export interface IndicatorDetail extends IndicatorSummary {
+  code: string;
+}
+
+export interface ComputeIndicatorResponse {
+  times: number[];
+  series: Record<string, (number | null)[]>;
+  error: string | null;
+}
+
+export const listIndicators = () => api.get<IndicatorSummary[]>("/indicators");
+export const getIndicator = (id: string) =>
+  api.get<IndicatorDetail>(`/indicators/${encodeURIComponent(id)}`);
+/** Sandbox-validates `code` and, if it passes, saves a new indicator that
+ * immediately shows up in the chart's indicator picker. Throws
+ * ApiError(409) if `name` is already in use, ApiError(422) on sandbox
+ * rejection. */
+export const createIndicator = (body: {
+  name: string;
+  code: string;
+  default_params?: Record<string, number>;
+}) => api.post<IndicatorDetail>("/indicators", body);
+/** Re-validates `code` and, if it passes, updates this indicator's row in
+ * place — no version history, since indicators never trade live. Every
+ * chart currently using it picks up the new code on its next compute. */
+export const editIndicatorCode = (
+  id: string,
+  code: string,
+  defaultParams?: Record<string, number>,
+) =>
+  api.post<IndicatorDetail>(`/indicators/${encodeURIComponent(id)}/edit`, {
+    code,
+    default_params: defaultParams,
+  });
+/** Clones this indicator's code and default params into a brand-new row.
+ * Throws ApiError(409) if `name` is already in use. */
+export const duplicateIndicator = (id: string, name: string) =>
+  api.post<IndicatorDetail>(`/indicators/${encodeURIComponent(id)}/duplicate`, { name });
+export const deleteIndicator = (id: string) =>
+  api.delete<void>(`/indicators/${encodeURIComponent(id)}`);
+/** Computes a saved indicator against real candle history for the chart.
+ * `period` is "YYYY-MM:YYYY-MM". Sandbox/history/runtime failures come back
+ * as `error` in the response body, not an HTTP error. */
+export const computeIndicator = (
+  id: string,
+  body: { symbol: string; timeframe: string; period: string; params?: Record<string, number> },
+) => api.post<ComputeIndicatorResponse>(`/indicators/${encodeURIComponent(id)}/compute`, body);
+/** Same as computeIndicator, but for ad-hoc code that hasn't been saved yet
+ * — nothing is persisted. Used by the create/edit UI's Preview button. */
+export const previewIndicatorCode = (body: {
+  code: string;
+  params?: Record<string, number>;
+  symbol: string;
+  timeframe: string;
+  period: string;
+}) => api.post<ComputeIndicatorResponse>("/indicators/preview", body);
+
 // ── Symbol -> strategy routing (§6.6) ───────────────────────────────────────
 
 export interface SessionWindowWire {
@@ -624,17 +813,28 @@ export interface NormalSkillAssignment {
   strategy: string;
   risk_multiplier: number;
   sessions: SessionWindowWire[];
+  /** True only on the assignStrategyToSymbol response when that call just
+   * activated a previously-inactive symbol for live automated trading
+   * (persisted to configs/app.yaml, hot-added to candle streaming and the
+   * spread gate). Always false in getSkillAssignments()'s list — a listing
+   * isn't an action outcome. */
+  newly_activated: boolean;
 }
 
-/** Every configured symbol's current strategy assignment — the real "which
- * bot trades this symbol live" state (`TradeEngine._try_enter` reads this
- * via `SkillSelector`), distinct from a version's `spec.symbols` membership. */
+/** Every symbol currently routed for live trading — the real "which bot
+ * trades this symbol live" state (`TradeEngine._try_enter` reads this via
+ * `SkillSelector`), distinct from a version's `spec.symbols` membership.
+ * Includes any symbol activated at runtime via `assignStrategyToSymbol`,
+ * not just symbols configured at backend startup. */
 export const getSkillAssignments = () => api.get<NormalSkillAssignment[]>("/skills/normal");
 
 /** Reroutes `symbol` to `strategyName` — writes skills/normal/<symbol>.yaml
- * and hot-swaps the live SkillSelector, no restart needed. `strategyName`
- * must currently have an active, non-paused StrategyVersion (422 otherwise);
- * 404 if `symbol` has no configs/symbols/<symbol>.yaml. */
+ * and hot-swaps the live SkillSelector, no restart needed. If `symbol` isn't
+ * yet live-traded, this is also the action that activates it: persists it
+ * into configs/app.yaml and hot-adds it to candle streaming/the spread gate
+ * (see the response's `newly_activated`). `strategyName` must currently
+ * have an active, non-paused StrategyVersion (422 otherwise); 404 if
+ * `symbol` has no configs/symbols/<symbol>.yaml. */
 export const assignStrategyToSymbol = (symbol: string, strategyName: string) =>
   api.put<NormalSkillAssignment>(`/skills/normal/${encodeURIComponent(symbol)}`, {
     strategy_name: strategyName,
@@ -734,6 +934,27 @@ export const getEngineStatus = () => api.get<EngineStatus>("/engine/status");
 export const killSwitch = () => api.post<EngineStatus>("/engine/kill");
 export const resumeEngine = () => api.post<EngineStatus>("/engine/resume");
 
+export interface RiskCaps {
+  risk_per_trade_pct: number;
+  daily_loss_limit_pct: number;
+  max_open_positions: number;
+  max_trades_per_day: number;
+  consecutive_loss_pause: number;
+  /** When true, a balance too small for risk_per_trade_pct to reach the broker's
+   * minimum lot trades that minimum lot anyway, capped by max_risk_per_trade_pct. */
+  min_lot_fallback_enabled: boolean;
+  max_risk_per_trade_pct: number | null;
+}
+
+export const getRiskCaps = () => api.get<RiskCaps>("/engine/risk-caps");
+/** Live-updates the min-lot fallback on the running engine. Not persisted —
+ * a backend restart reverts to configs/risk.yaml. */
+export const putMinLotFallback = (enabled: boolean, maxRiskPerTradePct: number | null) =>
+  api.put<RiskCaps>("/engine/risk-caps/min-lot-fallback", {
+    enabled,
+    max_risk_per_trade_pct: maxRiskPerTradePct,
+  });
+
 // ── Broker: manual trading (chart buttons, click-to-trade, draggable SL/TP) ─
 
 export type OrderSide = "buy" | "sell";
@@ -822,6 +1043,23 @@ export const modifyPendingOrder = (
 ) => api.post<{ status: string }>(`/broker/orders/pending/${ticket}/modify`, { price, sl, tp });
 export const cancelPendingOrder = (ticket: number) =>
   api.delete<{ status: string }>(`/broker/orders/pending/${ticket}`);
+
+export interface SymbolSpreadConfig {
+  symbol: string;
+  max_spread_points: number;
+  /** Minimum spread-adjusted reward:risk ratio required to open —
+   * tp_distance >= min_rr * (sl_distance + spread_value). */
+  min_rr: number;
+}
+
+export const getSymbolSpreadConfig = (symbol: string) =>
+  api.get<SymbolSpreadConfig>(`/broker/symbols/${encodeURIComponent(symbol)}/spread-config`);
+/** Live-updates min_rr on the running engine. Not persisted — a backend
+ * restart reverts to configs/symbols/<symbol>.yaml. */
+export const putSymbolMinRr = (symbol: string, minRr: number) =>
+  api.put<SymbolSpreadConfig>(`/broker/symbols/${encodeURIComponent(symbol)}/min-rr`, {
+    min_rr: minRr,
+  });
 
 // ── AI: provider settings (per-task LLM selection, Phase 10.4) ─────────────
 export interface TaskProviderStatus {

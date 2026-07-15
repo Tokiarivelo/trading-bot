@@ -20,6 +20,7 @@ close.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
@@ -88,7 +89,13 @@ async def connect(sid: str, _environ: dict[str, Any], auth: dict[str, Any] | Non
     password = _password_getter() if _password_getter else ""
     if password:
         token = (auth or {}).get("token", "")
-        if _session_issuer is None or not _session_issuer.verify(token, SESSION_TTL_SECONDS):
+        # verify() hits the OS keyring synchronously — offload it so a slow/
+        # unresponsive keyring backend can't stall the event loop for every
+        # other connection and request.
+        valid = _session_issuer is not None and await asyncio.to_thread(
+            _session_issuer.verify, token, SESSION_TTL_SECONDS
+        )
+        if not valid:
             logger.warning("ws client rejected: missing/invalid session sid=%s", sid)
             raise ConnectionRefusedError("authentication required")
     logger.info("ws client connected sid=%s", sid)

@@ -7,13 +7,17 @@ from typing import Any
 
 from fastapi import APIRouter, Request
 
-from src.engine.api.schemas import EngineStatusOut
+from src.engine.api.schemas import EngineStatusOut, RiskCapsOut, UpdateMinLotFallbackIn
 
 router = APIRouter(prefix="/engine", tags=["engine"])
 
 
 def _engine(request: Request) -> Any:
     return request.app.state.container.trade_engine
+
+
+def _risk_manager(request: Request) -> Any:
+    return request.app.state.container.risk_manager
 
 
 @router.get(
@@ -59,3 +63,39 @@ async def kill_switch(request: Request) -> EngineStatusOut:
 async def resume(request: Request) -> EngineStatusOut:
     _engine(request).resume()
     return EngineStatusOut(**asdict(_engine(request).status))
+
+
+@router.get(
+    "/risk-caps",
+    response_model=RiskCapsOut,
+    summary="Get the live engine's current risk caps",
+    description=(
+        "Returns every risk cap the running `RiskManager` is enforcing right now. "
+        "Matches `configs/risk.yaml` on disk unless `PUT /engine/risk-caps/min-lot-fallback` "
+        "has been called since the last backend restart, in which case those two fields "
+        "reflect the live override instead."
+    ),
+)
+async def get_risk_caps(request: Request) -> RiskCapsOut:
+    return RiskCapsOut(**asdict(_risk_manager(request).caps))
+
+
+@router.put(
+    "/risk-caps/min-lot-fallback",
+    response_model=RiskCapsOut,
+    summary="Enable/configure the broker-minimum-lot sizing fallback, live",
+    description=(
+        "Updates, on the running engine, whether a balance too small for "
+        "risk_per_trade_pct to reach the broker's minimum lot trades that minimum lot "
+        "anyway (and the risk ceiling that gates it) — see `RiskManager.size_position`. "
+        "Takes effect on the very next sizing decision for live/paper trading. Only these "
+        "two fields change; every other risk cap is untouched. **Not persisted** — a "
+        "backend restart reverts to `configs/risk.yaml`, which the human edits directly "
+        "to change the default (see CLAUDE.md: risk caps are user-owned)."
+    ),
+)
+async def update_min_lot_fallback(body: UpdateMinLotFallbackIn, request: Request) -> RiskCapsOut:
+    _risk_manager(request).set_min_lot_fallback(
+        enabled=body.enabled, max_risk_per_trade_pct=body.max_risk_per_trade_pct
+    )
+    return RiskCapsOut(**asdict(_risk_manager(request).caps))

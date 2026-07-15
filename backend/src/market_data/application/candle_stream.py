@@ -7,11 +7,14 @@ after each such close covers everything — see `_seconds_until_next_poll`.
 Every closed bar is also persisted, so history accumulates for backtests and
 AI snapshots as a side effect of streaming.
 
-Polling always covers `configs/app.yaml: symbols` (the engine's traded
-universe); `watch`/`unwatch` extend that set for symbols a chart is
-browsing on demand (see `market_data.api.ws`), so any symbol currently
-open on a chart gets live `candle_closed` updates too, not just the three
-the bot actually trades.
+Polling always covers the engine's traded universe (`configs/app.yaml:
+symbols` at startup, plus anything `add_symbol()`-activated live since —
+see `SkillAssignmentService.assign()`); `watch`/`unwatch` extend that set
+for symbols a chart is browsing on demand (see `market_data.api.ws`), so
+any symbol currently open on a chart gets live `candle_closed` updates
+too, not just the ones the bot actually trades — that ref-counted set
+decays to zero and stops once no chart tab has it open, unlike the
+permanent set `add_symbol()` grows.
 """
 
 from __future__ import annotations
@@ -67,14 +70,38 @@ class CandleStreamService:
         return [*self._symbols, *self._extra_refcounts]
 
     def watch(self, symbol: str) -> None:
-        """Start streaming `symbol` on demand (chart browsing a non-configured
-        symbol). No-op for symbols already in `configs/app.yaml: symbols` —
-        those are always active."""
+        """Start streaming `symbol` on demand (chart browsing a symbol not
+        yet permanently active). No-op for symbols already in the permanent
+        set (`_symbols`, see `add_symbol()`) — those are always active."""
         if symbol in self._symbols:
             return
         if self._extra_refcounts.get(symbol, 0) == 0:
             logger.info("candle stream: now watching ad-hoc symbol %s", symbol)
         self._extra_refcounts[symbol] = self._extra_refcounts.get(symbol, 0) + 1
+
+    def add_symbol(self, symbol: str) -> bool:
+        """Permanently activates `symbol` for automated trading — used by
+        `SkillAssignmentService.assign()` when a symbol is newly routed to a
+        strategy, as opposed to `watch()`'s ref-counted, chart-only
+        membership that decays to zero once no chart tab has it open.
+
+        Appends to `_symbols` in place rather than rebinding: `Container.
+        symbols` (e.g. the candle-backfill endpoint's default set) is the
+        same list object, and relies on the alias holding.
+
+        Idempotent — returns whether this call actually added it, so a
+        retried `assign()` for an already-active symbol is a safe no-op.
+        Stays fully synchronous (no `await` inside) so a single call can't
+        be interleaved by another coroutine mid-mutation."""
+        if symbol in self._symbols:
+            return False
+        self._symbols.append(symbol)
+        # Was ad-hoc chart-watched — now folded into permanent status, not
+        # double-tracked. A later unwatch() from that chart tab no-ops
+        # cleanly (its first line already guards on membership here).
+        self._extra_refcounts.pop(symbol, None)
+        logger.info("candle stream: symbol %s permanently activated for automated trading", symbol)
+        return True
 
     def unwatch(self, symbol: str) -> None:
         """Stop streaming `symbol` once nothing is watching it anymore."""

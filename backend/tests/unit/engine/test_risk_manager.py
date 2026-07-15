@@ -30,8 +30,8 @@ def test_size_position_computes_lots_from_risk_pct():
     assert decision.volume == 0.1  # (10000*0.005) / (5*100)
 
 
-def test_size_position_clamps_to_broker_minimum():
-    manager = make_manager()
+def test_size_position_rejects_when_fallback_disabled():
+    manager = make_manager()  # CAPS has min_lot_fallback_enabled=False (the default)
     decision = manager.size_position(
         balance=10.0,  # tiny risk budget -> below volume_min
         sl_distance_price=50.0,
@@ -42,6 +42,118 @@ def test_size_position_clamps_to_broker_minimum():
     )
     assert not decision.approved
     assert "minimum" in decision.reason
+
+
+def test_size_position_falls_back_to_min_lot_within_ceiling():
+    caps = RiskCaps(
+        risk_per_trade_pct=0.5,
+        daily_loss_limit_pct=2.0,
+        max_open_positions=2,
+        max_trades_per_day=8,
+        consecutive_loss_pause=3,
+        min_lot_fallback_enabled=True,
+        max_risk_per_trade_pct=10.0,  # generous ceiling for a small account
+    )
+    manager = make_manager(caps)
+    decision = manager.size_position(
+        balance=100.0,  # 0.5% risk budget can't reach volume_min at this sl distance
+        sl_distance_price=50.0,
+        contract_size=10.0,
+        volume_min=0.01,
+        volume_max=100.0,
+        volume_step=0.01,
+    )
+    assert decision.approved
+    # min-lot risk = 0.01*50*10 = $5 = 5% of $100, under the 10% ceiling
+    assert decision.volume == 0.01
+
+
+def test_size_position_rejects_when_min_lot_exceeds_ceiling():
+    caps = RiskCaps(
+        risk_per_trade_pct=0.5,
+        daily_loss_limit_pct=2.0,
+        max_open_positions=2,
+        max_trades_per_day=8,
+        consecutive_loss_pause=3,
+        min_lot_fallback_enabled=True,
+        max_risk_per_trade_pct=2.0,  # min-lot risk (5%) exceeds this
+    )
+    manager = make_manager(caps)
+    decision = manager.size_position(
+        balance=10.0,
+        sl_distance_price=50.0,
+        contract_size=100.0,
+        volume_min=0.01,
+        volume_max=100.0,
+        volume_step=0.01,
+    )
+    assert not decision.approved
+    assert "ceiling" in decision.reason
+
+
+def test_size_position_ignores_ceiling_when_fallback_disabled():
+    """A configured max_risk_per_trade_pct has no effect unless
+    min_lot_fallback_enabled is also true — the two are independent toggles."""
+    caps = RiskCaps(
+        risk_per_trade_pct=0.5,
+        daily_loss_limit_pct=2.0,
+        max_open_positions=2,
+        max_trades_per_day=8,
+        consecutive_loss_pause=3,
+        min_lot_fallback_enabled=False,
+        max_risk_per_trade_pct=50.0,  # generous, but fallback is off
+    )
+    manager = make_manager(caps)
+    decision = manager.size_position(
+        balance=100.0,
+        sl_distance_price=50.0,
+        contract_size=10.0,
+        volume_min=0.01,
+        volume_max=100.0,
+        volume_step=0.01,
+    )
+    assert not decision.approved
+
+
+def test_set_min_lot_fallback_updates_caps_live():
+    manager = make_manager()  # starts disabled
+    decision = manager.size_position(
+        balance=100.0, sl_distance_price=50.0, contract_size=10.0,
+        volume_min=0.01, volume_max=100.0, volume_step=0.01,
+    )
+    assert not decision.approved
+
+    manager.set_min_lot_fallback(enabled=True, max_risk_per_trade_pct=10.0)
+    decision = manager.size_position(
+        balance=100.0, sl_distance_price=50.0, contract_size=10.0,
+        volume_min=0.01, volume_max=100.0, volume_step=0.01,
+    )
+    assert decision.approved
+    assert decision.volume == 0.01
+    # Every other cap is untouched by the live update.
+    assert manager.caps.risk_per_trade_pct == CAPS.risk_per_trade_pct
+    assert manager.caps.max_open_positions == CAPS.max_open_positions
+
+    manager.set_min_lot_fallback(enabled=False, max_risk_per_trade_pct=None)
+    decision = manager.size_position(
+        balance=100.0, sl_distance_price=50.0, contract_size=10.0,
+        volume_min=0.01, volume_max=100.0, volume_step=0.01,
+    )
+    assert not decision.approved
+
+
+def test_size_position_rejects_non_positive_balance():
+    manager = make_manager()
+    decision = manager.size_position(
+        balance=0.0,
+        sl_distance_price=5.0,
+        contract_size=100.0,
+        volume_min=0.01,
+        volume_max=100.0,
+        volume_step=0.01,
+    )
+    assert not decision.approved
+    assert "balance" in decision.reason
 
 
 def test_size_position_rejects_non_positive_sl_distance():

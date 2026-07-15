@@ -1,4 +1,5 @@
 import dataclasses
+import json
 from datetime import UTC, datetime
 
 import httpx
@@ -10,7 +11,13 @@ from sqlalchemy.orm import sessionmaker
 from src.backtest.api import routes as routes_module
 from src.backtest.api.routes import _JobStatus, _resolve_strategy_name, router
 from src.backtest.application.run_backtest import NoHistoryError
-from src.backtest.domain.models import BacktestReport, BacktestTrade, EquityPoint
+from src.backtest.domain.models import (
+    ActivityLogEntry,
+    BacktestReport,
+    BacktestTrade,
+    BacktestZone,
+    EquityPoint,
+)
 from src.backtest.reports.writer import write_report
 from src.market_data.domain.models import MarketDataUnavailable, Timeframe
 from src.shared.db.base import Base
@@ -169,6 +176,137 @@ async def test_get_report_returns_full_detail(api):
     assert detail["trades"][0]["r_multiple"] == pytest.approx(2.2)
     assert detail["trades"][0]["open_time"] == int(T0.timestamp())
     assert len(detail["equity_curve"]) == 2
+
+
+async def test_get_report_includes_zone_pattern_structure(api):
+    client, reports_dir = api
+    zone = BacktestZone(
+        kind="demand", price_low=99.7, price_high=100.3, time_start=T0, time_end=T1
+    )
+    trade = dataclasses.replace(
+        make_report().trades[0],
+        zone=zone,
+        pattern="bullish_engulfing",
+        structure=(("HH", 105.0, T0), ("LL", 95.0, T1)),
+    )
+    report = dataclasses.replace(make_report(), trades=(trade,))
+    path = write_report(report, reports_dir)
+
+    response = await client.get(f"/backtest/reports/{path.stem}")
+    assert response.status_code == 200
+    out_trade = response.json()["trades"][0]
+
+    assert out_trade["zone"] == {
+        "kind": "demand",
+        "price_low": 99.7,
+        "price_high": 100.3,
+        "time_start": int(T0.timestamp()),
+        "time_end": int(T1.timestamp()),
+    }
+    assert out_trade["pattern"] == "bullish_engulfing"
+    assert out_trade["structure"] == [
+        {"label": "HH", "price": 105.0, "time": int(T0.timestamp())},
+        {"label": "LL", "price": 95.0, "time": int(T1.timestamp())},
+    ]
+
+
+async def test_get_report_defaults_zone_fields_for_legacy_reports(api):
+    """A report file written before this feature existed has no zone/pattern/
+    structure keys at all — must still parse instead of 500ing."""
+    client, reports_dir = api
+    path = write_report(make_report(), reports_dir)
+
+    response = await client.get(f"/backtest/reports/{path.stem}")
+    assert response.status_code == 200
+    out_trade = response.json()["trades"][0]
+    assert out_trade["zone"] is None
+    assert out_trade["pattern"] is None
+    assert out_trade["structure"] == []
+
+
+async def test_get_report_includes_activity_log(api):
+    client, reports_dir = api
+    report = dataclasses.replace(
+        make_report(),
+        activity_log=(
+            ActivityLogEntry(
+                time=T0,
+                level="INFO",
+                logger="src.engine.application.trade_loop",
+                message="ENTRY BLOCKED (HTF veto): XAUUSD buy — M15 trend (down) opposes buy",
+            ),
+        ),
+    )
+    path = write_report(report, reports_dir)
+
+    response = await client.get(f"/backtest/reports/{path.stem}")
+    assert response.status_code == 200
+    activity_log = response.json()["activity_log"]
+    assert activity_log == [
+        {
+            "time": int(T0.timestamp()),
+            "level": "INFO",
+            "logger": "src.engine.application.trade_loop",
+            "message": "ENTRY BLOCKED (HTF veto): XAUUSD buy — M15 trend (down) opposes buy",
+        }
+    ]
+
+
+async def test_get_report_defaults_activity_log_for_legacy_reports(api):
+    """A report file written before this feature existed has no activity_log
+    key at all — must still parse instead of 500ing."""
+    client, reports_dir = api
+    path = write_report(make_report(), reports_dir)
+
+    response = await client.get(f"/backtest/reports/{path.stem}")
+    assert response.status_code == 200
+    assert response.json()["activity_log"] == []
+
+
+async def test_get_report_defaults_min_rr_for_legacy_reports(api):
+    """A report file written before min_rr was tracked has no such key at
+    all (not even null) — must still parse and default to 1.0
+    (SpreadGate.DEFAULT_MIN_RR), not 500."""
+    client, reports_dir = api
+    path = write_report(make_report(), reports_dir)
+    raw = json.loads(path.read_text())
+    del raw["min_rr"]
+    path.write_text(json.dumps(raw))
+
+    response = await client.get(f"/backtest/reports/{path.stem}")
+    assert response.status_code == 200
+    assert response.json()["min_rr"] == 1.0
+
+
+async def test_get_report_defaults_risk_caps_for_legacy_reports(api):
+    """A report file written before risk caps were tracked has none of those
+    keys at all — must still parse with the RiskCaps dataclass's own
+    defaults, not 500."""
+    client, reports_dir = api
+    path = write_report(make_report(), reports_dir)
+    raw = json.loads(path.read_text())
+    for key in (
+        "risk_per_trade_pct",
+        "daily_loss_limit_pct",
+        "max_open_positions",
+        "max_trades_per_day",
+        "consecutive_loss_pause",
+        "min_lot_fallback_enabled",
+        "max_risk_per_trade_pct",
+    ):
+        del raw[key]
+    path.write_text(json.dumps(raw))
+
+    response = await client.get(f"/backtest/reports/{path.stem}")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["risk_per_trade_pct"] == 0.5
+    assert body["daily_loss_limit_pct"] == 2.0
+    assert body["max_open_positions"] == 100
+    assert body["max_trades_per_day"] == 8
+    assert body["consecutive_loss_pause"] == 10
+    assert body["min_lot_fallback_enabled"] is False
+    assert body["max_risk_per_trade_pct"] is None
 
 
 async def test_get_report_unknown_id_404s(api):

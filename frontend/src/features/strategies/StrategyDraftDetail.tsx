@@ -18,6 +18,7 @@ import {
   type PriceLevelAnnotationType,
   type StrategyDraft,
 } from "@/shared/api/client";
+import { downloadJson } from "@/shared/utils/download";
 import { RenameVersionInline } from "./RenameVersionInline";
 import { StatusBadge } from "./StatusBadge";
 import { StrategyVersionList } from "./StrategyVersionList";
@@ -128,22 +129,31 @@ export function StrategyDraftDetail({ draftId }: { draftId: string }) {
 
   return (
     <div className="flex flex-col gap-4 p-4">
-      <div>
-        <Link href="/bots" className="text-xs text-ink-muted hover:text-accent">
-          ← All bots
-        </Link>
-        <div className="mt-1 flex items-center gap-2">
-          <h2 className="text-lg font-semibold">{latestVersion?.name ?? draft.effective_spec.name}</h2>
-          {latestVersion && (
-            <RenameVersionInline
-              versionId={latestVersion.id}
-              name={latestVersion.name}
-              onRenamed={(newName) => setLatestVersion({ ...latestVersion, name: newName })}
-            />
-          )}
-          <StatusBadge status={draft.status} />
+      <div className="flex items-start justify-between">
+        <div>
+          <Link href="/bots" className="text-xs text-ink-muted hover:text-accent">
+            ← All bots
+          </Link>
+          <div className="mt-1 flex items-center gap-2">
+            <h2 className="text-lg font-semibold">{latestVersion?.name ?? draft.effective_spec.name}</h2>
+            {latestVersion && (
+              <RenameVersionInline
+                versionId={latestVersion.id}
+                name={latestVersion.name}
+                onRenamed={(newName) => setLatestVersion({ ...latestVersion, name: newName })}
+              />
+            )}
+            <StatusBadge status={draft.status} />
+          </div>
+          <p className="text-sm text-ink-muted">from {draft.source_filename}</p>
         </div>
-        <p className="text-sm text-ink-muted">from {draft.source_filename}</p>
+        <button
+          type="button"
+          onClick={() => downloadJson(draft, `draft_${draft.id}_${draft.effective_spec.name}.json`)}
+          className="shrink-0 cursor-pointer rounded border border-accent px-3 py-1.5 text-xs text-accent hover:bg-accent/10 transition-colors"
+        >
+          Export JSON
+        </button>
       </div>
 
       <section className="flex flex-col gap-3 rounded-md border border-line bg-panel p-3 text-sm">

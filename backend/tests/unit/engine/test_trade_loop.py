@@ -117,6 +117,13 @@ class FakeOrderService:
         strategy_version=None,
         skill=None,
         max_spread_points=None,
+        zone_kind=None,
+        zone_price_low=None,
+        zone_price_high=None,
+        zone_time_start=None,
+        zone_time_end=None,
+        pattern=None,
+        structure=(),
     ):
         if self._raise_on_open:
             raise self._raise_on_open
@@ -131,6 +138,13 @@ class FakeOrderService:
                 strategy_version=strategy_version,
                 skill=skill,
                 max_spread_points=max_spread_points,
+                zone_kind=zone_kind,
+                zone_price_low=zone_price_low,
+                zone_price_high=zone_price_high,
+                zone_time_start=zone_time_start,
+                zone_time_end=zone_time_end,
+                pattern=pattern,
+                structure=structure,
             )
         )
         return ExecutionResult(

@@ -34,6 +34,20 @@ class PositionOpened(Event):
     comment: str = ""
     strategy_version: str | None = None
     skill: str | None = None
+    # Optional chart-annotation data from the strategy's Signal (see
+    # strategies/domain/models.py: PriceZone/StructurePoint). Flattened to
+    # primitives rather than importing those domain types, same as `side`
+    # above being a plain str instead of the broker's Side enum — shared
+    # events stay framework/module-independent so any module can subscribe
+    # without importing another module's internals.
+    zone_kind: str | None = None  # "demand" | "supply"
+    zone_price_low: float | None = None
+    zone_price_high: float | None = None
+    zone_time_start: datetime | None = None
+    zone_time_end: datetime | None = None
+    pattern: str | None = None
+    structure: tuple[tuple[str, float, datetime], ...] = ()
+    """Swing points as (label, price, time), label one of HH/HL/LH/LL."""
 
 
 @dataclass(frozen=True, kw_only=True)

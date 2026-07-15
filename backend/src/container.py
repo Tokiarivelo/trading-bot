@@ -14,6 +14,8 @@ from pathlib import Path
 import httpx
 import yaml
 
+from src.activity.adapters.repository import ActivityLogRepository
+from src.activity.application.activity_log_service import ActivityLogService
 from src.ai.adapters.claude import ClaudeAdapter
 from src.ai.adapters.claude_code import ClaudeCodeAdapter
 from src.ai.adapters.gemini import GeminiAdapter
@@ -49,6 +51,8 @@ from src.engine.application.manual_trading import ManualTradeGate
 from src.engine.application.position_manager import PositionManager
 from src.engine.application.risk_manager import RiskManager
 from src.engine.application.trade_loop import TradeEngine
+from src.indicators.adapters.repository import IndicatorRepository
+from src.indicators.application.service import IndicatorService
 from src.journal.adapters.market_context import CandleRepositoryMarketContext
 from src.journal.adapters.repository import JournalRepository
 from src.journal.application.trade_journal import TradeJournalService
@@ -102,6 +106,9 @@ from src.skills.ports.skill_selector import SkillSelectorPort
 from src.strategies.adapters.repository import StrategyVersionRepository
 from src.strategies.application.versioning import StrategyVersionService
 from src.strategies.generated.breakout_v1 import BreakoutV1
+from src.strategies.generated.mean_reversion_v1 import MeanReversionV1
+from src.strategies.generated.trend_structure_v1 import TrendStructureV1
+from src.strategies.generated.trend_structure_v2 import TrendStructureV2
 from src.strategies.registry import StrategyRegistry
 
 _SKILLS_DIR = Path(__file__).resolve().parent / "skills" / "normal"
@@ -128,9 +135,13 @@ class Container:
     reconciliation: ReconciliationService
     health_monitor: GatewayHealthMonitor
     trade_journal: TradeJournalService
+    activity_log: ActivityLogService
+    risk_manager: RiskManager
+    spread_gate: SpreadGate
     trade_engine: TradeEngine
     strategy_registry: StrategyRegistry
     strategy_versions: StrategyVersionService
+    indicators: IndicatorService
     skill_selector: SkillSelectorPort
     skill_assignment: SkillAssignmentService
     pdf_to_strategy: PdfToStrategyService
@@ -218,6 +229,8 @@ def build_container(settings: Settings | None = None) -> Container:
     event_bus.subscribe(PositionOpened, trade_journal.on_position_opened)
     event_bus.subscribe(PositionClosed, trade_journal.on_position_closed)
 
+    activity_log = ActivityLogService(ActivityLogRepository(session_factory))
+
     alerting_config = load_alerting_config(settings.configs_dir)
     alert_adapters: list[AlertPort] = []
     alert_telegram_client: httpx.AsyncClient | None = None
@@ -271,6 +284,12 @@ def build_container(settings: Settings | None = None) -> Container:
     strategy_registry = StrategyRegistry()
     breakout_v1 = BreakoutV1()
     strategy_registry.register(breakout_v1.spec.name, breakout_v1)
+    trend_structure_v1 = TrendStructureV1()
+    strategy_registry.register(trend_structure_v1.spec.name, trend_structure_v1)
+    trend_structure_v2 = TrendStructureV2()
+    strategy_registry.register(trend_structure_v2.spec.name, trend_structure_v2)
+    mean_reversion_v1 = MeanReversionV1()
+    strategy_registry.register(mean_reversion_v1.spec.name, mean_reversion_v1)
 
     strategy_version_repository = StrategyVersionRepository(session_factory)
     strategy_versions = StrategyVersionService(
@@ -282,6 +301,11 @@ def build_container(settings: Settings | None = None) -> Container:
     # runs after the baseline registration above so a same-named AI version
     # (unlikely, but possible) wins, matching what the DB says is live.
     strategy_versions.load_active_into_registry()
+
+    indicator_repository = IndicatorRepository(session_factory)
+    indicators = IndicatorService(
+        repository=indicator_repository, candle_repository=candle_repository
+    )
 
     provider_config_repository = ProviderConfigRepository(session_factory)
     provider_secrets = ProviderSecretStore(Path("data/ai_provider_keys.enc"))
@@ -317,7 +341,8 @@ def build_container(settings: Settings | None = None) -> Container:
         repository=normal_skill_repository,
         selector=normal_skill_selector,
         strategy_registry=strategy_registry,
-        symbols=symbols,
+        candle_stream=candle_stream,
+        spread_gate=spread_gate,
         configs_dir=settings.configs_dir,
     )
 
@@ -407,9 +432,13 @@ def build_container(settings: Settings | None = None) -> Container:
         reconciliation=reconciliation,
         health_monitor=health_monitor,
         trade_journal=trade_journal,
+        activity_log=activity_log,
+        risk_manager=risk_manager,
+        spread_gate=spread_gate,
         trade_engine=trade_engine,
         strategy_registry=strategy_registry,
         strategy_versions=strategy_versions,
+        indicators=indicators,
         skill_selector=skill_selector,
         skill_assignment=skill_assignment,
         pdf_to_strategy=pdf_to_strategy,

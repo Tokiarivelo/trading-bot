@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
@@ -27,7 +28,9 @@ class AccountService:
         logger.info("connected: account=%s balance=%s %s", info.login, info.balance, info.currency)
         if remember:
             try:
-                self._store.save(credentials)
+                # store.save() hits the OS keyring synchronously — offload it so a
+                # slow/unresponsive keyring backend can't stall the event loop.
+                await asyncio.to_thread(self._store.save, credentials)
             except Exception:
                 # Persisting is convenience, not correctness — stay connected.
                 logger.exception("could not persist credentials (keyring unavailable?)")
@@ -41,17 +44,23 @@ class AccountService:
 
     async def status(self) -> dict[str, Any]:
         health = await self._gateway.health()
+        # store.load() hits the OS keyring synchronously — offload it so a
+        # slow/unresponsive keyring backend can't stall the event loop. This
+        # runs on the trade loop's hot path (TradeEngine._current_balance,
+        # called on every candle close), so a wedged keyring must not be able
+        # to freeze trade entries for every symbol.
+        has_saved_credentials = await asyncio.to_thread(self._store.load) is not None
         return {
             "gateway_up": health.gateway_up,
             "connected": health.terminal_connected,
             "account": health.account.__dict__ if health.account else None,
-            "has_saved_credentials": self._store.load() is not None,
+            "has_saved_credentials": has_saved_credentials,
         }
 
     async def reconnect_from_stored(self) -> bool:
         """Best-effort silent reconnect at startup. True if connected."""
         try:
-            credentials = self._store.load()
+            credentials = await asyncio.to_thread(self._store.load)
         except Exception:
             logger.exception("could not read stored credentials")
             return False

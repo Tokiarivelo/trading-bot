@@ -195,3 +195,30 @@ class PendingOrderOut(BaseModel):
     tp: float | None = Field(description="Take profit price, applied on fill.")
     placed_time: str = Field(description="Placement time, ISO 8601 UTC.")
     comment: str = Field(default="", description="Free-text order comment.")
+
+
+class SymbolSpreadConfigOut(BaseModel):
+    """The live `SpreadGate`'s current spread/RR config for one symbol —
+    matches `configs/symbols/<symbol>.yaml` unless `PUT
+    /broker/symbols/{symbol}/min-rr` has been called since the last restart."""
+
+    symbol: str
+    max_spread_points: int = Field(
+        description="Entries are vetoed above this spread, in points."
+    )
+    min_rr: float = Field(
+        description="Minimum spread-adjusted reward:risk ratio required to open — "
+        "tp_distance >= min_rr * (sl_distance + spread_value)."
+    )
+
+
+class UpdateMinRrIn(BaseModel):
+    """Body for `PUT /broker/symbols/{symbol}/min-rr`."""
+
+    min_rr: float = Field(
+        gt=0,
+        description="New minimum spread-adjusted reward:risk ratio for this symbol. A "
+        "tighter-stop strategy (e.g. a scalping variant) may need this lower than a "
+        "swing-trading min_rr tuned for wider distances, since a fixed-points spread "
+        "eats a bigger share of a smaller take-profit.",
+    )

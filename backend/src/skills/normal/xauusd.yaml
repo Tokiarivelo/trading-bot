@@ -1,8 +1,9 @@
-# Default trading behavior for XAUUSD — sessions mirror configs/symbols/xauusd.yaml.
 name: normal/xauusd
 symbol: XAUUSD
-strategy: breakout_v1
+strategy: pob_price_action_snd
 risk_multiplier: 1.0
 sessions:
-  - { start: "09:00", end: "12:00" }
-  - { start: "14:30", end: "18:00" }
+- start: 09:00
+  end: '12:00'
+- start: '14:30'
+  end: '18:00'

@@ -168,8 +168,9 @@ class DuplicateVersionRequest(BaseModel):
         "`StrategySpec(symbols=...)` literal in the cloned source and re-validates it in "
         "the sandbox before saving; the request fails if no such literal can be found. "
         "Leave unset to duplicate with the same symbols as the source version. This never "
-        "edits configs/app.yaml — the engine won't trade the new symbol live until a human "
-        "adds it there separately.",
+        "edits configs/app.yaml — the engine won't trade a new symbol live until it's applied "
+        "to that symbol via PUT /skills/normal/{symbol} (see the `skills` tag), which is the "
+        "one deliberate action that activates it.",
     )
 
 

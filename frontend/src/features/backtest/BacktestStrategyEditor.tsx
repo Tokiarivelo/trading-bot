@@ -20,6 +20,7 @@ import {
   getStrategyVersion,
   getStrategyVersions,
   startBacktest,
+  type EvaluateCustomCodeResponse,
   type StrategyVersionSummary,
 } from "@/shared/api/client";
 
@@ -42,6 +43,11 @@ export function BacktestStrategyEditor({
   period,
   onSaved,
   className,
+  onRunPreview,
+  previewBusy,
+  previewError,
+  previewResult,
+  onResetPreview,
 }: {
   strategyName: string;
   symbol: string;
@@ -52,6 +58,16 @@ export function BacktestStrategyEditor({
    * and just needs to swap which report id it's showing. */
   onSaved?: (reportId: string) => void;
   className?: string;
+  /** When set, renders a "Run & Show on Graph" button next to Save that
+   * evaluates the draft in the sandbox and overlays signals/indicators on
+   * the chart without persisting a strategy version or re-running the
+   * backtest — the counterpart of ChartPanel's own custom-code drawer.
+   * Only meaningful when this editor is embedded in the chart. */
+  onRunPreview?: (code: string) => void;
+  previewBusy?: boolean;
+  previewError?: string | null;
+  previewResult?: EvaluateCustomCodeResponse | null;
+  onResetPreview?: () => void;
 }) {
   const router = useRouter();
   const [baseVersion, setBaseVersion] = useState<StrategyVersionSummary | null>(null);
@@ -215,10 +231,40 @@ export function BacktestStrategyEditor({
               )}
             </div>
           )}
-          <div className="flex items-center gap-2 border-t border-line p-3 shrink-0">
+          {previewError && (
+            <div className="border-t border-line px-3 py-2 text-xs text-err shrink-0 max-h-32 overflow-y-auto">
+              <p>{previewError}</p>
+            </div>
+          )}
+          {previewResult && (
+            <div className="border-t border-line px-3 py-1.5 text-xs text-ok shrink-0 bg-panel/30 flex items-center justify-between">
+              <span>
+                Preview: {previewResult.signals.length} signal(s), {Object.keys(previewResult.indicators).length} indicator(s) calculated
+              </span>
+              {onResetPreview && (
+                <button
+                  onClick={onResetPreview}
+                  className="cursor-pointer px-1.5 py-0.5 rounded border border-line hover:border-ink hover:text-ink text-[10px] text-ink-muted"
+                >
+                  Reset Graph
+                </button>
+              )}
+            </div>
+          )}
+          <div className="flex flex-wrap items-center gap-2 border-t border-line p-3 shrink-0">
+            {onRunPreview && (
+              <button
+                type="button"
+                className="cursor-pointer rounded border border-accent px-3 py-1 text-xs text-accent hover:bg-accent hover:text-bg disabled:cursor-not-allowed disabled:opacity-50"
+                disabled={busy || previewBusy}
+                onClick={() => onRunPreview(draft)}
+              >
+                {previewBusy ? "Running code..." : "Run & Show on Graph"}
+              </button>
+            )}
             <button
               type="button"
-              className="cursor-pointer rounded border border-accent px-3 py-1 text-xs text-accent hover:bg-accent hover:text-bg disabled:cursor-not-allowed disabled:opacity-50"
+              className="cursor-pointer rounded border border-line px-3 py-1 text-xs hover:border-accent hover:text-accent disabled:cursor-not-allowed disabled:opacity-50"
               disabled={busy}
               onClick={onSave}
             >
@@ -227,8 +273,9 @@ export function BacktestStrategyEditor({
               {phase === "idle" && "Save & re-run backtest"}
             </button>
             <span className="text-xs text-ink-muted">
-              Saves as the next version of {strategyName}, then re-runs {symbol} {period} and
-              refreshes this report.
+              {onRunPreview
+                ? "Run previews signals on the graph without saving. Save persists a new version and re-runs the backtest."
+                : `Saves as the next version of ${strategyName}, then re-runs ${symbol} ${period} and refreshes this report.`}
             </span>
           </div>
         </div>

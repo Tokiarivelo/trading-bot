@@ -7,6 +7,7 @@ root and treated as read-only here.
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import math
 from datetime import date, datetime
@@ -82,15 +83,62 @@ class RiskManager:
         risk_multiplier: float = 1.0,
     ) -> RiskDecision:
         if sl_distance_price <= 0:
-            return RiskDecision(approved=False, reason="sl distance must be positive")
+            return RiskDecision(
+                approved=False,
+                reason=f"sl distance must be positive (got {sl_distance_price:.5f})",
+            )
+        if balance <= 0:
+            return RiskDecision(
+                approved=False, reason=f"balance must be positive (got {balance:.2f})"
+            )
         risk_amount = balance * (self._caps.risk_per_trade_pct / 100) * risk_multiplier
         raw_volume = risk_amount / (sl_distance_price * contract_size)
         steps = math.floor(raw_volume / volume_step)
         volume = round(steps * volume_step, 8)
-        # Rounding *up* to volume_min would risk more than risk_per_trade_pct
-        # allows, silently exceeding the user-owned cap — reject instead.
         if volume < volume_min:
-            return RiskDecision(approved=False, reason="computed volume below broker minimum")
+            if not self._caps.min_lot_fallback_enabled:
+                return RiskDecision(
+                    approved=False,
+                    reason=(
+                        f"computed volume {volume:.4f} lots < broker minimum {volume_min:.4f} "
+                        f"lots (risk_amount=${risk_amount:.2f} = balance ${balance:.2f} x "
+                        f"{self._caps.risk_per_trade_pct}% x multiplier {risk_multiplier:.2f}) "
+                        "— enable min_lot_fallback_enabled to trade the minimum lot anyway"
+                    ),
+                )
+            # Rounding *up* to volume_min unconditionally would silently risk
+            # more than risk_per_trade_pct allows. Instead of always
+            # rejecting, fall back to the broker minimum lot as long as *its*
+            # effective risk stays under max_risk_per_trade_pct (a wider,
+            # user-owned ceiling — see configs/risk.yaml) — this is what lets
+            # the bot still trade a small account instead of going silent.
+            ceiling = self._caps.max_risk_per_trade_pct
+            if ceiling is None:
+                ceiling = self._caps.risk_per_trade_pct
+            min_lot_risk_amount = volume_min * sl_distance_price * contract_size
+            min_lot_risk_pct = min_lot_risk_amount / balance * 100
+            if min_lot_risk_pct > ceiling:
+                return RiskDecision(
+                    approved=False,
+                    reason=(
+                        f"computed volume {volume:.4f} lots < broker minimum "
+                        f"{volume_min:.4f} lots, and the minimum lot's risk "
+                        f"({min_lot_risk_pct:.2f}% of balance) exceeds the "
+                        f"max_risk_per_trade_pct ceiling ({ceiling:.2f}%) "
+                        f"(risk_amount=${risk_amount:.2f} = balance ${balance:.2f} x "
+                        f"{self._caps.risk_per_trade_pct}% x multiplier {risk_multiplier:.2f})"
+                    ),
+                )
+            logger.info(
+                "risk manager: min-lot fallback — %.4f lots forced (effective risk "
+                "%.2f%% of balance $%.2f, vs configured %.2f%%, under ceiling %.2f%%)",
+                volume_min,
+                min_lot_risk_pct,
+                balance,
+                self._caps.risk_per_trade_pct,
+                ceiling,
+            )
+            return RiskDecision(approved=True, volume=min(volume_min, volume_max))
         volume = min(volume, volume_max)
         return RiskDecision(approved=True, volume=volume)
 
@@ -147,3 +195,25 @@ class RiskManager:
     @property
     def paused(self) -> bool:
         return self._paused
+
+    @property
+    def caps(self) -> RiskCaps:
+        return self._caps
+
+    def set_min_lot_fallback(self, *, enabled: bool, max_risk_per_trade_pct: float | None) -> None:
+        """Live-updates the min-lot fallback (see `size_position`) on the
+        running engine — takes effect on the very next sizing decision.
+        Only touches these two fields; every other cap stays whatever
+        `configs/risk.yaml` set at startup. Not persisted to disk: a
+        restart reverts to the file, which the human edits directly to
+        change the default (see CLAUDE.md)."""
+        self._caps = dataclasses.replace(
+            self._caps,
+            min_lot_fallback_enabled=enabled,
+            max_risk_per_trade_pct=max_risk_per_trade_pct,
+        )
+        logger.info(
+            "risk manager: min-lot fallback updated live — enabled=%s max_risk_per_trade_pct=%s",
+            enabled,
+            max_risk_per_trade_pct,
+        )

@@ -39,6 +39,8 @@ function periodToString(from: string, to: string): string {
   return `${normalized.from}:${normalized.to}`;
 }
 
+const DEFAULT_STARTING_BALANCE = 10_000;
+
 // ── Component ─────────────────────────────────────────────────────────────────
 
 export function RunBacktestPanel({ onDone }: RunBacktestPanelProps) {
@@ -48,6 +50,12 @@ export function RunBacktestPanel({ onDone }: RunBacktestPanelProps) {
   const [selectedBotId, setSelectedBotId] = useState<string | null>(null);
   const [selectedSymbol, setSelectedSymbol] = useState<string | null>(null);
   const [period, setPeriod] = useState(defaultPeriod);
+  const [startingBalance, setStartingBalance] = useState(String(DEFAULT_STARTING_BALANCE));
+  const [overrideFallback, setOverrideFallback] = useState(false);
+  const [fallbackEnabled, setFallbackEnabled] = useState(true);
+  const [fallbackCeiling, setFallbackCeiling] = useState("");
+  const [overrideMinRr, setOverrideMinRr] = useState(false);
+  const [minRr, setMinRr] = useState("");
 
   const [job, setJob] = useState<BacktestJobStatus | null>(null);
   const [submitting, setSubmitting] = useState(false);
@@ -97,8 +105,19 @@ export function RunBacktestPanel({ onDone }: RunBacktestPanelProps) {
     setSelectedSymbol(bot?.symbols[0] ?? null);
   }
 
+  const parsedBalance = Number(startingBalance);
+  const isBalanceValid = startingBalance.trim() !== "" && Number.isFinite(parsedBalance) && parsedBalance > 0;
+
+  const parsedCeiling = fallbackCeiling.trim() === "" ? null : Number(fallbackCeiling);
+  const isCeilingValid =
+    parsedCeiling === null || (Number.isFinite(parsedCeiling) && parsedCeiling > 0 && parsedCeiling <= 100);
+
+  const parsedMinRr = minRr.trim() === "" ? null : Number(minRr);
+  const isMinRrValid =
+    !overrideMinRr || (parsedMinRr !== null && Number.isFinite(parsedMinRr) && parsedMinRr > 0);
+
   async function handleRun() {
-    if (!selectedBotId || !selectedSymbol) return;
+    if (!selectedBotId || !selectedSymbol || !isBalanceValid || !isCeilingValid || !isMinRrValid) return;
     setRunErr(null);
     setSubmitting(true);
     setJob(null);
@@ -107,6 +126,10 @@ export function RunBacktestPanel({ onDone }: RunBacktestPanelProps) {
         selectedBotId,
         selectedSymbol,
         periodToString(period.from, period.to),
+        parsedBalance,
+        overrideFallback ? fallbackEnabled : undefined,
+        overrideFallback && parsedCeiling !== null ? parsedCeiling : undefined,
+        overrideMinRr && parsedMinRr !== null ? parsedMinRr : undefined,
       );
       setJob(newJob);
     } catch (e: unknown) {
@@ -232,12 +255,136 @@ export function RunBacktestPanel({ onDone }: RunBacktestPanelProps) {
           </p>
         </section>
 
+        {/* ── Starting balance ──────────────────────────────────────────── */}
+        <section className={`run-panel-section ${!selectedBot ? "run-panel-section--dim" : ""}`}>
+          <label className="run-panel-label">
+            <span className="run-panel-label-dot" style={{ background: "#fbbf24" }} />
+            Starting balance
+          </label>
+          <div className="balance-field">
+            <span className="balance-field-prefix">$</span>
+            <input
+              type="number"
+              min="0"
+              step="100"
+              className="balance-input"
+              value={startingBalance}
+              onChange={(e) => setStartingBalance(e.target.value)}
+              id="backtest-starting-balance"
+            />
+          </div>
+          {!isBalanceValid && (
+            <p className="period-hint" style={{ color: "#f87171" }}>
+              Enter a balance greater than 0.
+            </p>
+          )}
+        </section>
+
+        {/* ── Min-lot fallback override ─────────────────────────────────── */}
+        <section className={`run-panel-section ${!selectedBot ? "run-panel-section--dim" : ""}`}>
+          <label className="run-panel-label">
+            <span className="run-panel-label-dot" style={{ background: "#f87171" }} />
+            Small balance
+          </label>
+          <label className="fallback-toggle">
+            <input
+              type="checkbox"
+              checked={overrideFallback}
+              onChange={(e) => setOverrideFallback(e.target.checked)}
+              id="backtest-override-fallback"
+            />
+            Override min-lot fallback for this run
+          </label>
+          {overrideFallback && (
+            <div className="fallback-row">
+              <label className="fallback-toggle">
+                <input
+                  type="checkbox"
+                  checked={fallbackEnabled}
+                  onChange={(e) => setFallbackEnabled(e.target.checked)}
+                  id="backtest-fallback-enabled"
+                />
+                Trade minimum lot when risk % alone is too small
+              </label>
+              <div className="balance-field" style={{ maxWidth: 110 }}>
+                <input
+                  type="number"
+                  min="0"
+                  max="100"
+                  step="0.5"
+                  disabled={!fallbackEnabled}
+                  className="balance-input"
+                  value={fallbackCeiling}
+                  onChange={(e) => setFallbackCeiling(e.target.value)}
+                  placeholder="ceiling %"
+                  id="backtest-fallback-ceiling"
+                />
+                <span className="balance-field-prefix">%</span>
+              </div>
+            </div>
+          )}
+          <p className="period-hint">
+            Tests a different min-lot fallback than <code>configs/risk.yaml</code> (or the live
+            override) without touching either — one-off, this run only. Ceiling is the max
+            effective risk (%) the minimum lot is allowed to carry.
+          </p>
+          {overrideFallback && !isCeilingValid && (
+            <p className="period-hint" style={{ color: "#f87171" }}>
+              Ceiling must be between 0 and 100.
+            </p>
+          )}
+
+          <label className="fallback-toggle" style={{ marginTop: 10 }}>
+            <input
+              type="checkbox"
+              checked={overrideMinRr}
+              onChange={(e) => setOverrideMinRr(e.target.checked)}
+              id="backtest-override-min-rr"
+            />
+            Override minimum RR for this run
+          </label>
+          {overrideMinRr && (
+            <div className="fallback-row">
+              <div className="balance-field" style={{ maxWidth: 110 }}>
+                <input
+                  type="number"
+                  min="0"
+                  step="0.1"
+                  className="balance-input"
+                  value={minRr}
+                  onChange={(e) => setMinRr(e.target.value)}
+                  placeholder="min RR"
+                  id="backtest-min-rr"
+                />
+              </div>
+            </div>
+          )}
+          <p className="period-hint">
+            Overrides <code>configs/symbols/&lt;symbol&gt;.yaml</code>&apos;s min_rr — a tighter-
+            stop strategy (e.g. a scalping variant) can fail the spread-adjusted RR floor a
+            swing-trading min_rr was tuned for.
+          </p>
+          {overrideMinRr && !isMinRrValid && (
+            <p className="period-hint" style={{ color: "#f87171" }}>
+              Enter a minimum RR greater than 0.
+            </p>
+          )}
+        </section>
+
         {/* ── Run button ─────────────────────────────────────────────────── */}
         <div className="run-panel-actions">
           <button
             className={`run-btn ${isRunning ? "run-btn--busy" : ""}`}
             onClick={handleRun}
-            disabled={!selectedBotId || !selectedSymbol || isRunning || submitting}
+            disabled={
+              !selectedBotId ||
+              !selectedSymbol ||
+              !isBalanceValid ||
+              !isCeilingValid ||
+              !isMinRrValid ||
+              isRunning ||
+              submitting
+            }
             id="run-backtest-btn"
           >
             {submitting || isRunning ? (
@@ -492,6 +639,52 @@ export function RunBacktestPanel({ onDone }: RunBacktestPanelProps) {
           padding: 1px 4px;
           border-radius: 3px;
           font-family: monospace;
+        }
+
+        /* Starting balance */
+        .balance-field {
+          display: flex;
+          align-items: center;
+          gap: 6px;
+          padding: 7px 12px;
+          background: rgba(255,255,255,.06);
+          border: 1px solid rgba(255,255,255,.12);
+          border-radius: 8px;
+          max-width: 180px;
+          transition: border-color .15s;
+        }
+        .balance-field:focus-within {
+          border-color: rgba(251,191,36,.6);
+        }
+        .balance-field-prefix {
+          font-size: 13px;
+          color: var(--ink-muted, #94a3b8);
+        }
+        .balance-input {
+          flex: 1;
+          min-width: 0;
+          background: transparent;
+          border: none;
+          outline: none;
+          color: var(--ink, #f1f5f9);
+          font-size: 13px;
+          color-scheme: dark;
+        }
+
+        /* Min-lot fallback override */
+        .fallback-toggle {
+          display: flex;
+          align-items: center;
+          gap: 8px;
+          font-size: 13px;
+          color: var(--ink, #f1f5f9);
+          cursor: pointer;
+        }
+        .fallback-row {
+          display: flex;
+          align-items: center;
+          gap: 14px;
+          margin-top: 4px;
         }
 
         /* Run button */

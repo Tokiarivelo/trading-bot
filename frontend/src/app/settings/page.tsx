@@ -1,5 +1,6 @@
 import { ProviderKeysPanel } from "@/features/settings/ProviderKeysPanel";
 import { ProviderTaskTable } from "@/features/settings/ProviderTaskTable";
+import { RiskSettingsPanel } from "@/features/settings/RiskSettingsPanel";
 import { MenuButton } from "@/shared/ui/NavigationDrawer";
 
 export const metadata = { title: "Settings — AI Trading Bot" };
@@ -25,6 +26,10 @@ export default function SettingsPage() {
         <section>
           <h2 className="px-4 pt-3 text-sm font-semibold text-ink">Task provider &amp; model</h2>
           <ProviderTaskTable />
+        </section>
+        <section>
+          <h2 className="px-4 pt-3 text-sm font-semibold text-ink">Risk</h2>
+          <RiskSettingsPanel />
         </section>
       </main>
     </div>

@@ -10,8 +10,11 @@
  * "Indicators (N)" toggle button, same slot/style as DrawingsList.
  */
 
-import { useState } from "react";
+import Link from "next/link";
+import { useEffect, useState } from "react";
+import { listIndicators, type IndicatorSummary } from "@/shared/api/client";
 import type { ManualIndicator, ManualIndicatorType } from "./ChartPanel";
+import { IndicatorCodePeek } from "./IndicatorCodePeek";
 
 const PRESET_COLORS = [
   "#42a5f5", // Blue
@@ -30,6 +33,10 @@ const TYPE_LABELS: Record<ManualIndicatorType, string> = {
   bollinger: "Bollinger Bands",
   vwap: "VWAP",
   atr: "ATR",
+  structure: "Structure (HH/HL/LH/LL)",
+  qml: "Quasimodo (QML/QMR)",
+  patterns: "Candlestick patterns",
+  custom: "Custom (saved indicator)",
 };
 
 /** Default period per type, and whether the period is even user-editable. */
@@ -41,6 +48,14 @@ const TYPE_DEFAULTS: Record<ManualIndicatorType, { period: number; editablePerio
   bollinger: { period: 20, editablePeriod: true },
   macd: { period: 12, editablePeriod: false }, // fixed 12/26/9, see indicatorLabel()
   vwap: { period: 0, editablePeriod: false }, // cumulative, no period
+  // period here is the swing-detection lookback (bars each side), same
+  // meaning as the backend vix75 strategy's `swing_lookback` param.
+  structure: { period: 3, editablePeriod: true },
+  qml: { period: 3, editablePeriod: true },
+  patterns: { period: 0, editablePeriod: false }, // fixed thresholds, no period
+  // Params come from the saved indicator's own default_params (edit them on
+  // /indicators, or from the code-peek panel below) rather than this dock.
+  custom: { period: 0, editablePeriod: false },
 };
 
 /** Builds the display label shown in the chip list and on the chart series. */
@@ -52,6 +67,12 @@ function indicatorLabel(type: ManualIndicatorType, period: number): string {
       return "VWAP";
     case "bollinger":
       return `Bollinger (${period}, 2σ)`;
+    case "structure":
+      return `Structure (lookback ${period})`;
+    case "qml":
+      return `Quasimodo (lookback ${period})`;
+    case "patterns":
+      return "Candlestick patterns";
     default:
       return `${TYPE_LABELS[type]} (${period})`;
   }
@@ -61,21 +82,47 @@ interface Props {
   indicators: ManualIndicator[];
   onAdd: (indicator: ManualIndicator) => void;
   onRemove: (id: string) => void;
+  /** Called after the code-peek panel saves an edit to a saved indicator's
+   * code, so the chart can recompute every chip currently using it. */
+  onCustomIndicatorCodeSaved: () => void;
 }
 
-export function IndicatorsDock({ indicators, onAdd, onRemove }: Props) {
+export function IndicatorsDock({ indicators, onAdd, onRemove, onCustomIndicatorCodeSaved }: Props) {
   const [type, setType] = useState<ManualIndicatorType>("ema");
   const [period, setPeriod] = useState<number>(TYPE_DEFAULTS.ema.period);
   const [color, setColor] = useState<string>(PRESET_COLORS[0]);
+  const [customIndicators, setCustomIndicators] = useState<IndicatorSummary[]>([]);
+  const [selectedCustomId, setSelectedCustomId] = useState<string | null>(null);
+  const [peekIndicator, setPeekIndicator] = useState<{ id: string; name: string } | null>(null);
+
+  useEffect(() => {
+    listIndicators()
+      .then(setCustomIndicators)
+      .catch(() => setCustomIndicators([]));
+  }, []);
 
   const defaults = TYPE_DEFAULTS[type];
 
   function handleTypeChange(next: ManualIndicatorType) {
     setType(next);
     setPeriod(TYPE_DEFAULTS[next].period);
+    if (next === "custom") setSelectedCustomId(customIndicators[0]?.id ?? null);
   }
 
   function handleAdd() {
+    if (type === "custom") {
+      const chosen = customIndicators.find((c) => c.id === selectedCustomId);
+      if (!chosen) return;
+      onAdd({
+        id: crypto.randomUUID(),
+        type,
+        period: 0,
+        color,
+        label: chosen.name,
+        indicatorId: chosen.id,
+      });
+      return;
+    }
     const resolvedPeriod = defaults.editablePeriod ? period : defaults.period;
     onAdd({
       id: crypto.randomUUID(),
@@ -115,6 +162,21 @@ export function IndicatorsDock({ indicators, onAdd, onRemove }: Props) {
             </option>
           ))}
         </select>
+
+        {type === "custom" && (
+          <select
+            value={selectedCustomId ?? ""}
+            onChange={(e) => setSelectedCustomId(e.target.value || null)}
+            className="cursor-pointer rounded border border-line bg-panel px-1.5 py-1 text-xs text-ink"
+          >
+            {customIndicators.length === 0 && <option value="">No saved indicators yet</option>}
+            {customIndicators.map((c) => (
+              <option key={c.id} value={c.id}>
+                {c.name}
+              </option>
+            ))}
+          </select>
+        )}
 
         {defaults.editablePeriod && (
           <label style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 11, color: "var(--color-ink-muted)" }}>
@@ -158,10 +220,18 @@ export function IndicatorsDock({ indicators, onAdd, onRemove }: Props) {
 
         <button
           onClick={handleAdd}
-          className="cursor-pointer rounded border border-accent px-2 py-0.5 text-xs text-accent"
+          disabled={type === "custom" && !selectedCustomId}
+          className="cursor-pointer rounded border border-accent px-2 py-0.5 text-xs text-accent disabled:cursor-not-allowed disabled:opacity-50"
         >
           + Add
         </button>
+
+        <Link
+          href="/indicators"
+          className="ml-auto text-xs text-ink-muted hover:text-accent"
+        >
+          Manage indicators →
+        </Link>
       </div>
 
       {/* Active manual indicators */}
@@ -195,6 +265,25 @@ export function IndicatorsDock({ indicators, onAdd, onRemove }: Props) {
                 }}
               />
               {ind.label}
+              {ind.type === "custom" && ind.indicatorId && (
+                <button
+                  title="View/edit this indicator's code"
+                  onClick={() =>
+                    setPeekIndicator({ id: ind.indicatorId as string, name: ind.label })
+                  }
+                  style={{
+                    background: "transparent",
+                    border: "none",
+                    cursor: "pointer",
+                    color: "var(--color-ink-muted)",
+                    fontSize: 11,
+                    padding: 0,
+                    lineHeight: 1,
+                  }}
+                >
+                  ✏️
+                </button>
+              )}
               <button
                 title="Remove this indicator"
                 onClick={() => onRemove(ind.id)}
@@ -213,6 +302,15 @@ export function IndicatorsDock({ indicators, onAdd, onRemove }: Props) {
             </span>
           ))}
         </div>
+      )}
+
+      {peekIndicator && (
+        <IndicatorCodePeek
+          indicatorId={peekIndicator.id}
+          indicatorName={peekIndicator.name}
+          onClose={() => setPeekIndicator(null)}
+          onSaved={onCustomIndicatorCodeSaved}
+        />
       )}
     </div>
   );

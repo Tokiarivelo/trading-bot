@@ -22,6 +22,7 @@ import socketio
 from fastapi import Depends, FastAPI
 from pydantic import BaseModel, Field
 
+from src.activity.api.routes import router as activity_router
 from src.ai.api.routes import router as ai_router
 from src.ai.api.routes_refinement import router as ai_refinement_router
 from src.ai.api.routes_regeneration import router as ai_regeneration_router
@@ -31,13 +32,14 @@ from src.broker.api.routes import router as account_router
 from src.broker.api.trading_routes import router as trading_router
 from src.container import build_container
 from src.engine.api.routes import router as engine_router
+from src.indicators.api.routes import router as indicators_router
 from src.journal.api.routes import router as journal_router
 from src.market_data.api.routes import router as market_data_router
 from src.market_data.api.ws import bind_auth, bind_candle_stream, bind_live_candle, sio
 from src.news.api.routes import router as news_router
 from src.shared.auth.api.routes import router as auth_router
 from src.shared.auth.dependencies import require_session
-from src.shared.config.settings import load_yaml_config
+from src.shared.config.settings import Settings, load_yaml_config
 from src.shared.logging.setup import configure_logging
 from src.skills.api.routes import router as skills_router
 from src.strategies.api.routes import router as strategies_router
@@ -93,6 +95,14 @@ OPENAPI_TAGS = [
         "by the broker's `PositionOpened`/`PositionClosed` events.",
     },
     {
+        "name": "activity",
+        "description": "Read-only, persisted activity log — every backend module's INFO+ log "
+        "line (signal generated, HTF veto, risk gate block, spread veto, order filled, circuit "
+        "breaker), searchable after the fact. This is the durable record behind 'what is the "
+        "bot doing right now and why', independent of stdout/journal (which only covers "
+        "trades that actually filled).",
+    },
+    {
         "name": "engine",
         "description": "Automated trade-loop status and the manual kill switch. AI "
         "refinement logic and dev tooling must never call `/engine/kill` or "
@@ -127,11 +137,22 @@ OPENAPI_TAGS = [
         "`configs/app.yaml`'s paper/live mode or any risk cap.",
     },
     {
+        "name": "indicators",
+        "description": "Custom Python indicators computed server-side in a sandbox "
+        "(math/statistics/numpy/pandas only, no I/O or network) — independent of the chart's "
+        "built-in client-side indicators (EMA/SMA/RSI/...). Create/edit/duplicate/delete here "
+        "or from the chart's indicator picker; edits apply in place, since indicators never "
+        "trade and carry no live-trading risk to roll back from.",
+    },
+    {
         "name": "skills",
         "description": "Symbol -> strategy routing (§6.6): which strategy family trades each "
         "symbol live, read by TradeEngine._try_enter via SkillSelector. Reassigning here "
-        "rewrites skills/normal/<symbol>.yaml and takes effect immediately (no restart), but "
-        "never activates or changes a StrategyVersion itself — see the `strategies` tag for that.",
+        "rewrites skills/normal/<symbol>.yaml and takes effect immediately (no restart); for a "
+        "symbol not yet in the automated-trading universe it also persists the symbol into "
+        "configs/app.yaml and hot-activates candle streaming/the spread gate for it — this is "
+        "the one deliberate action that turns on live trading for a new symbol. It never "
+        "activates or changes a StrategyVersion itself — see the `strategies` tag for that.",
     },
     {
         "name": "news",
@@ -146,8 +167,9 @@ OPENAPI_TAGS = [
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    configure_logging()
-    container = build_container()
+    settings = Settings()
+    log_listener = configure_logging(database_url=settings.database_url)
+    container = build_container(settings)
     app.state.container = container
     bind_candle_stream(container.candle_stream)
     bind_live_candle(container.live_candle)
@@ -164,6 +186,8 @@ async def lifespan(app: FastAPI):
     container.health_monitor.start()
     yield
     await container.aclose()
+    if log_listener is not None:
+        log_listener.stop()
 
 
 app = FastAPI(
@@ -180,6 +204,7 @@ app.include_router(account_router, dependencies=_SESSION_REQUIRED)
 app.include_router(market_data_router, dependencies=_SESSION_REQUIRED)
 app.include_router(trading_router, dependencies=_SESSION_REQUIRED)
 app.include_router(journal_router, dependencies=_SESSION_REQUIRED)
+app.include_router(activity_router, dependencies=_SESSION_REQUIRED)
 app.include_router(engine_router, dependencies=_SESSION_REQUIRED)
 app.include_router(backtest_router, dependencies=_SESSION_REQUIRED)
 app.include_router(ai_router, dependencies=_SESSION_REQUIRED)
@@ -187,6 +212,7 @@ app.include_router(ai_refinement_router, dependencies=_SESSION_REQUIRED)
 app.include_router(ai_regeneration_router, dependencies=_SESSION_REQUIRED)
 app.include_router(ai_settings_router, dependencies=_SESSION_REQUIRED)
 app.include_router(strategies_router, dependencies=_SESSION_REQUIRED)
+app.include_router(indicators_router, dependencies=_SESSION_REQUIRED)
 app.include_router(skills_router, dependencies=_SESSION_REQUIRED)
 app.include_router(news_router, dependencies=_SESSION_REQUIRED)
 

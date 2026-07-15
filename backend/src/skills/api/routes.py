@@ -25,12 +25,14 @@ def _service(request: Request) -> SkillAssignmentService:
     "/normal",
     response_model=list[NormalSkillOut],
     summary="List every symbol's current strategy assignment",
-    description="One entry per symbol in configs/app.yaml, showing which strategy family is "
-    "currently routed to trade it live (§6.6) — the source TradeEngine._try_enter reads to "
-    "resolve which strategy to evaluate for a symbol.",
+    description="One entry per symbol currently routed for live trading — every "
+    "skills/normal/<symbol>.yaml file on disk, which may include symbols activated at runtime "
+    "via PUT .../normal/{symbol} since the backend last started, not just configs/app.yaml's "
+    "startup list. This is the source TradeEngine._try_enter reads to resolve which strategy "
+    "to evaluate for a symbol.",
 )
 async def list_normal_skills(request: Request) -> list[NormalSkillOut]:
-    skills = _service(request).list_assignments()
+    skills = await _service(request).list_assignments()
     return [NormalSkillOut.from_domain(s) for s in skills]
 
 
@@ -42,9 +44,14 @@ async def list_normal_skills(request: Request) -> list[NormalSkillOut]:
         "Reroutes which strategy family trades `symbol` live: writes "
         "skills/normal/<symbol>.yaml with the new `strategy` (keeping the symbol's existing "
         "sessions/risk_multiplier), and hot-swaps the running SkillSelector so the change takes "
-        "effect immediately, no restart needed. This is purely the routing decision — it does "
-        "not activate or change any StrategyVersion; the target family must already have an "
-        "active, non-paused version or the engine will simply find nothing to evaluate."
+        "effect immediately, no restart needed. If `symbol` isn't yet part of the automated-"
+        "trading universe, this also activates it — permanently, not just for as long as a "
+        "chart tab has it open: persists it into configs/app.yaml, hot-adds it to candle "
+        "streaming, and loads its spread-gate config, all immediately, no restart. This is "
+        "the one deliberate action that turns on live trading for a symbol (see "
+        "`newly_activated` on the response). It does not activate or change any "
+        "StrategyVersion; the target family must already have an active, non-paused version "
+        "or the engine will simply find nothing to evaluate."
     ),
     responses={
         404: {"description": "No configs/symbols/<symbol>.yaml for this symbol."},
@@ -59,9 +66,9 @@ async def assign_strategy(
     symbol: str = Path(description="Broker symbol, e.g. XAUUSD."),
 ) -> NormalSkillOut:
     try:
-        skill = _service(request).assign(symbol, body.strategy_name)
+        result = await _service(request).assign(symbol, body.strategy_name)
     except UnknownSymbolError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except UnknownStrategyError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    return NormalSkillOut.from_domain(skill)
+    return NormalSkillOut.from_domain(result.skill, newly_activated=result.newly_activated)

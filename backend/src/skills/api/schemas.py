@@ -27,9 +27,16 @@ class NormalSkillOut(BaseModel):
         description="Trading session windows in which this assignment is active; empty means "
         "always active."
     )
+    newly_activated: bool = Field(
+        default=False,
+        description="True only on the PUT response when this call just activated a "
+        "previously-inactive symbol for live automated trading (persisted to "
+        "configs/app.yaml, hot-added to candle streaming and the spread gate). Always False "
+        "on GET /skills/normal, since a listing isn't an action outcome.",
+    )
 
     @staticmethod
-    def from_domain(skill: NormalSkill) -> NormalSkillOut:
+    def from_domain(skill: NormalSkill, *, newly_activated: bool = False) -> NormalSkillOut:
         return NormalSkillOut(
             name=skill.name,
             symbol=skill.symbol,
@@ -41,6 +48,7 @@ class NormalSkillOut(BaseModel):
                 )
                 for window in skill.sessions
             ],
+            newly_activated=newly_activated,
         )
 
 

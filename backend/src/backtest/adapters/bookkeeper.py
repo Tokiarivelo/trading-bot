@@ -21,7 +21,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
-from src.backtest.domain.models import BacktestTrade, EquityPoint
+from src.backtest.domain.models import BacktestTrade, BacktestZone, EquityPoint
 from src.engine.application.risk_manager import RiskManager
 from src.shared.events.definitions import PositionClosed, PositionOpened
 
@@ -34,6 +34,9 @@ class _OpenLeg:
     open_price: float
     sl: float | None
     tp: float | None
+    zone: BacktestZone | None
+    pattern: str | None
+    structure: tuple[tuple[str, float, datetime], ...]
 
 
 class BacktestBookkeeper:
@@ -56,6 +59,15 @@ class BacktestBookkeeper:
         return {"account": {"balance": self.balance}}
 
     async def on_position_opened(self, event: PositionOpened) -> None:
+        zone = None
+        if event.zone_kind is not None:
+            zone = BacktestZone(
+                kind=event.zone_kind,
+                price_low=event.zone_price_low,
+                price_high=event.zone_price_high,
+                time_start=event.zone_time_start,
+                time_end=event.zone_time_end,
+            )
         self._open[event.position_id] = _OpenLeg(
             side=event.side,
             volume=event.volume,
@@ -63,6 +75,9 @@ class BacktestBookkeeper:
             open_price=event.price,
             sl=event.sl,
             tp=event.tp,
+            zone=zone,
+            pattern=event.pattern,
+            structure=event.structure,
         )
 
     async def on_position_closed(self, event: PositionClosed) -> None:
@@ -97,5 +112,8 @@ class BacktestBookkeeper:
                 close_price=event.close_price,
                 profit=event.profit,
                 r_multiple=r_multiple,
+                zone=leg.zone,
+                pattern=leg.pattern,
+                structure=leg.structure,
             )
         )

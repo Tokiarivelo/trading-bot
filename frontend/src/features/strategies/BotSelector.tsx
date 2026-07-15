@@ -30,6 +30,7 @@ export function BotSelector({ symbol }: { symbol: string }) {
   const [routedFamily, setRoutedFamily] = useState<string | null | undefined>(undefined);
   const [error, setError] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
+  const [justActivated, setJustActivated] = useState<string | null>(null);
 
   const refresh = useCallback(() => {
     Promise.all([getStrategyVersions(), getSkillAssignments()])
@@ -47,6 +48,7 @@ export function BotSelector({ symbol }: { symbol: string }) {
   useEffect(() => {
     setCandidates(null);
     setRoutedFamily(undefined);
+    setJustActivated(null);
     refresh();
   }, [refresh]);
 
@@ -56,11 +58,15 @@ export function BotSelector({ symbol }: { symbol: string }) {
   async function apply(v: StrategyVersionSummary) {
     setBusyId(v.id);
     setError(null);
+    setJustActivated(null);
     try {
       if (v.status !== "active") {
         await activateStrategyVersion(v.id);
       }
-      await assignStrategyToSymbol(symbol, v.name);
+      const result = await assignStrategyToSymbol(symbol, v.name);
+      if (result.newly_activated) {
+        setJustActivated(v.name);
+      }
       refresh();
     } catch (e) {
       setError(e instanceof ApiError ? e.message : "failed to apply this bot to " + symbol);
@@ -73,6 +79,12 @@ export function BotSelector({ symbol }: { symbol: string }) {
 
   return (
     <div className="flex flex-col gap-2 text-sm">
+      {justActivated && (
+        <p className="rounded border border-sell bg-sell/10 px-2 py-1 text-xs text-sell">
+          {symbol} is now live-trading with {justActivated} — newly activated, not just
+          rerouted.
+        </p>
+      )}
       <div>
         {routedFamily === undefined ? (
           <span className="text-ink-muted">Loading bot assignment for {symbol}…</span>

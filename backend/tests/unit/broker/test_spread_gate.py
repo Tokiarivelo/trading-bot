@@ -1,3 +1,5 @@
+import pytest
+
 from src.broker.application.spread_gate import SpreadGate
 from src.broker.domain.symbol_config import SymbolTradingConfig
 
@@ -96,3 +98,68 @@ def test_boundary_spread_is_allowed():
     gate = make_gate()
     veto = gate.check("XAUUSD", spread_points=35, point=0.01, sl_distance=10.0, tp_distance=16.0)
     assert veto is None
+
+
+def test_set_config_applies_immediately():
+    gate = SpreadGate({})
+    veto_before = gate.check(
+        "Volatility 75 Index", spread_points=999, point=0.01, sl_distance=None, tp_distance=None
+    )
+    assert veto_before is None  # unconfigured — no cap yet (RR skipped, no sl/tp given)
+
+    gate.set_config(
+        "Volatility 75 Index",
+        SymbolTradingConfig(
+            symbol="Volatility 75 Index",
+            max_spread_points=35,
+            min_rr=1.5,
+            contract_size=100,
+            point=0.01,
+            digits=2,
+            stops_level=0,
+            volume_min=0.01,
+            volume_max=50,
+            volume_step=0.01,
+        ),
+    )
+    veto_after = gate.check(
+        "Volatility 75 Index", spread_points=999, point=0.01, sl_distance=10.0, tp_distance=16.0
+    )
+    assert veto_after is not None
+    assert "999pts > max 35pts" in veto_after.reason
+
+
+def test_get_config_returns_none_for_unconfigured_symbol():
+    gate = make_gate()
+    assert gate.get_config("Boom 1000 Index") is None
+
+
+def test_get_config_returns_stored_config():
+    gate = make_gate()
+    assert gate.get_config("XAUUSD") == XAUUSD
+
+
+def test_update_min_rr_applies_immediately():
+    gate = make_gate()
+    # min_rr=1.5 would veto this (required tp = 1.5*10.25=15.375 > 12); a
+    # looser min_rr should let it through.
+    veto_before = gate.check(
+        "XAUUSD", spread_points=25, point=0.01, sl_distance=10.0, tp_distance=12.0
+    )
+    assert veto_before is not None
+
+    updated = gate.update_min_rr("XAUUSD", 1.0)
+    assert updated.min_rr == 1.0
+    # Every other field is untouched by the live update.
+    assert updated.max_spread_points == XAUUSD.max_spread_points
+    assert updated.contract_size == XAUUSD.contract_size
+
+    veto = gate.check("XAUUSD", spread_points=25, point=0.01, sl_distance=10.0, tp_distance=12.0)
+    assert veto is None
+    assert gate.get_config("XAUUSD").min_rr == 1.0
+
+
+def test_update_min_rr_raises_for_unconfigured_symbol():
+    gate = make_gate()
+    with pytest.raises(KeyError):
+        gate.update_min_rr("Boom 1000 Index", 1.0)
