@@ -35,6 +35,7 @@ import {
   FibRetracement,
   ParallelChannel,
 } from 'lightweight-charts-drawing';
+import { Play, Square } from 'lucide-react';
 import Link from 'next/link';
 import { useEffect, useRef, useState } from 'react';
 import {
@@ -43,6 +44,7 @@ import {
   getCandles,
   getSymbolInfo,
   getTradeMarkers,
+  type ActivityLogEntry,
   type BacktestTrade,
   type Candle,
   type NewsWindow,
@@ -67,6 +69,7 @@ import { ActivityLogDock } from './ActivityLogDock';
 import { DrawingToolbar } from './DrawingToolbar';
 import { DrawingsList } from './DrawingsList';
 import { IndicatorsDock } from './IndicatorsDock';
+import { ReplayControls } from './ReplayControls';
 import {
   atr,
   bollinger,
@@ -555,7 +558,7 @@ function nearestCandleTime(
 }
 
 /** Entry->exit oblique line for each closed live trade (LIVE_TRADE_DRAWING_PREFIX)
- * — mirrors the SL/TP-style segments `buildBacktestZoneDrawings` draws for a
+ * — mirrors the SL/TP-style segments `buildTradeSetupDrawings` draws for a
  * backtest report, but sourced from the journal's `TradeMarker[]` poll so a
  * closed live position is visible on the chart the same way. Open trades
  * (close_time/close_price still null) are skipped — there's no exit yet. */
@@ -648,80 +651,68 @@ function buildExitLineDrawing(
   );
 }
 
-/** Zone rectangles + SL/TP segments for a backtest report's trades — each
- * segment is bounded to that trade's own open→close time span (unlike live's
+/** Zone rectangle + SL/TP segments for a single backtest trade — the part
+ * that's known the moment the trade opens (unlike the exit line below, whose
+ * color/endpoint depend on the close). Split out from the old
+ * `buildBacktestZoneDrawings` so replay (§F, ChartPanel's trade-drawing
+ * effect) can reveal a trade's setup at `open_time` and its exit separately
+ * at `close_time`, instead of the whole bundle appearing at once. Each
+ * segment is bounded to the trade's own open→close time span (unlike live's
  * full-chart `buildPriceLines()`), since a report can have many trades on
  * screen at once. Only strategies that set `Signal.zone`/`sl`/`tp` produce
  * anything here; trades without one are skipped for that piece. */
-function buildBacktestZoneDrawings(
-  trades: BacktestTrade[],
+function buildTradeSetupDrawings(
+  t: BacktestTrade,
+  i: number,
   colors: { demand: string; supply: string; sl: string; tp: string },
 ): IDrawing[] {
   const drawings: IDrawing[] = [];
-  trades.forEach((t, i) => {
-    if (t.zone) {
-      const zoneColor =
-        t.zone.kind === 'demand' ? colors.demand : colors.supply;
-      drawings.push(
-        new Rectangle(
-          `${BACKTEST_DRAWING_PREFIX}zone:${i}`,
-          [
-            {
-              time: t.zone.time_start as UTCTimestamp,
-              price: t.zone.price_high,
-            },
-            { time: t.zone.time_end as UTCTimestamp, price: t.zone.price_low },
-          ],
-          {
-            lineColor: zoneColor,
-            lineWidth: 1,
-            fillColor: hexToRgba(zoneColor, 0.15),
-          },
-          { filled: true, locked: true },
-        ),
-      );
-    }
-    const openTime = t.open_time as UTCTimestamp;
-    const closeTime = t.close_time as UTCTimestamp;
+  if (t.zone) {
+    const zoneColor = t.zone.kind === 'demand' ? colors.demand : colors.supply;
     drawings.push(
-      buildExitLineDrawing(
-        BACKTEST_DRAWING_PREFIX,
-        String(i),
-        openTime,
-        t.open_price,
-        closeTime,
-        t.close_price,
-        t.profit,
-        { ok: colors.tp, err: colors.sl },
+      new Rectangle(
+        `${BACKTEST_DRAWING_PREFIX}zone:${i}`,
+        [
+          { time: t.zone.time_start as UTCTimestamp, price: t.zone.price_high },
+          { time: t.zone.time_end as UTCTimestamp, price: t.zone.price_low },
+        ],
+        {
+          lineColor: zoneColor,
+          lineWidth: 1,
+          fillColor: hexToRgba(zoneColor, 0.15),
+        },
+        { filled: true, locked: true },
       ),
     );
-    if (t.sl !== null) {
-      drawings.push(
-        new TrendLine(
-          `${BACKTEST_DRAWING_PREFIX}sl:${i}`,
-          [
-            { time: openTime, price: t.sl },
-            { time: closeTime, price: t.sl },
-          ],
-          { lineColor: colors.sl, lineWidth: 1, lineDash: [4, 4] },
-          { locked: true },
-        ),
-      );
-    }
-    if (t.tp !== null) {
-      drawings.push(
-        new TrendLine(
-          `${BACKTEST_DRAWING_PREFIX}tp:${i}`,
-          [
-            { time: openTime, price: t.tp },
-            { time: closeTime, price: t.tp },
-          ],
-          { lineColor: colors.tp, lineWidth: 1, lineDash: [4, 4] },
-          { locked: true },
-        ),
-      );
-    }
-  });
+  }
+  const openTime = t.open_time as UTCTimestamp;
+  const closeTime = t.close_time as UTCTimestamp;
+  if (t.sl !== null) {
+    drawings.push(
+      new TrendLine(
+        `${BACKTEST_DRAWING_PREFIX}sl:${i}`,
+        [
+          { time: openTime, price: t.sl },
+          { time: closeTime, price: t.sl },
+        ],
+        { lineColor: colors.sl, lineWidth: 1, lineDash: [4, 4] },
+        { locked: true },
+      ),
+    );
+  }
+  if (t.tp !== null) {
+    drawings.push(
+      new TrendLine(
+        `${BACKTEST_DRAWING_PREFIX}tp:${i}`,
+        [
+          { time: openTime, price: t.tp },
+          { time: closeTime, price: t.tp },
+        ],
+        { lineColor: colors.tp, lineWidth: 1, lineDash: [4, 4] },
+        { locked: true },
+      ),
+    );
+  }
   return drawings;
 }
 
@@ -1355,6 +1346,53 @@ export function ChartPanel({
     symbol: string;
     period: string;
   } | null>(null);
+  // Backtest report's own persisted activity log (signals/vetoes/fills for
+  // this exact run, with simulated-clock timestamps) — distinct from
+  // ActivityLogDock's default live/global poll, used to drive replay (below).
+  const [backtestActivityLog, setBacktestActivityLog] = useState<
+    ActivityLogEntry[] | null
+  >(null);
+  // Replay ("live session player", §F): progressively reveals the backtest
+  // report's candles/indicators/trades/log up to a moving cursor instead of
+  // drawing everything at once — see `visibleCandles()` below. `replayActive`
+  // toggles the mode on/off (off = today's static full-report view,
+  // unchanged); `replayActiveRef`/`replayCursorIndexRef` are the imperative
+  // source of truth read by `visibleCandles()`/`render()`/`recomputeIndicators`
+  // (closures created once per data-load, not re-created on every cursor
+  // tick), while the `useState` pair only drives the player UI.
+  const [replayActive, setReplayActive] = useState(false);
+  const [replayPlaying, setReplayPlaying] = useState(false);
+  const [replaySpeed, setReplaySpeed] = useState(1);
+  const [replayCursorIndex, setReplayCursorIndex] = useState(0);
+  const replayActiveRef = useRef(false);
+  const replayCursorIndexRef = useRef(0);
+  // Whether the view auto-centers on the cursor bar as it advances — turned
+  // off by a manual drag/zoom (see the mousedown/wheel listener below), back
+  // on via ReplayControls' "Center" button. `followingCursor` mirrors it
+  // into state purely so the UI can show whether it's engaged.
+  const followCursorRef = useRef(true);
+  const [followingCursor, setFollowingCursor] = useState(true);
+  // Track dragging/scrolling interaction and animation frame handles for replay panning
+  const isMouseDownRef = useRef(false);
+  const animationFrameRef = useRef<number | null>(null);
+  // "open-count:close-count" signature of the trades revealed as of the last
+  // trade-drawing rebuild — lets that effect skip rebuilding when a cursor
+  // tick didn't actually cross any trade's reveal threshold (see below).
+  const lastRevealedSignatureRef = useRef<string | null>(null);
+  // Set at the end of the candle-loading effect below to the `render()`
+  // closure created there, so the replay tick loop (a separate effect) can
+  // trigger a redraw without duplicating candle/volume `setData()` logic.
+  const renderRef = useRef<() => void>(() => {});
+  // The single gate every candle/indicator render path reads through: the
+  // full loaded window normally, or a prefix up to the replay cursor while
+  // replaying — so candles, EMA/SMA/RSI/MACD/Bollinger, and every manual
+  // indicator (VWAP/ATR/structure/QML/patterns) all become cursor-gated for
+  // free by switching their one `candlesRef.current` read to this call.
+  function visibleCandles(): Candle[] {
+    if (!replayActiveRef.current) return candlesRef.current;
+    return candlesRef.current.slice(0, replayCursorIndexRef.current + 1);
+  }
+
   const [showStrategyEditor, setShowStrategyEditor] = useState(false);
   // Drawer position for the strategy code editor
   type DrawerPosition = 'right' | 'left' | 'bottom' | 'top';
@@ -1555,6 +1593,36 @@ export function ChartPanel({
       borderVisible: false,
       wickUpColor: cssVar('--color-ok'),
       wickDownColor: cssVar('--color-err'),
+      autoscaleInfoProvider: (originalProvider: any) => {
+        const res = originalProvider ? originalProvider() : null;
+        if (replayActiveRef.current && followCursorRef.current) {
+          const bars = visibleCandles();
+          if (bars.length > 0) {
+            const lastCandle = bars[bars.length - 1];
+            const currentPrice = lastCandle.close;
+            if (res && res.priceRange) {
+              const { minValue, maxValue } = res.priceRange;
+              const originalSpan = maxValue - minValue;
+              const span = originalSpan > 0 ? originalSpan : currentPrice * 0.02;
+              return {
+                priceRange: {
+                  minValue: currentPrice - span / 2,
+                  maxValue: currentPrice + span / 2,
+                }
+              };
+            } else {
+              const span = currentPrice * 0.02;
+              return {
+                priceRange: {
+                  minValue: currentPrice - span / 2,
+                  maxValue: currentPrice + span / 2,
+                }
+              };
+            }
+          }
+        }
+        return res;
+      }
     });
 
     const volumeSeries = chart.addSeries(HistogramSeries, {
@@ -1605,7 +1673,7 @@ export function ChartPanel({
       // not on every recomputeIndicators call (candle tick, symbol switch).
 
       const spec = activeStrategyRef.current?.spec;
-      const candles = candlesRef.current;
+      const candles = visibleCandles();
       if (candles.length === 0) return;
 
       let rsiScaleReady = false;
@@ -1942,16 +2010,55 @@ export function ChartPanel({
               STRUCTURE_ATR_PERIOD,
               STRUCTURE_MARGIN_ATR_MULT,
             );
-            for (const zone of quasimodoLevels(points)) {
+            const lastTime = candles[candles.length - 1]
+              .time as UTCTimestamp;
+            quasimodoLevels(points, candles).forEach((zone, zoneIdx) => {
+              // Confirmation: the neckline-break candle, tagged at the QML
+              // level (the left shoulder) where the retest entry sits.
               structureMarkers.push({
                 time: zone.time,
                 position: 'atPriceMiddle',
                 price: zone.price,
                 color: manualIndicator.color,
                 shape: zone.kind === 'QML' ? 'arrowDown' : 'arrowUp',
-                text: zone.kind,
+                text: zone.kind === 'QML' ? 'QML' : 'QML-INV',
               });
-            }
+              // The QM zone band between the QML level (left shoulder) and
+              // the head (maximum pain level), from the head until the
+              // retest consumes it — or still-open to the latest candle.
+              // Supply (sell) tint for QML, demand (buy) for the inverse.
+              const zoneColor =
+                zone.kind === 'QML'
+                  ? cssVar('--color-sell')
+                  : cssVar('--color-buy');
+              manager.addDrawing(
+                new Rectangle(
+                  `${STRATEGY_DRAWING_PREFIX}qml-zone:${manualIndicator.id}:${zoneIdx}`,
+                  [
+                    { time: zone.headTime, price: zone.headPrice },
+                    { time: zone.retestTime ?? lastTime, price: zone.price },
+                  ],
+                  {
+                    lineColor: zoneColor,
+                    lineWidth: 1,
+                    fillColor: hexToRgba(zoneColor, 0.15),
+                  },
+                  { filled: true, locked: true },
+                ),
+              );
+              // Retest of the QML level after the break = the actual
+              // entry signal (sell for QML, buy for the inversed pattern).
+              if (zone.retestTime) {
+                structureMarkers.push({
+                  time: zone.retestTime,
+                  position: 'atPriceMiddle',
+                  price: zone.price,
+                  color: manualIndicator.color,
+                  shape: zone.kind === 'QML' ? 'arrowDown' : 'arrowUp',
+                  text: zone.kind === 'QML' ? 'SELL' : 'BUY',
+                });
+              }
+            });
             break;
           }
           case 'patterns': {
@@ -2507,7 +2614,17 @@ export function ChartPanel({
     setDrawingContextMenu(null);
     setDrawingEditPopover(null);
     setBacktestTrades(null);
+    setBacktestActivityLog(null);
     setBacktestError(null);
+    // A new symbol/timeframe/report invalidates any in-progress replay —
+    // the cursor index no longer lines up with the freshly-loaded candles.
+    replayActiveRef.current = false;
+    replayCursorIndexRef.current = 0;
+    followCursorRef.current = true;
+    setReplayActive(false);
+    setReplayPlaying(false);
+    setReplayCursorIndex(0);
+    setFollowingCursor(true);
     // WS updates for the new room can start arriving before the REST
     // history call below resolves. Applying one to the still-stale
     // previous symbol/timeframe's data can move time backwards (e.g.
@@ -2522,15 +2639,55 @@ export function ChartPanel({
 
     const chart = chartRef.current;
 
+    // `recomputeIndicators` tears down and recreates every indicator series
+    // (`chart.removeSeries`/`addSeries` per EMA/RSI/MACD/Bollinger line, plus
+    // rebuilding every period-separator drawing) — fine to call on every live
+    // tick (~once/1.5s) but far too expensive to run on literally every
+    // replay bar at speed. `scheduleOverlayRecompute` throttles just that
+    // part (leading + trailing edge: the first call after an idle period
+    // runs immediately, rapid follow-up calls coalesce into one trailing
+    // update `OVERLAY_THROTTLE_MS` later) while candle/volume `setData()`
+    // below — cheap, just fills existing series — still runs every tick so
+    // playback itself stays smooth.
+    const OVERLAY_THROTTLE_MS = 200;
+    let overlayTimer: ReturnType<typeof setTimeout> | null = null;
+    let lastOverlayRun = 0;
+
+    function runOverlaysNow() {
+      lastOverlayRun = Date.now();
+      recomputeIndicatorsRef.current();
+      // Custom-code overlays stay full-range/ungated during replay (§F scope
+      // decision) — skip re-running the sandboxed backend eval on every
+      // cursor tick, which would otherwise fire an HTTP request per bar.
+      if (!replayActiveRef.current) computeCustomIndicatorsRef.current();
+    }
+
+    function scheduleOverlayRecompute() {
+      if (!replayActiveRef.current) {
+        runOverlaysNow();
+        return;
+      }
+      const elapsed = Date.now() - lastOverlayRun;
+      if (elapsed >= OVERLAY_THROTTLE_MS) {
+        runOverlaysNow();
+        return;
+      }
+      if (overlayTimer) return;
+      overlayTimer = setTimeout(() => {
+        overlayTimer = null;
+        runOverlaysNow();
+      }, OVERLAY_THROTTLE_MS - elapsed);
+    }
+
     function render() {
       const upColor = cssVar('--color-ok');
       const downColor = cssVar('--color-err');
-      candleSeriesRef.current?.setData(candlesRef.current.map(toBar));
-      recomputeIndicatorsRef.current();
-      computeCustomIndicatorsRef.current();
+      const bars = visibleCandles();
+      candleSeriesRef.current?.setData(bars.map(toBar));
       volumeSeriesRef.current?.setData(
-        candlesRef.current.map((c) => toVolumeBar(c, upColor, downColor)),
+        bars.map((c) => toVolumeBar(c, upColor, downColor)),
       );
+      scheduleOverlayRecompute();
       setTimeout(() => {
         if (!cancelled) bumpLines((t) => t + 1);
       }, 50);
@@ -2572,6 +2729,10 @@ export function ChartPanel({
           // layout pass — applying it synchronously can land before the bars
           // are actually committed and produce an off-by-N shift.
           const range = chart?.timeScale().getVisibleLogicalRange();
+          if (replayActiveRef.current) {
+            replayCursorIndexRef.current += older.length;
+            setReplayCursorIndex((prev) => prev + older.length);
+          }
           render();
           if (range) {
             requestAnimationFrame(() => {
@@ -2610,6 +2771,7 @@ export function ChartPanel({
       const report = await getBacktestReport(backtestReportId);
       if (cancelled) return [];
       setBacktestTrades(report.trades);
+      setBacktestActivityLog(report.activity_log);
       setBacktestMeta({
         strategy: report.strategy,
         symbol: report.symbol,
@@ -2625,6 +2787,8 @@ export function ChartPanel({
           : undefined;
       return getCandles(symbol, timeframe, CANDLE_COUNT, anchor);
     }
+
+    renderRef.current = render;
 
     resolveInitialCandles()
       .then((candles) => {
@@ -2663,6 +2827,7 @@ export function ChartPanel({
     if (backtestReportId) {
       return () => {
         cancelled = true;
+        if (overlayTimer) clearTimeout(overlayTimer);
         historyLoadedRef.current = false;
         chart
           ?.timeScale()
@@ -2722,6 +2887,7 @@ export function ChartPanel({
 
     return () => {
       cancelled = true;
+      if (overlayTimer) clearTimeout(overlayTimer);
       historyLoadedRef.current = false;
       chart
         ?.timeScale()
@@ -3006,7 +3172,8 @@ export function ChartPanel({
   // report's trades actually change, not on every live candle tick.
   useEffect(() => {
     const manager = drawingManagerRef.current;
-    if (manager) {
+    function clearBacktestDrawings() {
+      if (!manager) return;
       for (const drawing of manager.getAllDrawings()) {
         if (
           drawing.id.startsWith(BACKTEST_DRAWING_PREFIX) ||
@@ -3018,32 +3185,84 @@ export function ChartPanel({
         }
       }
     }
-    if (!backtestReportId || backtestTrades === null) return;
+    if (!backtestReportId || backtestTrades === null) {
+      clearBacktestDrawings();
+      lastRevealedSignatureRef.current = null;
+      return;
+    }
     const colors = { ok: cssVar('--color-ok'), err: cssVar('--color-err') };
+    // While replaying, only reveal what would have been visible at the
+    // cursor bar's close — entry/setup at `open_time`, exit at `close_time`
+    // — same "no lookahead" contract as `visibleCandles()`. Off (the
+    // default), `cursorTime = Infinity` shows everything, unchanged from
+    // before replay existed.
+    const cursorTime = replayActive
+      ? ((candlesRef.current[replayCursorIndex]?.time as number | undefined) ??
+        0)
+      : Infinity;
     if (customCodeResult) {
       seriesMarkersRef.current?.setMarkers(
-        toCustomSignalsSeriesMarkers(customCodeResult.signals, colors),
+        toCustomSignalsSeriesMarkers(customCodeResult.signals, colors).filter(
+          (m) => (m.time as number) <= cursorTime,
+        ),
       );
+      clearBacktestDrawings();
+      lastRevealedSignatureRef.current = null;
       return;
     }
     seriesMarkersRef.current?.setMarkers(
-      toBacktestSeriesMarkers(backtestTrades, colors),
+      toBacktestSeriesMarkers(backtestTrades, colors).filter(
+        (m) => (m.time as number) <= cursorTime,
+      ),
     );
     if (manager) {
-      const zoneColors = {
-        demand: cssVar('--color-buy'),
-        supply: cssVar('--color-sell'),
-        sl: cssVar('--color-err'),
-        tp: cssVar('--color-ok'),
-      };
-      for (const drawing of buildBacktestZoneDrawings(
-        backtestTrades,
-        zoneColors,
-      )) {
-        manager.addDrawing(drawing);
+      // Rebuilding every trade's zone/SL/TP/exit-line drawings is O(trades)
+      // — cheap once, but this effect reruns on every replay cursor tick,
+      // and most single-bar advances don't cross any trade's reveal
+      // threshold. Skip the rebuild entirely when the revealed set hasn't
+      // actually changed since the last run (tracked as an "open:close
+      // count" signature) — a no-op tick shouldn't pay for a full rebuild.
+      const openCount = backtestTrades.reduce(
+        (n, t) => (t.open_time <= cursorTime ? n + 1 : n),
+        0,
+      );
+      const closeCount = backtestTrades.reduce(
+        (n, t) => (t.close_time <= cursorTime ? n + 1 : n),
+        0,
+      );
+      const signature = `${openCount}:${closeCount}`;
+      if (signature !== lastRevealedSignatureRef.current) {
+        lastRevealedSignatureRef.current = signature;
+        clearBacktestDrawings();
+        const zoneColors = {
+          demand: cssVar('--color-buy'),
+          supply: cssVar('--color-sell'),
+          sl: cssVar('--color-err'),
+          tp: cssVar('--color-ok'),
+        };
+        backtestTrades.forEach((t, i) => {
+          if (t.open_time > cursorTime) return;
+          for (const drawing of buildTradeSetupDrawings(t, i, zoneColors)) {
+            manager.addDrawing(drawing);
+          }
+          if (t.close_time <= cursorTime) {
+            manager.addDrawing(
+              buildExitLineDrawing(
+                BACKTEST_DRAWING_PREFIX,
+                String(i),
+                t.open_time as UTCTimestamp,
+                t.open_price,
+                t.close_time as UTCTimestamp,
+                t.close_price,
+                t.profit,
+                { ok: zoneColors.tp, err: zoneColors.sl },
+              ),
+            );
+          }
+        });
       }
     }
-  }, [backtestReportId, backtestTrades, customCodeResult]);
+  }, [backtestReportId, backtestTrades, customCodeResult, replayActive, replayCursorIndex]);
 
   // News window shading (§8, F8): shade the pre/post-event window of any
   // active news window that affects this symbol. Pixel positions are
@@ -3205,6 +3424,210 @@ export function ChartPanel({
     return () =>
       window.removeEventListener('mousedown', handleMouseDownOutside);
   }, [contextMenu, orderPopover, drawingContextMenu, drawingEditPopover]);
+
+  // How many bars of context to start replay with instead of a single bar —
+  // one candle against the still-full-range price scale renders as a
+  // barely-visible sliver squashed to one edge until the next fit; starting
+  // with real context avoids that and gives a sane first frame.
+  const REPLAY_START_CONTEXT_BARS = 50;
+
+  // Replay ("live session player", §F): the single place the cursor moves —
+  // used by step forward/back, the scrubber, and the autoplay tick below.
+  // Reads `candlesRef.current.length` live (not a captured snapshot) since
+  // panning near the left edge during replay can still trigger `loadMore`
+  // and grow the array.
+  //
+  // Keeps the cursor bar centered (history to its left, reserved empty space
+  // to its right, like a currently-forming live bar) by setting an explicit
+  // logical range every tick — not `scrollToPosition`, which anchors the
+  // latest bar to the *right edge*, not the middle. `followCursorRef` is the
+  // on/off switch: a manual drag/zoom (see the mousedown/wheel listener
+  // below) turns it off so playback stops fighting the user's pan, and
+  // `centerOn`'s width is *read from* the current visible range so it
+  // preserves whatever zoom level the user left it at rather than resetting.
+  function centerOn(index: number) {
+    const chart = chartRef.current;
+    if (!chart) return;
+    const current = chart.timeScale().getVisibleLogicalRange();
+    const width = current ? Math.max(10, current.to - current.from) : 2 * REPLAY_START_CONTEXT_BARS;
+    chart.timeScale().setVisibleLogicalRange({
+      from: index - width / 2,
+      to: index + width / 2,
+    });
+  }
+
+  function seekTo(index: number) {
+    const total = candlesRef.current.length;
+    if (total === 0) return;
+    const clamped = Math.max(0, Math.min(index, total - 1));
+    replayCursorIndexRef.current = clamped;
+    setReplayCursorIndex(clamped);
+    const chart = chartRef.current;
+    // Not following: capture the user's current view before `render()`
+    // touches the series data, and restore it exactly afterward — immune to
+    // whatever `setData()` itself does to the visible range internally, so
+    // a manual pan/zoom is never fought no matter how fast replay is ticking.
+    const preservedRange = followCursorRef.current
+      ? null
+      : chart?.timeScale().getVisibleLogicalRange();
+    renderRef.current();
+
+    // Cancel any pending animation frame to prevent layout queue accumulation
+    if (animationFrameRef.current !== null) {
+      cancelAnimationFrame(animationFrameRef.current);
+      animationFrameRef.current = null;
+    }
+
+    if (followCursorRef.current) {
+      animationFrameRef.current = requestAnimationFrame(() => {
+        animationFrameRef.current = null;
+        if (followCursorRef.current) {
+          centerOn(clamped);
+        }
+      });
+    } else if (chart && preservedRange && !isMouseDownRef.current) {
+      animationFrameRef.current = requestAnimationFrame(() => {
+        animationFrameRef.current = null;
+        if (!followCursorRef.current && !isMouseDownRef.current) {
+          chart.timeScale().setVisibleLogicalRange(preservedRange);
+        }
+      });
+    }
+  }
+
+  function handleEnterReplay() {
+    const total = candlesRef.current.length;
+    const startIndex = Math.min(REPLAY_START_CONTEXT_BARS, Math.max(0, total - 1));
+    replayCursorIndexRef.current = startIndex;
+    setReplayCursorIndex(startIndex);
+    setReplayPlaying(false);
+    replayActiveRef.current = true;
+    setReplayActive(true);
+    followCursorRef.current = true;
+    setFollowingCursor(true);
+    setShowActivityLogDock(true);
+    renderRef.current();
+    // Re-fit the price scale to the (now much smaller) revealed window
+    // instead of leaving the full report's price range applied — otherwise
+    // the first bars render as a squashed sliver at one edge of the old
+    // range. Center the time axis on the cursor with a fixed initial
+    // window (not `centerOn`, which would inherit the old full-report
+    // width and start zoomed miles out).
+    candleSeriesRef.current?.priceScale().applyOptions({ autoScale: true });
+    
+    // Cancel any pending animation frame
+    if (animationFrameRef.current !== null) {
+      cancelAnimationFrame(animationFrameRef.current);
+      animationFrameRef.current = null;
+    }
+    animationFrameRef.current = requestAnimationFrame(() => {
+      animationFrameRef.current = null;
+      chartRef.current?.timeScale().setVisibleLogicalRange({
+        from: startIndex - REPLAY_START_CONTEXT_BARS,
+        to: startIndex + REPLAY_START_CONTEXT_BARS,
+      });
+    });
+  }
+
+  function handleExitReplay() {
+    replayActiveRef.current = false;
+    setReplayActive(false);
+    setReplayPlaying(false);
+    if (animationFrameRef.current !== null) {
+      cancelAnimationFrame(animationFrameRef.current);
+      animationFrameRef.current = null;
+    }
+    renderRef.current();
+    candleSeriesRef.current?.priceScale().applyOptions({ autoScale: true });
+    chartRef.current?.timeScale().fitContent();
+  }
+
+  function handleRecenterReplay() {
+    followCursorRef.current = true;
+    setFollowingCursor(true);
+    candleSeriesRef.current?.priceScale().applyOptions({ autoScale: true });
+    if (animationFrameRef.current !== null) {
+      cancelAnimationFrame(animationFrameRef.current);
+      animationFrameRef.current = null;
+    }
+    animationFrameRef.current = requestAnimationFrame(() => {
+      animationFrameRef.current = null;
+      if (followCursorRef.current) {
+        centerOn(replayCursorIndexRef.current);
+      }
+    });
+  }
+
+  // A manual drag, touch-pan, or wheel/scroll zoom means the user wants to
+  // look at something other than the cursor bar — stop fighting it and
+  // leave the view exactly where they left it across every subsequent tick,
+  // until they explicitly re-engage via the "Center" button in
+  // ReplayControls. Only active during replay; the live/static views never
+  // had auto-follow to begin with.
+  useEffect(() => {
+    if (!replayActive) {
+      isMouseDownRef.current = false;
+      return;
+    }
+    const container = containerRef.current;
+    if (!container) return;
+    
+    const disengage = () => {
+      followCursorRef.current = false;
+      setFollowingCursor(false);
+      isMouseDownRef.current = true;
+    };
+    
+    const handleMouseUp = () => {
+      isMouseDownRef.current = false;
+    };
+    
+    container.addEventListener('mousedown', disengage);
+    container.addEventListener('touchstart', disengage, { passive: true });
+    container.addEventListener('wheel', disengage, { passive: true });
+    
+    window.addEventListener('mouseup', handleMouseUp);
+    window.addEventListener('touchend', handleMouseUp);
+    
+    return () => {
+      container.removeEventListener('mousedown', disengage);
+      container.removeEventListener('touchstart', disengage);
+      container.removeEventListener('wheel', disengage);
+      window.removeEventListener('mouseup', handleMouseUp);
+      window.removeEventListener('touchend', handleMouseUp);
+      if (animationFrameRef.current !== null) {
+        cancelAnimationFrame(animationFrameRef.current);
+        animationFrameRef.current = null;
+      }
+    };
+  }, [replayActive]);
+
+  // Autoplay: advances the cursor at an interval scaled by `replaySpeed`,
+  // pausing once it reaches the last loaded bar. `render()` re-runs the full
+  // indicator/structure/pattern recompute (and the trade-drawing effect
+  // reruns on every cursor change too) — expensive enough over a few hundred
+  // bars that firing it once per *bar* at high speed (e.g. every ~37ms at
+  // 16x) visibly stutters. Ticks are floored at MIN_TICK_MS and the cursor
+  // advances more bars per tick to compensate, capping how often the
+  // expensive recompute actually runs regardless of the speed the user picks.
+  useEffect(() => {
+    if (!replayPlaying) return;
+    const MIN_TICK_MS = 100;
+    const rawIntervalMs = 600 / replaySpeed;
+    const tickMs = Math.max(MIN_TICK_MS, rawIntervalMs);
+    const barsPerTick = Math.max(1, Math.round(tickMs / rawIntervalMs));
+    const id = setInterval(() => {
+      const next = replayCursorIndexRef.current + barsPerTick;
+      if (next >= candlesRef.current.length) {
+        seekTo(candlesRef.current.length - 1);
+        setReplayPlaying(false);
+        return;
+      }
+      seekTo(next);
+    }, tickMs);
+    return () => clearInterval(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [replayPlaying, replaySpeed]);
 
   const handleColorChange = (newColor: string) => {
     setActiveColor(newColor);
@@ -3604,6 +4027,25 @@ export function ChartPanel({
               {showStrategyEditor ? 'Hide code' : 'Edit code'}
             </button>
           )}
+          <button
+            className={`flex cursor-pointer items-center gap-1 rounded border px-2 py-0.5 ${
+              replayActive
+                ? 'border-accent bg-accent/20 text-accent'
+                : 'border-accent text-accent hover:bg-accent/20'
+            }`}
+            onClick={replayActive ? handleExitReplay : handleEnterReplay}
+            title="Watch this backtest unfold bar by bar — candles, indicators, trades and the activity log revealed progressively, like a live session"
+          >
+            {replayActive ? (
+              <>
+                <Square size={12} fill="currentColor" /> Exit replay
+              </>
+            ) : (
+              <>
+                <Play size={12} fill="currentColor" /> Replay
+              </>
+            )}
+          </button>
           {onExitBacktestView && (
             <button
               className='ml-auto cursor-pointer rounded border border-accent px-2 py-0.5 text-accent hover:bg-accent/20'
@@ -3613,6 +4055,39 @@ export function ChartPanel({
             </button>
           )}
         </div>
+      )}
+      {/* Replay player — shown while replaying a backtest report (§F) */}
+      {backtestReportId && replayActive && (
+        <ReplayControls
+          playing={replayPlaying}
+          onPlayPause={() => setReplayPlaying((p) => !p)}
+          onStepBack={() => {
+            setReplayPlaying(false);
+            seekTo(replayCursorIndexRef.current - 1);
+          }}
+          onStepForward={() => {
+            setReplayPlaying(false);
+            seekTo(replayCursorIndexRef.current + 1);
+          }}
+          speed={replaySpeed}
+          onSpeedChange={setReplaySpeed}
+          cursorIndex={replayCursorIndex}
+          totalBars={candlesRef.current.length}
+          currentTime={
+            candlesRef.current[replayCursorIndex]
+              ? new Date(candlesRef.current[replayCursorIndex].time * 1000)
+                  .toISOString()
+                  .replace('T', ' ')
+                  .slice(0, 19)
+              : '—'
+          }
+          onSeek={(index) => {
+            setReplayPlaying(false);
+            seekTo(index);
+          }}
+          following={followingCursor}
+          onRecenter={handleRecenterReplay}
+        />
       )}
       {/* Strategy info — collapsed by default, shows only name + toggle */}
       {activeStrategy?.spec &&
@@ -3701,8 +4176,34 @@ export function ChartPanel({
           onCustomIndicatorCodeSaved={() => computeCustomIndicatorsRef.current()}
         />
       )}
-      {/* Activity log dock — shown when the toggle is active */}
-      {showActivityLogDock && <ActivityLogDock symbol={symbol} />}
+      {/* Activity log dock — shown when the toggle is active. During replay,
+          feeds the backtest report's own activity log (its persisted trail
+          of signals/vetoes/fills, simulated-clock timestamps) filtered up
+          to the cursor bar, instead of the default live/global poll. */}
+      {showActivityLogDock && (
+        <ActivityLogDock
+          symbol={symbol}
+          replayEntries={
+            replayActive && backtestActivityLog
+              ? backtestActivityLog
+                  .filter(
+                    (e) =>
+                      e.time <=
+                      ((candlesRef.current[replayCursorIndex]?.time as
+                        | number
+                        | undefined) ?? 0),
+                  )
+                  .map((e, i) => ({
+                    id: i,
+                    created_at: e.time,
+                    level: e.level,
+                    logger: e.logger,
+                    message: e.message,
+                  }))
+              : undefined
+          }
+        />
+      )}
       <div className='relative min-h-0 flex-1'>
         <div ref={containerRef} className='h-full w-full' />
         {/* Strategy code drawer — slides in from the configured edge */}

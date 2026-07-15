@@ -34,7 +34,7 @@ const TYPE_LABELS: Record<ManualIndicatorType, string> = {
   vwap: "VWAP",
   atr: "ATR",
   structure: "Structure (HH/HL/LH/LL)",
-  qml: "Quasimodo (QML/QMR)",
+  qml: "Quasimodo (QML / inversed)",
   patterns: "Candlestick patterns",
   custom: "Custom (saved indicator)",
 };

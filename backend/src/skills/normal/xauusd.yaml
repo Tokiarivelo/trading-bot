@@ -1,6 +1,6 @@
 name: normal/xauusd
 symbol: XAUUSD
-strategy: pob_price_action_snd
+strategy: trend_structure_v1
 risk_multiplier: 1.0
 sessions:
 - start: 09:00

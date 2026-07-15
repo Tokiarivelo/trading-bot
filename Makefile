@@ -155,6 +155,10 @@ backtest: ## Run a strategy backtest: make backtest strategy=breakout_v1 symbol=
 seed-indicators: ## Seed the 15 PoB pattern/confirmation indicators into the indicator DB (safe to re-run)
 	cd backend && uv run python -m scripts.seed_pob_indicators
 
+.PHONY: seed-strategies
+seed-strategies: ## Seed the hardcoded baseline strategies (trend_structure_v1/v2) into the StrategyVersion DB (safe to re-run)
+	cd backend && uv run python -m scripts.seed_baseline_strategies
+
 # ─── Quality gates (run `make check` before declaring any task done) ─────────
 
 .PHONY: check

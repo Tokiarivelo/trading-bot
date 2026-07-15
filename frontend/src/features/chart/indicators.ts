@@ -223,66 +223,106 @@ export function swingStructure(
   return points;
 }
 
-export type QuasimodoKind = "QML" | "QMR";
+export type QuasimodoKind = "QML" | "QML_INV";
 
 export interface QuasimodoZone {
-  /** Time the pattern confirmed — the swing that broke structure. */
+  /** Candle that confirmed the pattern — the close that broke the neckline. */
   time: UTCTimestamp;
-  /** The "left shoulder" price level — where the QM entry zone sits. */
+  /** QML level: the left shoulder's extreme, where the retest entry sits. */
   price: number;
   kind: QuasimodoKind;
+  /** The swing between shoulder and head whose break confirms the pattern. */
+  necklinePrice: number;
+  /** Head extreme — the "maximum pain level"; a move past it voids the level. */
+  headPrice: number;
+  /** Head swing's candle — where the QM zone rectangle starts on the chart. */
+  headTime: UTCTimestamp;
+  /** First candle that tags the QML level again after confirmation, if any —
+   * the retest entry (sell for QML, buy for QML_INV). Undefined when price
+   * hasn't come back yet or ran past the head first. */
+  retestTime?: UTCTimestamp;
 }
 
 /**
- * Quasimodo levels derived from `swingStructure()`'s output — a chart
- * annotation only, not wired into any strategy's trading decision.
+ * Quasimodo (QML) levels from `swingStructure()`'s output plus raw candles —
+ * a chart annotation only, not wired into any strategy's trading decision.
  *
- * QML (bearish/sell zone): two rising highs framing a higher low — a
- * "left shoulder" (first HH), then a "head" (second, bigger HH) — followed
- * by a swing low that breaks back below the low between them (structure
- * break down). The zone is the left shoulder's price: price often returns
- * there before continuing down. QMR (bullish/buy zone) is the mirror image.
+ * QML (bearish, sell): an uptrend prints a high (left shoulder), a low
+ * (neckline), then a higher high (head). The pattern confirms when a candle
+ * CLOSES back below the neckline — the break of structure that turns the
+ * up-sequence into a lower low. The QML level is the left shoulder's high:
+ * price typically rallies back into it before continuing down, and that
+ * retest is the sell signal. QML_INV (bullish, buy) is the exact mirror —
+ * low shoulder, high neckline, lower-low head, confirmation on a close above
+ * the neckline, buy on the drop back into the shoulder's low.
  *
- * This is a best-effort algorithmic reading of the strategy spec's textual
- * description of QMR/QML/QMM ("left shoulder", "QM levels") — it hasn't been
- * validated against the source PDF's diagrams, so treat it as a reasonable
- * approximation, not a certified match to any specific course's exact rules.
+ * The head is the "maximum pain level" (MPL): price trading beyond it —
+ * before the neckline breaks, or after the break but before the retest —
+ * voids the level (pattern dropped / no retest marker). Both quick and late
+ * retests count; there is no bar-count expiry. Confirmation and retest are
+ * checked against actual candles, not just labeled swings, so a break that
+ * never printed a new swing pivot still confirms.
  */
-export function quasimodoLevels(points: StructurePoint[]): QuasimodoZone[] {
+export function quasimodoLevels(points: StructurePoint[], candles: Candle[]): QuasimodoZone[] {
   const zones: QuasimodoZone[] = [];
-  for (let i = 0; i + 3 < points.length; i++) {
-    const shoulder = points[i + 1];
-    const neckline = points[i + 2];
-    const head = points[i + 3];
+  const indexByTime = new Map<number, number>();
+  for (let i = 0; i < candles.length; i++) indexByTime.set(candles[i].time as number, i);
 
-    // Bearish QML: ... HH(shoulder), HL(neckline), HH(head) — a rising
-    // structure — then the first low after the head that breaks below the
-    // neckline confirms it.
-    if (shoulder.label === "HH" && neckline.label === "HL" && head.label === "HH") {
-      for (let j = i + 4; j < points.length; j++) {
-        const p = points[j];
-        if (p.label === "HL" || p.label === "LL") {
-          if (p.price < neckline.price) {
-            zones.push({ time: p.time, price: shoulder.price, kind: "QML" });
-          }
-          break;
-        }
+  for (let i = 0; i + 2 < points.length; i++) {
+    const shoulder = points[i];
+    const neckline = points[i + 1];
+    const head = points[i + 2];
+    const headIdx = indexByTime.get(head.time as number);
+    if (headIdx === undefined) continue;
+
+    // The label margin (marginAtrMult) can call a high "HH" that is only a
+    // hair above the shoulder, so re-check the head strictly beats it.
+    const bearish =
+      shoulder.label === "HH" &&
+      neckline.label === "HL" &&
+      head.label === "HH" &&
+      head.price > shoulder.price;
+    const bullish =
+      shoulder.label === "LL" &&
+      neckline.label === "LH" &&
+      head.label === "LL" &&
+      head.price < shoulder.price;
+    if (!bearish && !bullish) continue;
+
+    // Confirmation: after the head, price must close through the neckline
+    // (break of structure) before extending past the head again.
+    let confIdx = -1;
+    for (let j = headIdx + 1; j < candles.length; j++) {
+      const c = candles[j];
+      if (bearish ? c.high > head.price : c.low < head.price) break;
+      if (bearish ? c.close < neckline.price : c.close > neckline.price) {
+        confIdx = j;
+        break;
       }
     }
+    if (confIdx === -1) continue;
 
-    // Bullish QMR: mirror — LL(shoulder), LH(neckline), LL(head) — then the
-    // first high after the head that breaks above the neckline confirms it.
-    if (shoulder.label === "LL" && neckline.label === "LH" && head.label === "LL") {
-      for (let j = i + 4; j < points.length; j++) {
-        const p = points[j];
-        if (p.label === "LH" || p.label === "HH") {
-          if (p.price > neckline.price) {
-            zones.push({ time: p.time, price: shoulder.price, kind: "QMR" });
-          }
-          break;
-        }
+    // Retest: first candle back at the QML level after the break. A move
+    // beyond the head (maximum pain level) first voids the level instead.
+    let retestTime: UTCTimestamp | undefined;
+    for (let j = confIdx + 1; j < candles.length; j++) {
+      const c = candles[j];
+      if (bearish ? c.high >= shoulder.price : c.low <= shoulder.price) {
+        retestTime = c.time as UTCTimestamp;
+        break;
       }
+      if (bearish ? c.high > head.price : c.low < head.price) break;
     }
+
+    zones.push({
+      time: candles[confIdx].time as UTCTimestamp,
+      price: shoulder.price,
+      kind: bearish ? "QML" : "QML_INV",
+      necklinePrice: neckline.price,
+      headPrice: head.price,
+      headTime: head.time,
+      retestTime,
+    });
   }
   return zones;
 }
