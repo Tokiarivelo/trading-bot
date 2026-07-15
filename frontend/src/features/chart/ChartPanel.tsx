@@ -35,7 +35,7 @@ import {
   FibRetracement,
   ParallelChannel,
 } from 'lightweight-charts-drawing';
-import { Play, Square } from 'lucide-react';
+import { History, Play, Square } from 'lucide-react';
 import Link from 'next/link';
 import { useEffect, useRef, useState } from 'react';
 import {
@@ -70,6 +70,7 @@ import { DrawingToolbar } from './DrawingToolbar';
 import { DrawingsList } from './DrawingsList';
 import { IndicatorsDock } from './IndicatorsDock';
 import { ReplayControls } from './ReplayControls';
+import { SessionReplayPicker } from './SessionReplayPicker';
 import {
   atr,
   bollinger,
@@ -186,6 +187,56 @@ const TIMEFRAME_SECONDS: Record<Candle['timeframe'], number> = {
   W1: 604_800,
   MN: 2_592_000,
 };
+
+// Session replay ("live session player" over an arbitrary historical period,
+// independent of any backtest report): backend's `/market-data/candles` caps
+// `count` at 5000 (market_data/api/routes.py), so a period wider than one
+// page needs multiple requests paged backward via `before` — the "looping
+// fetch" in `fetchCandlesForPeriod` below.
+const SESSION_REPLAY_CHUNK_SIZE = 5000;
+// Beyond this many candles the picker warns (but still allows) the period —
+// it'll take more than one request to load.
+const SESSION_REPLAY_WARN_CANDLES = 8000;
+// Hard ceiling so a mis-picked period (e.g. years of M1) can't hang the tab
+// on dozens of sequential requests or hold an enormous array in memory.
+const SESSION_REPLAY_MAX_CANDLES = 60_000;
+// Safety valve on the fetch loop itself (defense in depth beyond the picker's
+// own block threshold) — a couple of pages of slack past what
+// SESSION_REPLAY_MAX_CANDLES should ever require.
+const SESSION_REPLAY_MAX_PAGES =
+  Math.ceil(SESSION_REPLAY_MAX_CANDLES / SESSION_REPLAY_CHUNK_SIZE) + 2;
+
+/** Fetches every candle in `[fromSec, toSec]`, paging backward one
+ * `SESSION_REPLAY_CHUNK_SIZE`-sized page at a time (same `before`-cursor
+ * pattern as the chart's own "load more") until the range is covered.
+ * `onPage` reports progress for the picker/banner UI. */
+async function fetchCandlesForPeriod(
+  symbol: string,
+  timeframe: Candle['timeframe'],
+  fromSec: number,
+  toSec: number,
+  onPage?: (page: number, loaded: number) => void,
+): Promise<Candle[]> {
+  let acc: Candle[] = [];
+  // `before` excludes the cursor bar itself — nudge one bar past `toSec` so
+  // the bar covering the period's end is still included in the first page.
+  let cursor = toSec + TIMEFRAME_SECONDS[timeframe];
+  for (let page = 1; page <= SESSION_REPLAY_MAX_PAGES; page++) {
+    const batch = await getCandles(
+      symbol,
+      timeframe,
+      SESSION_REPLAY_CHUNK_SIZE,
+      cursor,
+    );
+    if (batch.length === 0) break;
+    acc = [...batch, ...acc];
+    onPage?.(page, acc.length);
+    const oldest = batch[0];
+    if (oldest.time <= fromSec || batch.length < SESSION_REPLAY_CHUNK_SIZE) break;
+    cursor = oldest.time;
+  }
+  return acc.filter((c) => c.time >= fromSec && c.time <= toSec);
+}
 
 function isTimeframe(value: string | null): value is Candle['timeframe'] {
   return TIMEFRAMES.includes(value as Candle['timeframe']);
@@ -1393,6 +1444,32 @@ export function ChartPanel({
     return candlesRef.current.slice(0, replayCursorIndexRef.current + 1);
   }
 
+  // Session replay: an arbitrary historical period, picked ad hoc (not tied
+  // to a saved backtest report), replayed bar-by-bar like a live session.
+  // `sessionReplayPeriod` drives the history-loading effect below the same
+  // way `backtestReportId` does — pausing live WS and anchoring the initial
+  // candle load to the picked window instead of "now" — and is cleared to
+  // return to the live view.
+  const [sessionReplayPeriod, setSessionReplayPeriod] = useState<{
+    from: number;
+    to: number;
+  } | null>(null);
+  const [showSessionReplayPicker, setShowSessionReplayPicker] = useState(false);
+  const [sessionReplayFromInput, setSessionReplayFromInput] = useState('');
+  const [sessionReplayToInput, setSessionReplayToInput] = useState('');
+  // Progress while `fetchCandlesForPeriod`'s loop is still paging — null once
+  // the fetch settles (success or failure).
+  const [sessionReplayLoadingPage, setSessionReplayLoadingPage] = useState<{
+    page: number;
+    loaded: number;
+  } | null>(null);
+
+  function parseDateTimeLocal(value: string): number | null {
+    if (!value) return null;
+    const ms = new Date(value).getTime();
+    return Number.isNaN(ms) ? null : Math.floor(ms / 1000);
+  }
+
   const [showStrategyEditor, setShowStrategyEditor] = useState(false);
   // Drawer position for the strategy code editor
   type DrawerPosition = 'right' | 'left' | 'bottom' | 'top';
@@ -1432,6 +1509,31 @@ export function ChartPanel({
     useState<Candle['timeframe']>(loadLastTimeframe);
   const timeframeRef = useRef(timeframe);
   timeframeRef.current = timeframe;
+
+  // Derived from the session-replay picker's raw input strings — recomputed
+  // each render (cheap) rather than kept in state, since it always follows
+  // directly from sessionReplayFromInput/ToInput/timeframe.
+  const sessionReplayFromSec = parseDateTimeLocal(sessionReplayFromInput);
+  const sessionReplayToSec = parseDateTimeLocal(sessionReplayToInput);
+  const sessionReplayEstimate =
+    sessionReplayFromSec !== null &&
+    sessionReplayToSec !== null &&
+    sessionReplayToSec > sessionReplayFromSec
+      ? (() => {
+          const candles = Math.ceil(
+            (sessionReplayToSec - sessionReplayFromSec) /
+              TIMEFRAME_SECONDS[timeframe],
+          );
+          const pages = Math.ceil(candles / SESSION_REPLAY_CHUNK_SIZE);
+          const level: 'ok' | 'warn' | 'block' =
+            candles > SESSION_REPLAY_MAX_CANDLES
+              ? 'block'
+              : candles > SESSION_REPLAY_WARN_CANDLES
+                ? 'warn'
+                : 'ok';
+          return { candles, pages, level };
+        })()
+      : null;
 
   const [showSeparators, setShowSeparators] = useState<boolean>(() => {
     try {
@@ -2767,6 +2869,18 @@ export function ChartPanel({
     // time past the trades (a flat multi-hour buffer would eat most of a
     // 300-bar M5 window and push every earlier trade off the loaded page).
     async function resolveInitialCandles(): Promise<Candle[]> {
+      if (sessionReplayPeriod) {
+        setSessionReplayLoadingPage({ page: 0, loaded: 0 });
+        return fetchCandlesForPeriod(
+          symbol,
+          timeframe,
+          sessionReplayPeriod.from,
+          sessionReplayPeriod.to,
+          (page, loaded) => {
+            if (!cancelled) setSessionReplayLoadingPage({ page, loaded });
+          },
+        );
+      }
       if (!backtestReportId) return getCandles(symbol, timeframe, CANDLE_COUNT);
       const report = await getBacktestReport(backtestReportId);
       if (cancelled) return [];
@@ -2794,9 +2908,15 @@ export function ChartPanel({
       .then((candles) => {
         if (cancelled) return;
         candlesRef.current = candles;
-        hasMoreHistoryRef.current = candles.length >= CANDLE_COUNT;
+        // Session replay's window is deliberately bounded by the picked
+        // period — panning left shouldn't silently pull in history from
+        // before it, unlike the live/backtest views' open-ended paging.
+        hasMoreHistoryRef.current = sessionReplayPeriod
+          ? false
+          : candles.length >= CANDLE_COUNT;
         render();
         historyLoadedRef.current = true;
+        setSessionReplayLoadingPage(null);
         // A symbol/timeframe switch loads a fresh price/time range, but
         // lightweight-charts keeps whatever pan/zoom/price-scale state was
         // active for the previous symbol. `scrollToRealTime()` alone only
@@ -2809,22 +2929,30 @@ export function ChartPanel({
         setTimeout(() => {
           if (!cancelled) bumpLines((t) => t + 1);
         }, 50);
+        // Session replay has no separate "static full view" step — entering
+        // the mode always means playing through the picked period.
+        if (sessionReplayPeriod) handleEnterReplay();
       })
       .catch(() => {
         if (cancelled) return;
+        setSessionReplayLoadingPage(null);
         setError(
           backtestReportId
             ? 'failed to load backtest report'
-            : 'failed to load candles',
+            : sessionReplayPeriod
+              ? 'failed to load session replay candles'
+              : 'failed to load candles',
         );
         if (backtestReportId)
           setBacktestError('failed to load backtest report');
+        if (sessionReplayPeriod) setSessionReplayPeriod(null);
       });
 
     // Live candle updates only make sense against "now" — in backtest view
-    // the chart is anchored to a historical window, so a fresh WS tick would
-    // just append a stray present-day bar after a months-wide gap.
-    if (backtestReportId) {
+    // or session replay the chart is anchored to a historical window, so a
+    // fresh WS tick would just append a stray present-day bar after a
+    // months-wide gap.
+    if (backtestReportId || sessionReplayPeriod) {
       return () => {
         cancelled = true;
         if (overlayTimer) clearTimeout(overlayTimer);
@@ -2894,7 +3022,7 @@ export function ChartPanel({
         .unsubscribeVisibleLogicalRangeChange(onVisibleRangeChange);
       unsubscribe();
     };
-  }, [symbol, timeframe, backtestReportId]);
+  }, [symbol, timeframe, backtestReportId, sessionReplayPeriod]);
 
   // Recompute overlays when the active strategy changes (activated,
   // deactivated, or a different one picked up for this symbol), when the user
@@ -3542,6 +3670,33 @@ export function ChartPanel({
     chartRef.current?.timeScale().fitContent();
   }
 
+  // Starts session replay: validates the picker's current from/to inputs
+  // (mirrors the picker's own disabled-Start-button guard, in case this ever
+  // gets called some other way) and hands the parsed range to the
+  // history-loading effect via `sessionReplayPeriod`, which fetches it
+  // (chunked, if needed) and auto-enters replay once it lands.
+  function handleStartSessionReplay() {
+    if (
+      sessionReplayFromSec === null ||
+      sessionReplayToSec === null ||
+      sessionReplayToSec <= sessionReplayFromSec ||
+      !sessionReplayEstimate ||
+      sessionReplayEstimate.level === 'block'
+    ) {
+      return;
+    }
+    setShowSessionReplayPicker(false);
+    setSessionReplayPeriod({ from: sessionReplayFromSec, to: sessionReplayToSec });
+  }
+
+  // Leaves session replay entirely (not just pausing the player) — clearing
+  // `sessionReplayPeriod` re-triggers the history-loading effect, which
+  // reloads live "now" candles and resubscribes to WS updates.
+  function handleExitSessionReplay() {
+    handleExitReplay();
+    setSessionReplayPeriod(null);
+  }
+
   function handleRecenterReplay() {
     followCursorRef.current = true;
     setFollowingCursor(true);
@@ -3986,6 +4141,39 @@ export function ChartPanel({
         >
           Separators
         </button>
+        {/* Session replay: pick an arbitrary historical period and replay it
+            bar-by-bar, like a live session — independent of backtest reports,
+            so it's hidden while already viewing one (which has its own
+            Replay button above). */}
+        {!backtestReportId && (
+          <button
+            className={`flex cursor-pointer items-center gap-1 rounded border px-2 py-0.5 text-xs ${
+              sessionReplayPeriod
+                ? 'border-accent bg-accent/20 text-accent'
+                : showSessionReplayPicker
+                  ? 'border-accent text-accent'
+                  : 'border-line text-ink-muted hover:border-accent hover:text-accent'
+            }`}
+            onClick={() => {
+              if (sessionReplayPeriod) {
+                handleExitSessionReplay();
+              } else {
+                setShowSessionReplayPicker((v) => !v);
+              }
+            }}
+            title="Replay an arbitrary historical period bar-by-bar, like a live session"
+          >
+            {sessionReplayPeriod ? (
+              <>
+                <Square size={12} fill="currentColor" /> Exit session replay
+              </>
+            ) : (
+              <>
+                <History size={12} /> Session replay
+              </>
+            )}
+          </button>
+        )}
         <span className='ml-auto text-xs text-ink-muted'>
           {drawingTool && pendingAnchorCount > 0 && (
             <span className='mr-3 text-accent'>
@@ -4000,6 +4188,35 @@ export function ChartPanel({
         </span>
       </header>
       {error && <p className='px-4 py-1 text-xs text-err'>{error}</p>}
+      {showSessionReplayPicker && !sessionReplayPeriod && (
+        <SessionReplayPicker
+          fromValue={sessionReplayFromInput}
+          toValue={sessionReplayToInput}
+          onFromChange={setSessionReplayFromInput}
+          onToChange={setSessionReplayToInput}
+          estimate={sessionReplayEstimate}
+          onCancel={() => setShowSessionReplayPicker(false)}
+          onStart={handleStartSessionReplay}
+        />
+      )}
+      {sessionReplayPeriod && (
+        <div className='flex items-center gap-2 border-b border-line bg-accent/10 px-4 py-1 text-xs text-accent'>
+          <span>
+            Session replay —{' '}
+            {new Date(sessionReplayPeriod.from * 1000)
+              .toISOString()
+              .replace('T', ' ')
+              .slice(0, 16)}{' '}
+            →{' '}
+            {new Date(sessionReplayPeriod.to * 1000)
+              .toISOString()
+              .replace('T', ' ')
+              .slice(0, 16)}
+            {sessionReplayLoadingPage &&
+              ` — loading… page ${sessionReplayLoadingPage.page} (${sessionReplayLoadingPage.loaded.toLocaleString()} candles so far)`}
+          </span>
+        </div>
+      )}
       {backtestReportId && (
         <div className='flex items-center gap-2 border-b border-line bg-accent/10 px-4 py-1 text-xs text-accent'>
           <span>
@@ -4056,8 +4273,9 @@ export function ChartPanel({
           )}
         </div>
       )}
-      {/* Replay player — shown while replaying a backtest report (§F) */}
-      {backtestReportId && replayActive && (
+      {/* Replay player — shown while replaying a backtest report (§F) or a
+          session-replay period */}
+      {(backtestReportId || sessionReplayPeriod) && replayActive && (
         <ReplayControls
           playing={replayPlaying}
           onPlayPause={() => setReplayPlaying((p) => !p)}
