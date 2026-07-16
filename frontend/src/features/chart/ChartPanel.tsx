@@ -34,6 +34,7 @@ import {
   Rectangle,
   FibRetracement,
   ParallelChannel,
+  Circle,
 } from 'lightweight-charts-drawing';
 import { History, Play, Square } from 'lucide-react';
 import Link from 'next/link';
@@ -80,6 +81,7 @@ import {
   quasimodoLevels,
   rsi,
   sma,
+  sndZones,
   swingStructure,
   vwap,
 } from './indicators';
@@ -127,6 +129,7 @@ export type ManualIndicatorType =
   | 'atr'
   | 'structure'
   | 'qml'
+  | 'snd'
   | 'patterns'
   | 'custom';
 
@@ -157,7 +160,8 @@ export type DrawingToolType =
   | 'vertical-line'
   | 'rectangle'
   | 'fib-retracement'
-  | 'parallel-channel';
+  | 'parallel-channel'
+  | 'circle';
 
 const TIMEFRAMES: Candle['timeframe'][] = [
   'M1',
@@ -278,6 +282,7 @@ const REQUIRED_ANCHORS: Record<DrawingToolType, number> = {
   rectangle: 2,
   'fib-retracement': 2,
   'parallel-channel': 3,
+  circle: 2,
 };
 
 function cssVar(name: string): string {
@@ -360,6 +365,8 @@ function loadDrawingsFromStorage(
           return new FibRetracement(d.id, d.anchors, d.style, d.options);
         case 'parallel-channel':
           return new ParallelChannel(d.id, d.anchors, d.style, d.options);
+        case 'circle':
+          return new Circle(d.id, d.anchors, d.style, d.options);
         default:
           return null;
       }
@@ -1089,6 +1096,7 @@ function DrawingContextMenu({
     rectangle: 'Rectangle',
     'fib-retracement': 'Fibonacci Retr.',
     'parallel-channel': 'Parallel Channel',
+    circle: 'Circle',
   };
 
   return (
@@ -1202,6 +1210,7 @@ function DrawingEditPopover({
     rectangle: 'Rectangle',
     'fib-retracement': 'Fibonacci Retr.',
     'parallel-channel': 'Parallel Channel',
+    circle: 'Circle',
   };
 
   return (
@@ -2163,6 +2172,70 @@ export function ChartPanel({
             });
             break;
           }
+          case 'snd': {
+            // PoB supply & demand entry points (RBR/DBD/RBD/DBR): the base
+            // candles' band drawn as a zone rectangle, same treatment as
+            // the QML zone above. `period` here is the max base-candle
+            // count, not a lookback.
+            const lastTime = candles[candles.length - 1]
+              .time as UTCTimestamp;
+            sndZones(
+              candles,
+              manualIndicator.period,
+              STRUCTURE_ATR_PERIOD,
+            ).forEach((zone, zoneIdx) => {
+              const demand = zone.kind === 'demand';
+              // Retest entries sit at the proximal edge — the side of the
+              // base that price approaches first when it comes back.
+              const proximal = demand ? zone.priceHigh : zone.priceLow;
+              structureMarkers.push({
+                time: zone.time,
+                position: 'atPriceMiddle',
+                price: proximal,
+                color: manualIndicator.color,
+                shape: demand ? 'arrowUp' : 'arrowDown',
+                text: zone.pattern,
+              });
+              // Demand (buy) tint for RBR/DBR, supply (sell) for DBD/RBD.
+              // The rectangle spans the base candles' extremes, from the
+              // first base candle until the zone breaks — or still-open to
+              // the latest candle.
+              const zoneColor = demand
+                ? cssVar('--color-buy')
+                : cssVar('--color-sell');
+              manager.addDrawing(
+                new Rectangle(
+                  `${STRATEGY_DRAWING_PREFIX}snd-zone:${manualIndicator.id}:${zoneIdx}`,
+                  [
+                    { time: zone.baseStartTime, price: zone.priceHigh },
+                    {
+                      time: zone.brokenTime ?? lastTime,
+                      price: zone.priceLow,
+                    },
+                  ],
+                  {
+                    lineColor: zoneColor,
+                    lineWidth: 1,
+                    fillColor: hexToRgba(zoneColor, 0.15),
+                  },
+                  { filled: true, locked: true },
+                ),
+              );
+              // First tag back into the band after the leg-out = the
+              // retest entry (buy the demand base, sell the supply base).
+              if (zone.retestTime) {
+                structureMarkers.push({
+                  time: zone.retestTime,
+                  position: 'atPriceMiddle',
+                  price: proximal,
+                  color: manualIndicator.color,
+                  shape: demand ? 'arrowUp' : 'arrowDown',
+                  text: demand ? 'BUY' : 'SELL',
+                });
+              }
+            });
+            break;
+          }
           case 'patterns': {
             for (const p of detectPatterns(candles)) {
               structureMarkers.push({
@@ -3116,7 +3189,7 @@ export function ChartPanel({
   //
   // Required anchor counts per tool:
   //   1 anchor : horizontal-line, vertical-line
-  //   2 anchors: trend-line, extended-line, rectangle, fib-retracement
+  //   2 anchors: trend-line, extended-line, rectangle, fib-retracement, circle
   //   3 anchors: parallel-channel
   useEffect(() => {
     const manager = drawingManagerRef.current;
@@ -3189,6 +3262,9 @@ export function ChartPanel({
           break;
         case 'parallel-channel':
           drawing = new ParallelChannel(id, pendingAnchors, style);
+          break;
+        case 'circle':
+          drawing = new Circle(id, pendingAnchors, style);
           break;
       }
 

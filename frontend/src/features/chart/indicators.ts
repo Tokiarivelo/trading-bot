@@ -327,6 +327,207 @@ export function quasimodoLevels(points: StructurePoint[], candles: Candle[]): Qu
   return zones;
 }
 
+export type SndPattern = "RBR" | "DBD" | "RBD" | "DBR";
+export type SndKind = "demand" | "supply";
+
+export interface SndZone {
+  /** First leg-out candle whose close clears the base band — the pattern is
+   * complete and the zone exists from here. */
+  time: UTCTimestamp;
+  pattern: SndPattern;
+  /** demand (buy) for RBR/DBR, supply (sell) for DBD/RBD. */
+  kind: SndKind;
+  /** Zone band = the base candles' extremes. */
+  priceHigh: number;
+  priceLow: number;
+  /** First base candle — where the zone rectangle starts on the chart. */
+  baseStartTime: UTCTimestamp;
+  /** First candle back inside the zone after the leg-out, if any — the
+   * retest entry (buy for demand, sell for supply). Undefined when price
+   * hasn't returned yet or broke through the zone first. */
+  retestTime?: UTCTimestamp;
+  /** Candle that CLOSED through the far side of the zone, voiding it —
+   * where the rectangle ends. Undefined while the zone is still live. */
+  brokenTime?: UTCTimestamp;
+}
+
+export interface SndParams {
+  /** A leg run's NET travel (open of its first candle to close of its last)
+   * must be ≥ this × ATR to count as a rally/drop. */
+  legTravelAtrMult: number;
+  /** Base candle body must be ≤ this × ATR to count as consolidation. */
+  baseBodyAtrMult: number;
+}
+
+/** Same PoB doctrine as the backend vix75 strategy's zone params, tuned so
+ * an M5/M15 chart shows the obvious bases without flagging every doji. */
+export const DEFAULT_SND_PARAMS: SndParams = {
+  legTravelAtrMult: 1.0,
+  baseBodyAtrMult: 0.5,
+};
+
+/**
+ * PoB supply & demand zones — the "only 4 types of Entry Point" from the
+ * Property of Bystra notes: RBR (Rally Base Rally) / DBR (Drop Base Rally)
+ * demand zones to buy, DBD (Drop Base Drop) / RBD (Rally Base Drop) supply
+ * zones to sell. A chart annotation like `quasimodoLevels`, not wired into
+ * any strategy's trading decision.
+ *
+ * Detection finds the LEGS first, then reads the base as whatever sits
+ * between them. Every candle is either base-class (body ≤ baseBodyAtrMult ×
+ * ATR, any color) or a directional momentum bar; consecutive same-class
+ * candles merge into runs, and a directional run is a *leg* when its net
+ * travel reaches legTravelAtrMult × ATR — one 1.5-ATR candle and three
+ * 0.6-ATR candles in a row are both rallies (the PDF draws the RBD/DBR arms
+ * as multi-candle swings, not single bars). Two refinements, both from real
+ * missed-zone reports:
+ *   - weak same-direction runs split by a short pause merge into one run
+ *     (a rally printing 0.7-ATR candles around a doji is one leg, not two
+ *     non-legs) — but runs that BOTH already qualify stay separate, because
+ *     the pause between them is a stacked-zone base, not leg interior;
+ *   - the base between two legs is EVERY candle between them, including
+ *     medium-bodied pullback bars that are neither base-class nor
+ *     leg-strong (a lone 0.7-ATR red candle inside a rally used to break
+ *     the pattern into up / junk / up and silently drop the zone).
+ * A zone is then each adjacent pair of legs with 1..maxBaseCandles candles
+ * between them, confirmed by the first leg-out candle whose close clears
+ * the base extremes; the zone band is those between-candles' high/low. Leg
+ * directions name the pattern: up-base-up = RBR, down-base-up = DBR,
+ * down-base-down = DBD, up-base-down = RBD. Adjacent pairs share legs, so
+ * stacked zones (rally → base → rally → base → rally) all detect.
+ *
+ * Lifecycle mirrors the QML indicator: after the leg-out run, the first
+ * candle trading back into the band is the retest entry; a candle *closing*
+ * beyond the far side of the band breaks the zone (rectangle ends there).
+ * Unlike QML there is no separate confirmation step — the leg-out is itself
+ * the confirmation.
+ */
+export function sndZones(
+  candles: Candle[],
+  maxBaseCandles: number,
+  atrPeriod: number,
+  params: SndParams = DEFAULT_SND_PARAMS,
+): SndZone[] {
+  const n = candles.length;
+  const atrPoints = atr(candles, atrPeriod);
+  if (atrPoints.length === 0) return [];
+  // atrPoints[k] is the ATR at candles[atrPeriod + k]; pad the warmup bars
+  // with the first available value so early candles still classify.
+  const atrAt = new Array<number>(n).fill(atrPoints[0].value);
+  for (let k = 0; k < atrPoints.length; k++) atrAt[atrPeriod + k] = atrPoints[k].value;
+
+  // 0 = base (small body, either color); +1/-1 = directional momentum bar.
+  const classify = (i: number): -1 | 0 | 1 => {
+    if (Math.abs(candles[i].close - candles[i].open) <= params.baseBodyAtrMult * atrAt[i]) return 0;
+    return candles[i].close >= candles[i].open ? 1 : -1;
+  };
+
+  interface Run {
+    cls: -1 | 0 | 1;
+    start: number;
+    end: number;
+  }
+  const runs: Run[] = [];
+  for (let i = 0; i < n; i++) {
+    const cls = classify(i);
+    const last = runs[runs.length - 1];
+    if (last && last.cls === cls) last.end = i;
+    else runs.push({ cls, start: i, end: i });
+  }
+
+  const isLeg = (r: Run): boolean =>
+    r.cls !== 0 &&
+    Math.abs(candles[r.end].close - candles[r.start].open) >= params.legTravelAtrMult * atrAt[r.end];
+
+  // Weak same-direction runs split by a short base run merge into one run:
+  // a rally printing 0.7-ATR candles around a doji is one leg, not two
+  // non-legs (which made the whole move — and its zones — invisible). Runs
+  // that BOTH already qualify as legs stay separate: the pause between them
+  // is a stacked-zone base (rally → base → rally), not leg interior.
+  let mergedSomething = true;
+  while (mergedSomething) {
+    mergedSomething = false;
+    for (let k = 0; k + 2 < runs.length; k++) {
+      const d1 = runs[k];
+      const pause = runs[k + 1];
+      const d2 = runs[k + 2];
+      if (d1.cls === 0 || pause.cls !== 0 || d2.cls !== d1.cls) continue;
+      if (pause.end - pause.start + 1 > maxBaseCandles) continue;
+      if (isLeg(d1) && isLeg(d2)) continue;
+      runs.splice(k, 3, { cls: d1.cls, start: d1.start, end: d2.end });
+      mergedSomething = true;
+      break;
+    }
+  }
+
+  // The base between two adjacent legs is EVERY candle between them —
+  // base-class candles, but also medium-bodied pullback bars that are
+  // neither base-class nor leg-strong (a lone 0.7-ATR counter candle inside
+  // the pause used to break the pattern apart and drop the zone).
+  const legs = runs.filter(isLeg);
+
+  const zones: SndZone[] = [];
+  for (let k = 0; k + 1 < legs.length; k++) {
+    const legIn = legs[k];
+    const legOut = legs[k + 1];
+    const baseStart = legIn.end + 1;
+    const baseEnd = legOut.start - 1;
+    const baseCount = baseEnd - baseStart + 1;
+    if (baseCount < 1 || baseCount > maxBaseCandles) continue;
+
+    let priceHigh = -Infinity;
+    let priceLow = Infinity;
+    for (let j = baseStart; j <= baseEnd; j++) {
+      if (candles[j].high > priceHigh) priceHigh = candles[j].high;
+      if (candles[j].low < priceLow) priceLow = candles[j].low;
+    }
+
+    const legOutUp = legOut.cls === 1;
+    // Confirmation: the first leg-out candle whose close actually departs
+    // the base band — a momentum run that never clears the base is still
+    // consolidation, not a zone.
+    let confIdx = -1;
+    for (let j = legOut.start; j <= legOut.end; j++) {
+      if (legOutUp ? candles[j].close > priceHigh : candles[j].close < priceLow) {
+        confIdx = j;
+        break;
+      }
+    }
+    if (confIdx === -1) continue;
+
+    const pattern: SndPattern =
+      legIn.cls === 1 ? (legOutUp ? "RBR" : "RBD") : legOutUp ? "DBR" : "DBD";
+    const kind: SndKind = legOutUp ? "demand" : "supply";
+
+    // Retest/break scan starts after the whole leg-out run — its own early
+    // candles' wicks still overlap the base and are not a return to it.
+    let retestTime: UTCTimestamp | undefined;
+    let brokenTime: UTCTimestamp | undefined;
+    for (let j = legOut.end + 1; j < n; j++) {
+      const c = candles[j];
+      if (retestTime === undefined && (kind === "demand" ? c.low <= priceHigh : c.high >= priceLow)) {
+        retestTime = c.time as UTCTimestamp;
+      }
+      if (kind === "demand" ? c.close < priceLow : c.close > priceHigh) {
+        brokenTime = c.time as UTCTimestamp;
+        break;
+      }
+    }
+
+    zones.push({
+      time: candles[confIdx].time as UTCTimestamp,
+      pattern,
+      kind,
+      priceHigh,
+      priceLow,
+      baseStartTime: candles[baseStart].time as UTCTimestamp,
+      retestTime,
+      brokenTime,
+    });
+  }
+  return zones;
+}
+
 export type PatternLabel =
   | "bullish_engulfing"
   | "bearish_engulfing"

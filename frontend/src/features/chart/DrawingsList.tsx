@@ -20,6 +20,7 @@ const TOOL_LABELS: Record<string, string> = {
   "rectangle":        "Rectangle",
   "fib-retracement":  "Fibonacci Retr.",
   "parallel-channel": "Channel",
+  "circle":           "Circle",
 };
 
 // Compact SVG icons (16×16) for each tool.
@@ -63,6 +64,12 @@ function ToolIcon({ type }: { type: string }) {
         <svg viewBox="0 0 16 16" width={14} height={14} fill="none" stroke="currentColor" strokeWidth="1.5">
           <line x1="1" y1="5" x2="15" y2="3" />
           <line x1="1" y1="11" x2="15" y2="9" />
+        </svg>
+      );
+    case "circle":
+      return (
+        <svg viewBox="0 0 16 16" width={14} height={14} fill="none" stroke="currentColor" strokeWidth="1.5">
+          <circle cx="8" cy="8" r="6" />
         </svg>
       );
     default:

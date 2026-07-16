@@ -379,7 +379,7 @@ async def evaluate_custom_code(
     from src.shared.db.base import make_session_factory
     from src.market_data.adapters.candle_repository import CandleRepository
     from src.backtest.application.period import parse_period
-    from src.engine.application.context import _to_dataframe
+    from src.engine.application.context import candles_to_dataframe
     from src.market_data.domain.models import Timeframe
     from datetime import timedelta
     from src.strategies.domain.models import MarketContext
@@ -440,7 +440,7 @@ async def evaluate_custom_code(
                 pass
 
     # Convert to pandas DataFrames
-    dfs = {tf: _to_dataframe(candles) for tf, candles in candles_by_tf.items()}
+    dfs = {tf: candles_to_dataframe(candles) for tf, candles in candles_by_tf.items()}
     entry_df = dfs[body.timeframe]
 
     if entry_df.empty:

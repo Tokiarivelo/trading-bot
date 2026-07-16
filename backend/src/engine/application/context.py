@@ -14,11 +14,15 @@ from src.strategies.domain.models import MarketContext
 def build_market_context(
     symbol: str, candles_by_timeframe: dict[str, list[Candle]], spread_points: float
 ) -> MarketContext:
-    frames = {tf: _to_dataframe(candles) for tf, candles in candles_by_timeframe.items()}
+    frames = {tf: candles_to_dataframe(candles) for tf, candles in candles_by_timeframe.items()}
     return MarketContext(symbol=symbol, candles=frames, spread_points=spread_points)
 
 
-def _to_dataframe(candles: list[Candle]) -> pd.DataFrame:
+def candles_to_dataframe(candles: list[Candle]) -> pd.DataFrame:
+    """The one canonical Candle-list -> OHLCV-frame conversion. Public because
+    the backtest's cached context builder must produce frames through the
+    exact same constructor live trading uses — "what you backtest is what
+    runs live" extends to DataFrame dtypes."""
     return pd.DataFrame(
         {
             "time": [c.time for c in candles],

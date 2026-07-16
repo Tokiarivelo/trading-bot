@@ -35,6 +35,7 @@ const TYPE_LABELS: Record<ManualIndicatorType, string> = {
   atr: "ATR",
   structure: "Structure (HH/HL/LH/LL)",
   qml: "Quasimodo (QML / inversed)",
+  snd: "S&D zones (RBR/DBD/RBD/DBR)",
   patterns: "Candlestick patterns",
   custom: "Custom (saved indicator)",
 };
@@ -52,6 +53,9 @@ const TYPE_DEFAULTS: Record<ManualIndicatorType, { period: number; editablePerio
   // meaning as the backend vix75 strategy's `swing_lookback` param.
   structure: { period: 3, editablePeriod: true },
   qml: { period: 3, editablePeriod: true },
+  // period here is the max base-candle count of a zone, same meaning as
+  // maxBaseCandles in sndZones() (indicators.ts).
+  snd: { period: 3, editablePeriod: true },
   patterns: { period: 0, editablePeriod: false }, // fixed thresholds, no period
   // Params come from the saved indicator's own default_params (edit them on
   // /indicators, or from the code-peek panel below) rather than this dock.
@@ -71,6 +75,8 @@ function indicatorLabel(type: ManualIndicatorType, period: number): string {
       return `Structure (lookback ${period})`;
     case "qml":
       return `Quasimodo (lookback ${period})`;
+    case "snd":
+      return `S&D zones (base ≤ ${period})`;
     case "patterns":
       return "Candlestick patterns";
     default:

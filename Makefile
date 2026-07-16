@@ -288,10 +288,29 @@ doctor: ## Diagnose the full stack: gateway up? terminal connected? backend can 
 .PHONY: kill stop
 kill stop: ## Kill all dev processes (backend, frontend, gateway, MT5 terminal)
 	@echo "Stopping dev processes…"
-	@pkill -f "uvicorn src.main:socket_app" 2>/dev/null && echo "  ✓ backend stopped"  || echo "  – backend not running"
-	@pkill -f "pnpm.*dev"                   2>/dev/null && echo "  ✓ frontend stopped" || echo "  – frontend not running"
-	@pkill -f "run_gateway.py"              2>/dev/null && echo "  ✓ gateway stopped"  || echo "  – gateway not running"
-	@pkill -x terminal64                    2>/dev/null && echo "  ✓ MT5 terminal stopped" || echo "  – MT5 terminal not running"
+	@# Kill whatever is actually bound to each port first — this is the part
+	@# that matters. `pnpm dev` execs `next dev`, which execs a `next-server`
+	@# child; none of those descendants have "pnpm" in their argv, so the old
+	@# `pkill -f "pnpm.*dev"` only ever killed the top pnpm wrapper and left
+	@# next-server running (and still serving/proxying to a dead backend).
+	@# Similarly uvicorn's --reload can leave its actual worker in a state
+	@# where the parent is alive but nothing is listening, or vice versa —
+	@# killing by port sidesteps all of that regardless of process shape.
+	@for port in $(BACKEND_PORT) $(FRONTEND_PORT) $(GATEWAY_PORT); do \
+		pids=$$(fuser $$port/tcp 2>/dev/null); \
+		if [ -n "$$pids" ]; then \
+			echo "  killing pid(s) $$pids listening on :$$port"; \
+			kill -TERM $$pids 2>/dev/null; \
+			sleep 1; \
+			kill -KILL $$pids 2>/dev/null; \
+		fi; \
+	done
+	@# Then sweep by pattern for anything not yet bound to a port (still
+	@# starting) or left over as an unattached child process.
+	@pkill -f "uvicorn src.main:socket_app"       2>/dev/null && echo "  ✓ backend process(es) stopped"  || echo "  – no leftover backend process"
+	@pkill -f "next-server|next dev|pnpm.*dev"    2>/dev/null && echo "  ✓ frontend process(es) stopped" || echo "  – no leftover frontend process"
+	@pkill -f "run_gateway.py"                    2>/dev/null && echo "  ✓ gateway process(es) stopped"  || echo "  – no leftover gateway process"
+	@pkill -x terminal64                          2>/dev/null && echo "  ✓ MT5 terminal stopped"        || echo "  – MT5 terminal not running"
 	@echo "Done."
 
 .PHONY: clean

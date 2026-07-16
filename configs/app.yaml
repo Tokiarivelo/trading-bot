@@ -1,5 +1,5 @@
 # Global app configuration. Hot-reloadable.
-mode: live              # paper | live  — NEVER switch to live before Phase 9 criteria
+mode: paper             # paper | live  — NEVER switch to live before Phase 9 criteria
 timezone: "Indian/Antananarivo"
 symbols: [XAUUSD, XAGUSD, BTCUSD, "Boom 1000 Index", "Volatility 75 Index"]
 engine:

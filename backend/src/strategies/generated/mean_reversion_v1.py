@@ -18,10 +18,15 @@ Same fractal swing-pivot detection as `trend_structure_v1`, same TP:SL
 the trade direction is inverted. No amplitude/ATR filter — the sweep showed
 filtering out "weak" breaks removes some of the best fade candidates and
 lowers profit factor here (the opposite of what it did for the continuation
-version). Sandbox-safe: only `pandas` — no I/O, no broker access.
+version). Sandbox-safe: only `numpy`/`pandas` — no I/O, no broker access.
+
+Perf note: swing detection runs on numpy arrays with vectorized windowed
+max/min instead of per-bar pandas `.iloc` scans — identical pivots, but a
+backtest calls evaluate() on every bar and the old scan dominated its
+runtime.
 """
 
-import pandas as pd
+import numpy as np
 
 from src.strategies.domain.models import (
     Direction,
@@ -39,17 +44,20 @@ MIN_HISTORY = 50  # enough bars for at least 3 alternating swing pivots at this 
 TP_RR = 2.2
 
 
-def _swing_flags(df: pd.DataFrame, wing: int) -> tuple[pd.Series, pd.Series]:
-    highs, lows = df["high"], df["low"]
-    is_high = pd.Series(False, index=df.index)
-    is_low = pd.Series(False, index=df.index)
-    for i in range(wing, len(df) - wing):
-        window_h = highs.iloc[i - wing : i + wing + 1]
-        window_l = lows.iloc[i - wing : i + wing + 1]
-        if highs.iloc[i] == window_h.max():
-            is_high.iloc[i] = True
-        if lows.iloc[i] == window_l.min():
-            is_low.iloc[i] = True
+def _swing_flags(highs: np.ndarray, lows: np.ndarray, wing: int) -> tuple[np.ndarray, np.ndarray]:
+    """Fractal swing highs/lows: a bar whose high (low) is the max (min) of
+    the `wing`-bar window on each side. Windowed max/min are computed in one
+    vector pass; equality against the center bar matches the old per-bar
+    scan exactly."""
+    n = len(highs)
+    is_high = np.zeros(n, dtype=bool)
+    is_low = np.zeros(n, dtype=bool)
+    window = 2 * wing + 1
+    if n >= window:
+        window_max = np.lib.stride_tricks.sliding_window_view(highs, window).max(axis=1)
+        window_min = np.lib.stride_tricks.sliding_window_view(lows, window).min(axis=1)
+        is_high[wing : n - wing] = highs[wing : n - wing] == window_max
+        is_low[wing : n - wing] = lows[wing : n - wing] == window_min
     return is_high, is_low
 
 
@@ -65,14 +73,17 @@ def _push_swing(swings: list[tuple[int, float, str]], index: int, price: float, 
     swings.append((index, price, kind))
 
 
-def _zigzag_swings(df: pd.DataFrame, wing: int) -> list[tuple[int, float, str]]:
-    is_high, is_low = _swing_flags(df, wing)
+def _zigzag_swings(highs: np.ndarray, lows: np.ndarray, wing: int) -> list[tuple[int, float, str]]:
+    is_high, is_low = _swing_flags(highs, lows, wing)
     swings: list[tuple[int, float, str]] = []
-    for i in range(wing, len(df) - wing):
-        if is_high.iloc[i]:
-            _push_swing(swings, i, float(df["high"].iloc[i]), "high")
-        if is_low.iloc[i]:
-            _push_swing(swings, i, float(df["low"].iloc[i]), "low")
+    # Only flagged bars can push a swing; a bar flagged as both pushes the
+    # high first then the low, matching the old full-range scan.
+    for i in np.flatnonzero(is_high | is_low):
+        index = int(i)
+        if is_high[index]:
+            _push_swing(swings, index, float(highs[index]), "high")
+        if is_low[index]:
+            _push_swing(swings, index, float(lows[index]), "low")
     return swings
 
 
@@ -94,7 +105,10 @@ class MeanReversionV1:
         if m5 is None or len(m5) < MIN_HISTORY:
             return None
 
-        swings = _zigzag_swings(m5, wing)
+        highs = m5["high"].to_numpy()
+        lows = m5["low"].to_numpy()
+
+        swings = _zigzag_swings(highs, lows, wing)
         if len(swings) < 3:
             return None
 

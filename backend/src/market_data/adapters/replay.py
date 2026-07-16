@@ -54,6 +54,7 @@ class ReplayMarketDataPort:
         self._candles = candles
         self._spec = spec
         self._close_times = {tf: [c.close_time for c in bars] for tf, bars in candles.items()}
+        self._open_times = {tf: [c.time for c in bars] for tf, bars in candles.items()}
         self._cursor: datetime | None = None
 
     def advance_to(self, now: datetime) -> None:
@@ -81,8 +82,11 @@ class ReplayMarketDataPort:
         close_times = self._close_times.get(timeframe, [])
         idx = bisect.bisect_right(close_times, self._cursor)
         if before is not None:
-            open_times = [c.time for c in bars[:idx]]
-            idx = bisect.bisect_left(open_times, before)
+            # Precomputed and sorted like close_times; capping at `idx` keeps
+            # the same "only bars already visible at the cursor" window the
+            # old per-call slice enforced.
+            open_times = self._open_times.get(timeframe, [])
+            idx = min(idx, bisect.bisect_left(open_times, before))
         return bars[max(0, idx - count) : idx]
 
     async def get_tick(self, symbol: str) -> Tick:

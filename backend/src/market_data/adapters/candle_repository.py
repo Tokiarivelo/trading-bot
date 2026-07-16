@@ -5,12 +5,27 @@ from __future__ import annotations
 from collections.abc import Iterable
 from datetime import UTC, datetime
 
-from sqlalchemy import select
+from sqlalchemy import Row, select
 from sqlalchemy.dialects.sqlite import insert
 from sqlalchemy.orm import Session, sessionmaker
 
 from src.market_data.adapters.orm import CandleRow
 from src.market_data.domain.models import Candle, Timeframe
+
+# Read queries select these columns as plain tuples instead of materializing
+# ORM `CandleRow` instances — candle reads are the backtest runner's single
+# biggest fixed cost (hundreds of thousands of rows per run), and identity-map
+# bookkeeping buys nothing for immutable history rows that are never updated
+# through the session.
+_CANDLE_COLUMNS = (
+    CandleRow.time,
+    CandleRow.open,
+    CandleRow.high,
+    CandleRow.low,
+    CandleRow.close,
+    CandleRow.tick_volume,
+    CandleRow.spread_points,
+)
 
 
 class CandleRepository:
@@ -52,14 +67,14 @@ class CandleRepository:
     def get_latest(self, symbol: str, timeframe: Timeframe, count: int) -> list[Candle]:
         """Most recent `count` stored bars, oldest first."""
         query = (
-            select(CandleRow)
+            select(*_CANDLE_COLUMNS)
             .where(CandleRow.symbol == symbol, CandleRow.timeframe == timeframe.value)
             .order_by(CandleRow.time.desc())
             .limit(count)
         )
         with self._session_factory() as session:
-            rows = session.scalars(query).all()
-        return [_to_domain(row) for row in reversed(rows)]
+            rows = session.execute(query).all()
+        return _to_domain_many(symbol, timeframe, reversed(rows))
 
     def get_before(
         self, symbol: str, timeframe: Timeframe, before: datetime, count: int
@@ -67,7 +82,7 @@ class CandleRepository:
         """`count` stored bars with open time strictly before `before`, oldest
         first — for paging further back in history than `get_latest`."""
         query = (
-            select(CandleRow)
+            select(*_CANDLE_COLUMNS)
             .where(
                 CandleRow.symbol == symbol,
                 CandleRow.timeframe == timeframe.value,
@@ -77,8 +92,8 @@ class CandleRepository:
             .limit(count)
         )
         with self._session_factory() as session:
-            rows = session.scalars(query).all()
-        return [_to_domain(row) for row in reversed(rows)]
+            rows = session.execute(query).all()
+        return _to_domain_many(symbol, timeframe, reversed(rows))
 
     def get_range(
         self, symbol: str, timeframe: Timeframe, start: datetime, end: datetime
@@ -86,7 +101,7 @@ class CandleRepository:
         """Stored bars with open time in `[start, end)`, oldest first — used
         by the backtest replay adapter to load a bounded historical window."""
         query = (
-            select(CandleRow)
+            select(*_CANDLE_COLUMNS)
             .where(
                 CandleRow.symbol == symbol,
                 CandleRow.timeframe == timeframe.value,
@@ -96,19 +111,22 @@ class CandleRepository:
             .order_by(CandleRow.time.asc())
         )
         with self._session_factory() as session:
-            rows = session.scalars(query).all()
-        return [_to_domain(row) for row in rows]
+            rows = session.execute(query).all()
+        return _to_domain_many(symbol, timeframe, rows)
 
 
-def _to_domain(row: CandleRow) -> Candle:
-    return Candle(
-        symbol=row.symbol,
-        timeframe=Timeframe(row.timeframe),
-        time=datetime.fromtimestamp(row.time, tz=UTC),
-        open=row.open,
-        high=row.high,
-        low=row.low,
-        close=row.close,
-        tick_volume=row.tick_volume,
-        spread_points=row.spread_points,
-    )
+def _to_domain_many(symbol: str, timeframe: Timeframe, rows: Iterable[Row]) -> list[Candle]:
+    return [
+        Candle(
+            symbol=symbol,
+            timeframe=timeframe,
+            time=datetime.fromtimestamp(time, tz=UTC),
+            open=open_,
+            high=high,
+            low=low,
+            close=close,
+            tick_volume=tick_volume,
+            spread_points=spread_points,
+        )
+        for time, open_, high, low, close, tick_volume, spread_points in rows
+    ]

@@ -21,7 +21,7 @@ from src.engine.application.position_manager import PositionManager
 from src.engine.application.risk_manager import RiskManager
 from src.engine.domain.models import EngineStatus
 from src.engine.ports.strategy_source import StrategySourcePort
-from src.market_data.domain.models import MarketDataUnavailable, Timeframe
+from src.market_data.domain.models import Candle, MarketDataUnavailable, Timeframe
 from src.market_data.ports.market_data import MarketDataPort
 from src.shared.events.bus import EventBus
 from src.shared.events.definitions import (
@@ -31,6 +31,7 @@ from src.shared.events.definitions import (
     PositionClosed,
 )
 from src.skills.ports.skill_selector import SkillSelectorPort
+from src.strategies.domain.models import MarketContext
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +55,9 @@ class TradeEngine:
         enabled: bool = True,
         context_bars: int = DEFAULT_CONTEXT_BARS,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+        context_builder: Callable[
+            [str, dict[str, list[Candle]], float], MarketContext
+        ] = build_market_context,
     ) -> None:
         self._market_data = market_data
         self._order_service = order_service
@@ -68,6 +72,11 @@ class TradeEngine:
         self._enabled = enabled
         self._context_bars = context_bars
         self._clock = clock
+        # Swappable only so the backtest runner can serve cached DataFrame
+        # slices over replay history instead of rebuilding frames on every
+        # bar; the frames it produces are value-identical to
+        # `build_market_context`'s (see backtest/adapters/context_builder.py).
+        self._context_builder = context_builder
 
     @property
     def status(self) -> EngineStatus:
@@ -171,7 +180,7 @@ class TradeEngine:
             logger.warning("ENTRY SKIPPED (no market data): %s — %s", symbol, exc)
             return
 
-        ctx = build_market_context(symbol, candles_by_tf, info.spread_points)
+        ctx = self._context_builder(symbol, candles_by_tf, info.spread_points)
         signal = strategy.evaluate(ctx)
         if signal is None:
             return

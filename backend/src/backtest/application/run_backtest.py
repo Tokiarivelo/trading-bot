@@ -19,10 +19,12 @@ import logging
 from collections.abc import Callable
 from datetime import datetime, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from sqlalchemy.orm import Session, sessionmaker
 
 from src.backtest.adapters.bookkeeper import BacktestBookkeeper
+from src.backtest.adapters.context_builder import CachedContextBuilder
 from src.backtest.adapters.fixed_skill_selector import FixedSkillSelector
 from src.backtest.application import metrics
 from src.backtest.application.period import parse_period
@@ -178,8 +180,17 @@ async def run_backtest(
     session_factory = make_session_factory(database_url)
     repository = CandleRepository(session_factory)
     history_start = start - HISTORY_BUFFER
+    # Only the timeframes this run can ever read: the strategy's entry and
+    # confirmation frames (all the engine fetches for context) plus M5, which
+    # `ReplayMarketDataPort` always needs to derive bid/ask from the current
+    # bar. Loading all nine timeframes made DB reads the single biggest fixed
+    # cost of a run (e.g. ~100k M1 rows for an M5 strategy that never looks
+    # at them).
+    needed_timeframes = {entry_tf, Timeframe.M5} | {
+        Timeframe(tf) for tf in strategy.spec.confirmation_timeframes
+    }
     candles: dict[Timeframe, list[Candle]] = {
-        tf: repository.get_range(symbol, tf, history_start, end) for tf in Timeframe
+        tf: repository.get_range(symbol, tf, history_start, end) for tf in needed_timeframes
     }
     entry_bars = [c for c in candles[entry_tf] if c.time >= start]
     if not entry_bars:
@@ -243,6 +254,7 @@ async def run_backtest(
         entry_timeframe=strategy.spec.entry_timeframe,
         confirmation_timeframes=strategy.spec.confirmation_timeframes,
         clock=clock,
+        context_builder=CachedContextBuilder(candles),
     )
 
     activity_capture = _ActivityCapture(clock)
@@ -267,9 +279,15 @@ async def run_backtest(
             len(entry_bars),
             starting_balance,
         )
+        tz = ZoneInfo(timezone)
+        current_day = entry_bars[0].close_time.astimezone(tz).date()
         for candle in entry_bars:
             replay.advance_to(candle.close_time)
             clock_box["now"] = candle.close_time
+            bar_day = candle.close_time.astimezone(tz).date()
+            if bar_day != current_day:
+                current_day = bar_day
+                _auto_resume_daily_breaker(risk_manager)
             await _check_stops(order_service, symbol, candle)
             await trade_engine.on_candle_closed(
                 CandleClosed(symbol=symbol, timeframe=entry_tf.value, occurred_at=candle.close_time)
@@ -368,6 +386,30 @@ def _stop_hit(position: Position, candle: Candle) -> float | None:
         if position.tp is not None and candle.low <= position.tp:
             return position.tp
     return None
+
+
+def _auto_resume_daily_breaker(risk_manager: RiskManager) -> None:
+    """Resume a daily-loss circuit-breaker pause at the trading-day boundary.
+
+    Live, the daily-loss breaker stays tripped until the operator resumes via
+    the UI/notification. A backtest has no operator, so before this hook a
+    single >=limit losing day silently ended the run — a "4-month" report
+    could contain one week of trades and months of forced idleness (that is
+    exactly how this was found). Resuming at the next day's first bar
+    simulates the operator's next-morning resume, which is what the cap's
+    "daily" semantics mean.
+
+    Only the daily-loss trip is auto-resumed. The consecutive-loss breaker
+    and the kill switch are anomaly/manual stops, not day-scoped — a backtest
+    that trips those SHOULD stay halted, and their trip line in the activity
+    log is the honest result. The reason-prefix match is the risk manager's
+    only public signal for which breaker fired (see `RiskManager.
+    record_trade_closed`'s "daily loss ..." wording — engine code is
+    read-only to backtest changes per project rules)."""
+    status = risk_manager.status
+    if status.paused and status.pause_reason.startswith("daily loss"):
+        risk_manager.resume()
+        logger.info("daily-loss circuit breaker auto-resumed: new trading day (backtest)")
 
 
 def _default_registry(database_url: str) -> StrategyRegistry:

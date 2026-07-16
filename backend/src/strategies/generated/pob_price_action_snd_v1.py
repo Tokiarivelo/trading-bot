@@ -1,96 +1,110 @@
+import numpy as np
 import pandas as pd
 
 from src.strategies.domain.models import Direction, MarketContext, Signal, StrategySpec
 
-
-def _true_range(df: pd.DataFrame) -> pd.Series:
-    prev_close = df["close"].shift(1)
-    return pd.concat(
-        [
-            df["high"] - df["low"],
-            (df["high"] - prev_close).abs(),
-            (df["low"] - prev_close).abs(),
-        ],
-        axis=1,
-    ).max(axis=1)
+# Perf note: helpers below operate on numpy arrays extracted once per
+# evaluate() (`df[col].to_numpy()`) instead of per-element `.iloc` reads —
+# the math, comparisons, and results are identical, but a backtest calls
+# evaluate() on every bar and pandas scalar indexing dominated its runtime.
 
 
-def _atr(df: pd.DataFrame, period: int) -> pd.Series:
-    return _true_range(df).rolling(period, min_periods=period).mean()
+def _true_range_values(highs: np.ndarray, lows: np.ndarray, closes: np.ndarray) -> np.ndarray:
+    tr = highs - lows
+    if len(tr) > 1:
+        # Bar 0 has no previous close; its TR stays high-low, matching the
+        # old concat().max(axis=1) which skipped the NaN gap columns there.
+        gap_high = np.abs(highs[1:] - closes[:-1])
+        gap_low = np.abs(lows[1:] - closes[:-1])
+        tr[1:] = np.maximum(tr[1:], np.maximum(gap_high, gap_low))
+    return tr
 
 
-def _body(df: pd.DataFrame) -> pd.Series:
-    return (df["close"] - df["open"]).abs()
+def _atr(highs: np.ndarray, lows: np.ndarray, closes: np.ndarray, period: int) -> pd.Series:
+    # Rolling mean stays in pandas (not a cumsum shortcut) so ATR values are
+    # bit-identical to the previous implementation.
+    tr = pd.Series(_true_range_values(highs, lows, closes))
+    return tr.rolling(period, min_periods=period).mean()
 
 
-def _range(df: pd.DataFrame) -> pd.Series:
-    return df["high"] - df["low"]
-
-
-def _is_bullish_engulfing(df: pd.DataFrame, i: int) -> bool:
+def _is_bullish_engulfing(opens: np.ndarray, closes: np.ndarray, i: int) -> bool:
     if i < 1:
         return False
-    prev_o, prev_c = df["open"].iloc[i - 1], df["close"].iloc[i - 1]
-    o, c = df["open"].iloc[i], df["close"].iloc[i]
+    prev_o, prev_c = opens[i - 1], closes[i - 1]
+    o, c = opens[i], closes[i]
     if not (prev_c < prev_o and c > o):
         return False
-    return o <= prev_c and c >= prev_o
+    return bool(o <= prev_c and c >= prev_o)
 
 
-def _is_bearish_engulfing(df: pd.DataFrame, i: int) -> bool:
+def _is_bearish_engulfing(opens: np.ndarray, closes: np.ndarray, i: int) -> bool:
     if i < 1:
         return False
-    prev_o, prev_c = df["open"].iloc[i - 1], df["close"].iloc[i - 1]
-    o, c = df["open"].iloc[i], df["close"].iloc[i]
+    prev_o, prev_c = opens[i - 1], closes[i - 1]
+    o, c = opens[i], closes[i]
     if not (prev_c > prev_o and c < o):
         return False
-    return o >= prev_c and c <= prev_o
+    return bool(o >= prev_c and c <= prev_o)
 
 
-def _body_candle_side(df: pd.DataFrame, i: int, min_body_ratio: float) -> tuple[bool, str]:
-    rng = _range(df).iloc[i]
+def _body_candle_side(
+    opens: np.ndarray,
+    highs: np.ndarray,
+    lows: np.ndarray,
+    closes: np.ndarray,
+    i: int,
+    min_body_ratio: float,
+) -> tuple[bool, str]:
+    rng = highs[i] - lows[i]
     if rng <= 0:
         return False, ""
-    if _body(df).iloc[i] / rng < min_body_ratio:
+    if abs(closes[i] - opens[i]) / rng < min_body_ratio:
         return False, ""
-    return True, ("up" if df["close"].iloc[i] > df["open"].iloc[i] else "down")
+    return True, ("up" if closes[i] > opens[i] else "down")
 
 
-def _swing_flags(df: pd.DataFrame, lookback: int) -> tuple[pd.Series, pd.Series]:
-    highs, lows = df["high"], df["low"]
-    is_high = pd.Series(False, index=df.index)
-    is_low = pd.Series(False, index=df.index)
-    n = len(df)
-    for i in range(lookback, n - lookback):
-        window_h = highs.iloc[i - lookback : i + lookback + 1]
-        window_l = lows.iloc[i - lookback : i + lookback + 1]
-        if highs.iloc[i] == window_h.max():
-            is_high.iloc[i] = True
-        if lows.iloc[i] == window_l.min():
-            is_low.iloc[i] = True
+def _swing_flags(
+    highs: np.ndarray, lows: np.ndarray, lookback: int
+) -> tuple[np.ndarray, np.ndarray]:
+    """Fractal swing highs/lows: a bar whose high (low) is the max (min) of
+    the `lookback`-bar window on each side. Windowed max/min are computed in
+    one vector pass; equality against the center bar matches the old
+    per-bar scan exactly."""
+    n = len(highs)
+    is_high = np.zeros(n, dtype=bool)
+    is_low = np.zeros(n, dtype=bool)
+    window = 2 * lookback + 1
+    if n >= window:
+        window_max = np.lib.stride_tricks.sliding_window_view(highs, window).max(axis=1)
+        window_min = np.lib.stride_tricks.sliding_window_view(lows, window).min(axis=1)
+        is_high[lookback : n - lookback] = highs[lookback : n - lookback] == window_max
+        is_low[lookback : n - lookback] = lows[lookback : n - lookback] == window_min
     return is_high, is_low
 
 
 def _count_sr_touches(
-    df: pd.DataFrame,
+    highs: np.ndarray,
+    lows: np.ndarray,
     level_low: float,
     level_high: float,
-    is_high: pd.Series,
-    is_low: pd.Series,
+    is_high: np.ndarray,
+    is_low: np.ndarray,
     tolerance: float,
 ) -> int:
     mid = (level_low + level_high) / 2
-    touches = 0
-    for i in range(len(df)):
-        if is_high.iloc[i] and abs(df["high"].iloc[i] - mid) <= tolerance:
-            touches += 1
-        elif is_low.iloc[i] and abs(df["low"].iloc[i] - mid) <= tolerance:
-            touches += 1
-    return touches
+    high_touch = is_high & (np.abs(highs - mid) <= tolerance)
+    low_touch = is_low & (np.abs(lows - mid) <= tolerance)
+    return int(np.count_nonzero(high_touch | low_touch))
 
 
-def _find_base(df: pd.DataFrame, atr: pd.Series, params: dict) -> dict | None:
-    n = len(df)
+def _find_base(
+    highs: np.ndarray,
+    lows: np.ndarray,
+    closes: np.ndarray,
+    atr: pd.Series,
+    params: dict,
+) -> dict | None:
+    n = len(closes)
     last_idx = n - 1
     current_atr = atr.iloc[last_idx]
     if pd.isna(current_atr) or current_atr <= 0:
@@ -103,26 +117,26 @@ def _find_base(df: pd.DataFrame, atr: pd.Series, params: dict) -> dict | None:
         if base_start - impulse_bars < 0:
             continue
 
-        base_slice = df.iloc[base_start : base_end + 1]
-        if (_range(base_slice) > current_atr * 0.6).any():
+        base_range = highs[base_start : base_end + 1] - lows[base_start : base_end + 1]
+        if (base_range > current_atr * 0.6).any():
             continue
 
-        pre_slice = df.iloc[base_start - impulse_bars : base_start]
-        pre_move = pre_slice["close"].iloc[-1] - pre_slice["close"].iloc[0]
+        pre_move = closes[base_start - 1] - closes[base_start - impulse_bars]
         if abs(pre_move) < current_atr * params["impulse_min_atr_mult"]:
             continue
 
         return {
             "base_start": base_start,
-            "base_high": base_slice["high"].max(),
-            "base_low": base_slice["low"].min(),
+            "base_high": highs[base_start : base_end + 1].max(),
+            "base_low": lows[base_start : base_end + 1].min(),
             "leg_before": "up" if pre_move > 0 else "down",
         }
     return None
 
 
 def _danger_zone_breached(
-    df: pd.DataFrame,
+    highs: np.ndarray,
+    lows: np.ndarray,
     base_low: float,
     base_high: float,
     direction: Direction,
@@ -131,8 +145,8 @@ def _danger_zone_breached(
     from_idx: int,
 ) -> bool:
     if direction == Direction.BUY:
-        return bool((df["low"].iloc[from_idx:] < base_low - atr_val * mult).any())
-    return bool((df["high"].iloc[from_idx:] > base_high + atr_val * mult).any())
+        return bool((lows[from_idx:] < base_low - atr_val * mult).any())
+    return bool((highs[from_idx:] > base_high + atr_val * mult).any())
 
 
 def _mtf_confirms(ctx: MarketContext, tf: str, direction: Direction, params: dict) -> bool:
@@ -140,18 +154,26 @@ def _mtf_confirms(ctx: MarketContext, tf: str, direction: Direction, params: dic
     lookback = int(params["confirm_lookback"])
     if df is None or len(df) < lookback + 2:
         return False
+    opens = df["open"].to_numpy()
+    highs = df["high"].to_numpy()
+    lows = df["low"].to_numpy()
+    closes = df["close"].to_numpy()
     start_i = len(df) - lookback
     for i in range(start_i, len(df)):
         if direction == Direction.BUY:
-            if _is_bullish_engulfing(df, i):
+            if _is_bullish_engulfing(opens, closes, i):
                 return True
-            strong, side = _body_candle_side(df, i, params["mtf_min_body_ratio"])
+            strong, side = _body_candle_side(
+                opens, highs, lows, closes, i, params["mtf_min_body_ratio"]
+            )
             if strong and side == "up":
                 return True
         else:
-            if _is_bearish_engulfing(df, i):
+            if _is_bearish_engulfing(opens, closes, i):
                 return True
-            strong, side = _body_candle_side(df, i, params["mtf_min_body_ratio"])
+            strong, side = _body_candle_side(
+                opens, highs, lows, closes, i, params["mtf_min_body_ratio"]
+            )
             if strong and side == "down":
                 return True
     return False
@@ -192,20 +214,27 @@ class PobPriceActionSnd:
         if df is None or len(df) < min_bars:
             return None
 
-        atr = _atr(df, int(params["atr_period"]))
+        opens = df["open"].to_numpy()
+        highs = df["high"].to_numpy()
+        lows = df["low"].to_numpy()
+        closes = df["close"].to_numpy()
+
+        atr = _atr(highs, lows, closes, int(params["atr_period"]))
         atr_val = atr.iloc[-1]
         if pd.isna(atr_val) or atr_val <= 0:
             return None
 
-        base = _find_base(df, atr, params)
+        base = _find_base(highs, lows, closes, atr, params)
         if base is None:
             return None
 
         last_i = len(df) - 1
-        breakout_up = _is_bullish_engulfing(df, last_i)
-        breakout_down = _is_bearish_engulfing(df, last_i)
+        breakout_up = _is_bullish_engulfing(opens, closes, last_i)
+        breakout_down = _is_bearish_engulfing(opens, closes, last_i)
         if not (breakout_up or breakout_down):
-            strong, side = _body_candle_side(df, last_i, params["engulf_min_body_ratio"])
+            strong, side = _body_candle_side(
+                opens, highs, lows, closes, last_i, params["engulf_min_body_ratio"]
+            )
             breakout_up = strong and side == "up"
             breakout_down = strong and side == "down"
         if breakout_up == breakout_down:
@@ -230,23 +259,29 @@ class PobPriceActionSnd:
 
         sr_window_end = base["base_start"]
         sr_window_start = max(0, sr_window_end - int(params["sr_lookback_bars"]))
-        sr_slice = df.iloc[sr_window_start:sr_window_end].reset_index(drop=True)
+        sr_highs = highs[sr_window_start:sr_window_end]
+        sr_lows = lows[sr_window_start:sr_window_end]
         tolerance = atr_val * params["sr_tolerance_atr_mult"]
         strong_sr = False
-        if len(sr_slice) > 2 * int(params["swing_lookback"]) + 1:
-            is_high, is_low = _swing_flags(sr_slice, int(params["swing_lookback"]))
-            touches = _count_sr_touches(sr_slice, base_low, base_high, is_high, is_low, tolerance)
+        if len(sr_highs) > 2 * int(params["swing_lookback"]) + 1:
+            is_high, is_low = _swing_flags(sr_highs, sr_lows, int(params["swing_lookback"]))
+            touches = _count_sr_touches(
+                sr_highs, sr_lows, base_low, base_high, is_high, is_low, tolerance
+            )
             strong_sr = touches >= int(params["sr_min_touches"])
         if not strong_sr:
             return None
 
         if _danger_zone_breached(
-            df, base_low, base_high, direction, atr_val, params["danger_zone_atr_mult"], base["base_start"]
+            highs, lows, base_low, base_high, direction, atr_val,
+            params["danger_zone_atr_mult"], base["base_start"],
         ):
             return None
 
         confirmations = sum(
-            1 for tf in self.spec.confirmation_timeframes if _mtf_confirms(ctx, tf, direction, params)
+            1
+            for tf in self.spec.confirmation_timeframes
+            if _mtf_confirms(ctx, tf, direction, params)
         )
         if confirmations < int(params["min_confirmations"]):
             return None
@@ -257,7 +292,7 @@ class PobPriceActionSnd:
         if confidence < params["min_confidence"]:
             return None
 
-        entry_price = df["close"].iloc[last_i]
+        entry_price = closes[last_i]
         if direction == Direction.BUY:
             structural_level = base_low - atr_val * params["danger_zone_atr_mult"]
             structural_dist = entry_price - structural_level
@@ -270,7 +305,8 @@ class PobPriceActionSnd:
 
         reason = (
             f"{setup} base=[{base_low:.2f},{base_high:.2f}] leg_before={leg_before} "
-            f"strong_sr_touches_ok mtf_confirms={confirmations}/{len(self.spec.confirmation_timeframes)} "
+            f"strong_sr_touches_ok "
+            f"mtf_confirms={confirmations}/{len(self.spec.confirmation_timeframes)} "
             f"danger_zone_clear"
         )
 
