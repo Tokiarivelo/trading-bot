@@ -43,7 +43,11 @@ def _trade_out(record: TradeRecord) -> TradeRecordOut:
         "Returns trades for `symbol` whose open time falls within `[from, to)` "
         "(epoch seconds UTC, both optional). Used to plot entry/exit markers on "
         "the `lightweight-charts` panel — the frontend queries this per visible "
-        "chart range."
+        "chart range. Pass `skill` (a bot's full id from `GET /skills/normal`, e.g. "
+        "'normal/xauusd/breakout_v1') to scope markers to one bot's own trades instead of "
+        "every trade (any bot, or manual) on the symbol. Capped to the most recent `limit` "
+        "trades by open_time so a long-running chart session doesn't re-fetch the entire "
+        "trade history on every poll."
     ),
 )
 async def get_markers(
@@ -53,8 +57,14 @@ async def get_markers(
         default=None, alias="from", description="Range start, epoch seconds UTC (inclusive)."
     ),
     to: int | None = Query(default=None, description="Range end, epoch seconds UTC (exclusive)."),
+    skill: str | None = Query(
+        default=None, description="Scope to one bot's own trades, e.g. 'normal/xauusd/breakout_v1'."
+    ),
+    limit: int = Query(
+        default=1000, ge=1, le=5000, description="Maximum number of most-recent trades to return."
+    ),
 ) -> list[TradeRecordOut]:
-    records = await _service(request).get_markers(symbol, frm, to)
+    records = await _service(request).get_markers(symbol, frm, to, skill, limit)
     return [_trade_out(r) for r in records]
 
 

@@ -24,11 +24,24 @@ PNPM         := pnpm
 
 # Ports (override like: make dev-backend BACKEND_PORT=8001)
 BACKEND_PORT  ?= 8000
-FRONTEND_PORT ?= 3000
 GATEWAY_PORT  ?= 8787
+
+# Frontend port defaults to TB_FRONTEND_PORT from .env (falls back to 3000
+# if unset/no .env yet) — edit .env once instead of retyping the override
+# every time 3000 is already taken. Still overridable per-invocation:
+# make dev-frontend FRONTEND_PORT=3001
+FRONTEND_PORT := $(shell [ -f .env ] && grep -E '^TB_FRONTEND_PORT=' .env | cut -d= -f2-)
+FRONTEND_PORT := $(if $(FRONTEND_PORT),$(FRONTEND_PORT),3000)
 
 # Wine prefix dedicated to the MT5 terminal + Windows Python (see gateway/README.md)
 WINEPREFIX ?= $(HOME)/.mt5
+
+# Silences Wine's "fixme:" stub-implementation noise (harddisk_ioctl,
+# cryptasn CryptDecodeObjectEx, etc.) that floods the console once several
+# bots start driving the MT5 terminal — cosmetic, not an actual error; err/
+# warn channels stay on. Override per-invocation for full Wine debug output:
+# make dev-gateway WINEDEBUG=
+WINEDEBUG ?= fixme-all
 
 # Shared secret the backend and gateway must agree on. Pulled from .env's
 # TB_GATEWAY_SHARED_SECRET so `make dev-gateway` / `make dev` always match
@@ -100,13 +113,13 @@ setup-wine: ## One-time host setup for the Wine-hosted MT5 gateway (Ubuntu/Debia
 dev: ## Run backend + frontend + gateway together (Ctrl-C stops all)
 	@if ! pgrep -x terminal64 > /dev/null; then \
 		echo "MT5 terminal not running — launching it now (give it ~10 s to connect)..."; \
-		WINEPREFIX=$(WINEPREFIX) wine "$(WINEPREFIX)/drive_c/Program Files/MetaTrader 5/terminal64.exe" & \
+		WINEPREFIX=$(WINEPREFIX) WINEDEBUG=$(WINEDEBUG) wine "$(WINEPREFIX)/drive_c/Program Files/MetaTrader 5/terminal64.exe" & \
 		sleep 10; \
 	fi
 	@trap 'kill 0' EXIT; \
 	( cd $(BACKEND_DIR) && $(UV) run uvicorn src.main:socket_app --reload --port $(BACKEND_PORT) ) & \
 	( cd $(FRONTEND_DIR) && $(PNPM) dev --port $(FRONTEND_PORT) ) & \
-	( cd $(GATEWAY_DIR) && WINEPREFIX=$(WINEPREFIX) GATEWAY_SHARED_SECRET=$(GATEWAY_SHARED_SECRET) GATEWAY_PORT=$(GATEWAY_PORT) wine $(WINE_PYTHON) run_gateway.py ) & \
+	( cd $(GATEWAY_DIR) && WINEPREFIX=$(WINEPREFIX) WINEDEBUG=$(WINEDEBUG) GATEWAY_SHARED_SECRET=$(GATEWAY_SHARED_SECRET) GATEWAY_PORT=$(GATEWAY_PORT) wine $(WINE_PYTHON) run_gateway.py ) & \
 	wait
 
 .PHONY: dev-backend
@@ -126,14 +139,14 @@ WINE_PYTHON ?= $(WINEPREFIX)/drive_c/users/$(shell whoami)/AppData/Local/Program
 dev-gateway: ## Run the MT5 gateway under Wine (http://localhost:8787); auto-starts the MT5 terminal first
 	@if ! pgrep -x terminal64 > /dev/null; then \
 		echo "MT5 terminal not running — launching it now (give it ~10 s to connect)..."; \
-		WINEPREFIX=$(WINEPREFIX) wine "$(WINEPREFIX)/drive_c/Program Files/MetaTrader 5/terminal64.exe" & \
+		WINEPREFIX=$(WINEPREFIX) WINEDEBUG=$(WINEDEBUG) wine "$(WINEPREFIX)/drive_c/Program Files/MetaTrader 5/terminal64.exe" & \
 		sleep 10; \
 	fi
-	cd $(GATEWAY_DIR) && WINEPREFIX=$(WINEPREFIX) GATEWAY_SHARED_SECRET=$(GATEWAY_SHARED_SECRET) GATEWAY_PORT=$(GATEWAY_PORT) wine $(WINE_PYTHON) run_gateway.py
+	cd $(GATEWAY_DIR) && WINEPREFIX=$(WINEPREFIX) WINEDEBUG=$(WINEDEBUG) GATEWAY_SHARED_SECRET=$(GATEWAY_SHARED_SECRET) GATEWAY_PORT=$(GATEWAY_PORT) wine $(WINE_PYTHON) run_gateway.py
 
 .PHONY: mt5-terminal
 mt5-terminal: ## Launch the MT5 terminal in the dedicated Wine prefix (leave it running)
-	WINEPREFIX=$(WINEPREFIX) wine "$(WINEPREFIX)/drive_c/Program Files/MetaTrader 5/terminal64.exe" &
+	WINEPREFIX=$(WINEPREFIX) WINEDEBUG=$(WINEDEBUG) wine "$(WINEPREFIX)/drive_c/Program Files/MetaTrader 5/terminal64.exe" &
 
 .PHONY: mt5-login
 mt5-login: ## Log in to MT5 through the gateway from the CLI: make mt5-login LOGIN=123 PASSWORD=x SERVER=Broker-Demo
@@ -156,7 +169,7 @@ seed-indicators: ## Seed the 15 PoB pattern/confirmation indicators into the ind
 	cd backend && uv run python -m scripts.seed_pob_indicators
 
 .PHONY: seed-strategies
-seed-strategies: ## Seed the hardcoded baseline strategies (trend_structure_v1/v2) into the StrategyVersion DB (safe to re-run)
+seed-strategies: ## Seed the baseline strategies (breakout_v1, trend_structure_v1/v2) into the StrategyVersion DB and backfill missing spec snapshots (safe to re-run)
 	cd backend && uv run python -m scripts.seed_baseline_strategies
 
 # ─── Quality gates (run `make check` before declaring any task done) ─────────

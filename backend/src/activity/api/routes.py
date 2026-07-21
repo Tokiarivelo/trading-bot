@@ -8,13 +8,14 @@ from typing import Any
 from fastapi import APIRouter, Query, Request
 
 from src.activity.api.schemas import (
+    BotSignalOut,
     LogDeleteByFilterRequest,
     LogDeleteByIdsRequest,
     LogDeleteResult,
     LogEntryOut,
     LogHistoryPage,
 )
-from src.activity.domain.models import LogEntry
+from src.activity.domain.models import BotSignal, LogEntry
 
 router = APIRouter(prefix="/activity", tags=["activity"])
 
@@ -75,6 +76,39 @@ async def get_history(
         offset=offset,
     )
     return LogHistoryPage(items=[_log_out(e) for e in entries], total=total)
+
+
+@router.get(
+    "/signals",
+    response_model=list[BotSignalOut],
+    summary="Get one bot's signal→outcome trail for the chart",
+    description=(
+        "Reconstructs `skill`'s own signal decisions from its persisted decision-trail log "
+        "lines — every setup the strategy saw, whether it became a trade or was vetoed/"
+        "rejected, in the order it happened. `skill` is the full bot id from `GET "
+        "/skills/normal` (e.g. 'normal/xauusd/breakout_v1'), passed as a query param rather "
+        "than a path segment since it contains '/'. Defaults to the last 14 days if `from` is "
+        "omitted, to bound the query. This is the live analog of a backtest report's "
+        "`signals` field — same shape, powers the same chart overlay."
+    ),
+)
+async def get_bot_signals(
+    request: Request,
+    skill: str = Query(description="Full bot id, e.g. 'normal/xauusd/breakout_v1'."),
+    frm: int | None = Query(
+        default=None, alias="from", description="Range start, epoch seconds UTC (inclusive)."
+    ),
+    to: int | None = Query(default=None, description="Range end, epoch seconds UTC (inclusive)."),
+) -> list[BotSignalOut]:
+    signals: list[BotSignal] = await _service(request).get_bot_signals(
+        skill=skill, created_from=frm, created_to=to
+    )
+    return [
+        BotSignalOut(
+            time=int(s.time.timestamp()), direction=s.direction, outcome=s.outcome, reason=s.reason
+        )
+        for s in signals
+    ]
 
 
 @router.post(

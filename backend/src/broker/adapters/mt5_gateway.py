@@ -86,6 +86,7 @@ class GatewayBroker:
                 "sl": order.sl,
                 "tp": order.tp,
                 "comment": order.comment,
+                "magic": order.magic,
             },
         )
         return _to_execution_result(payload)
@@ -119,6 +120,7 @@ class GatewayBroker:
                 open_time=datetime.fromtimestamp(p["open_time"], tz=UTC),
                 profit=p["profit"],
                 comment=p["comment"],
+                magic=p.get("magic", 0),
             )
             for p in response.json()
         ]
@@ -215,6 +217,7 @@ def _to_execution_result(payload: dict[str, Any]) -> ExecutionResult:
         time=datetime.fromtimestamp(payload["time"], tz=UTC),
         spread_points=payload["spread_points"],
         comment=payload["comment"],
+        magic=payload.get("magic", 0),
         profit=payload["profit"],
     )
 

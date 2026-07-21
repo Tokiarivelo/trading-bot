@@ -28,7 +28,9 @@ def order(body: OrderRequest) -> OrderResultOut:
         raise HTTPException(status_code=422, detail=f"side must be one of {VALID_SIDES}")
     try:
         return OrderResultOut(
-            **client.order_send(body.symbol, body.side, body.volume, body.sl, body.tp, body.comment)
+            **client.order_send(
+                body.symbol, body.side, body.volume, body.sl, body.tp, body.comment, body.magic
+            )
         )
     except Mt5Error as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc

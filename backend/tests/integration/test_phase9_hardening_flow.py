@@ -144,7 +144,6 @@ async def test_kill_switch_closes_paper_position_and_fires_alerts(tmp_path):
         skill_selector=AlwaysAllowSkillSelector(),
         strategy_source=type("S", (), {"get": staticmethod(lambda name: None)})(),
         entry_timeframe="M5",
-        confirmation_timeframes=("H1", "H4"),
         event_bus=event_bus,
     )
 

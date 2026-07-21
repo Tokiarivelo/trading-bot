@@ -29,7 +29,18 @@ function toApiFilters(f: TradeHistoryFilterState): Omit<ApiFilters, "limit" | "o
  * symbol/side/strategy/skill/outcome/date-range and categorizable (grouped,
  * with per-group win-rate + net P/L) by symbol, date, side, strategy
  * version, skill, or outcome. */
-export function TradeHistoryList() {
+export function TradeHistoryList({
+  selectedTicket = null,
+  onSelectTicket,
+}: {
+  /** Ticket currently highlighted on the chart (see page.tsx's
+   * `selectedOrderTicket`) — forwarded to TradeHistoryTable so a row stays
+   * marked in sync with the chart however the selection changed. */
+  selectedTicket?: number | null;
+  /** Called with a row's ticket + symbol when clicked — forwarded straight
+   * through from TradeHistoryTable. */
+  onSelectTicket?: (ticket: number, symbol: string) => void;
+} = {}) {
   const [filters, setFilters] = useState<TradeHistoryFilterState>(EMPTY_FILTERS);
   const [groupBy, setGroupBy] = useState<GroupBy>("none");
   const apiFilters = useMemo(() => toApiFilters(filters), [filters]);
@@ -51,7 +62,12 @@ export function TradeHistoryList() {
         <p className="p-4 text-sm text-ink-muted">No trades match these filters.</p>
       )}
       {!error && items !== null && items.length > 0 && (
-        <TradeHistoryTable trades={items} groupBy={groupBy} />
+        <TradeHistoryTable
+          trades={items}
+          groupBy={groupBy}
+          selectedTicket={selectedTicket}
+          onSelectTicket={onSelectTicket}
+        />
       )}
       {!error && total > 0 && (
         <div className="flex items-center justify-between border-t border-line px-4 py-2 text-xs text-ink-muted">

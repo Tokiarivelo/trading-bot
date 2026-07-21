@@ -20,6 +20,7 @@ import logging
 
 from src.broker.application.account_service import AccountService
 from src.broker.application.reconciliation import ReconciliationService
+from src.broker.domain.account import BrokerUnavailable
 from src.shared.events.bus import EventBus
 from src.shared.events.definitions import GatewayHealthChanged
 
@@ -87,5 +88,8 @@ class GatewayHealthMonitor:
             )
         if gateway_recovered:
             logger.info("gateway reconnected — reattempting login and reconciling positions")
-            await self._account.reconnect_from_stored()
-            await self._reconciliation.reconcile_all()
+            if await self._account.reconnect_from_stored():
+                try:
+                    await self._reconciliation.reconcile_all()
+                except BrokerUnavailable as exc:
+                    logger.warning("reconciliation failed after gateway recovery: %s", exc)

@@ -85,6 +85,7 @@ class OrderRequest(BaseModel):
     sl: float | None = None
     tp: float | None = None
     comment: str = ""
+    magic: int = 0  # MT5 magic number — identifies which bot placed the order, 0 if none
 
 
 class OrderResultOut(BaseModel):
@@ -98,6 +99,7 @@ class OrderResultOut(BaseModel):
     time: int  # epoch seconds UTC
     spread_points: int
     comment: str = ""
+    magic: int = 0
     profit: float | None = None  # populated on close, None on open
 
 
@@ -121,6 +123,7 @@ class PositionOut(BaseModel):
     open_time: int
     profit: float
     comment: str = ""
+    magic: int = 0  # which bot opened this position (MT5 magic number), 0 if none
 
 
 VALID_ORDER_TYPES = ("limit", "stop")

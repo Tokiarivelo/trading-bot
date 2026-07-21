@@ -169,6 +169,31 @@ async def close_position(
 
 
 @router.post(
+    "/positions/close-all",
+    response_model=list[ExecutionResultOut],
+    summary="Close every open position on a symbol",
+    description=(
+        "Closes each currently open position on `symbol` in turn. Each closed "
+        "ticket publishes its own `PositionClosed` on the event bus, same as "
+        "`POST /positions/{ticket}/close`. A ticket the broker refuses to close "
+        "is skipped rather than aborting the rest — compare the response "
+        "length against `GET /positions?symbol=...` beforehand to see whether "
+        "any were skipped."
+    ),
+    responses=_UNAVAILABLE,
+)
+async def close_all_positions(
+    request: Request,
+    symbol: str = Query(description="Close every open position on this symbol."),
+) -> list[ExecutionResultOut]:
+    try:
+        results = await _service(request).close_all_positions(symbol)
+    except (BrokerUnavailable, MarketDataUnavailable) as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return [_execution_out(r) for r in results]
+
+
+@router.post(
     "/positions/{ticket}/modify",
     response_model=ModifyOrderResponse,
     summary="Modify an open position's stop loss / take profit",

@@ -43,6 +43,43 @@ for confirmation before writing any code. Fields, per
   multipliers, RR ratio, confidence thresholds…). Nothing that should be
   tunable stays hardcoded inline.
 
+Alongside the code-level `StrategySpec` above, also draft the **spec
+snapshot** that gets persisted on the `StrategyVersion` DB row and rendered
+on the version detail page's "Spec snapshot" panel. This is a separate,
+richer dict — shape mirrors `backend/src/strategies/api/schemas.py:
+StrategySpecSnapshotOut` — and step 4 must pass it explicitly:
+
+```python
+spec = {
+    "name": "<family_name>",
+    "symbols": ["XAUUSD", ...],
+    "entry_timeframe": "M5",
+    "confirmation_timeframes": ["H1", "H4"],
+    "indicators": [
+        {"type": "ema", "period": 200, "label": "EMA200", "source": "close", "params": {}},
+        # type is one of: ema, sma, rsi, macd, bollinger — only structured,
+        # plottable indicators go here. Anything else (a named pattern, a
+        # custom oscillator) goes in unrecognized_indicators instead.
+    ],
+    "unrecognized_indicators": [],  # optional, default []
+    "entry_rules": "Plain-English entry logic — the real setup, not a stub.",
+    "exit_rules": "Plain-English exit logic (SL/TP/time-stop rules).",
+    "risk_notes": "Informational only — real caps live in configs/risk.yaml.",
+    "params": {"lookback": 20, "tp_rr": 2.2},  # same values as StrategySpec.params
+    "price_levels": [],   # optional: [{"type": "support", "price": 2400.0, "label": "..."}]
+    "chart_notes": [],    # optional: other drawing-tool mentions, no number attached
+}
+```
+
+Do not skip this or leave it as an empty/placeholder dict. `entry_rules`/
+`exit_rules` in particular should describe the actual logic you're about to
+write in step 2 — a trader reading the Bots page has no other way to see
+why the strategy trades what it trades without opening the source. (The
+backend derives a *minimal* fallback spec — symbols/timeframes/params only,
+placeholder entry/exit text — for versions saved with no `spec` at all, but
+that's a safety net for hand-uploaded/legacy code, not something this skill
+should rely on when it already knows the real rules.)
+
 ## 2. Write the strategy source
 
 One class implementing the `Strategy` protocol: a `spec: StrategySpec`
@@ -134,7 +171,20 @@ svc = StrategyVersionService(
     generated_dir=Path('src/strategies/generated'),
 )
 code = Path('/tmp/candidate.py').read_text()
-version = svc.save_generated_code(name='<family_name>', code=code, source=CodeSource.MANUAL)
+spec = {
+    'name': '<family_name>',
+    'symbols': [...],
+    'entry_timeframe': 'M5',
+    'confirmation_timeframes': [...],
+    'indicators': [...],
+    'entry_rules': '...',
+    'exit_rules': '...',
+    'risk_notes': '...',
+    'params': {...},
+}  # the full snapshot drafted in step 1 — not omitted, not a placeholder
+version = svc.save_generated_code(
+    name='<family_name>', code=code, source=CodeSource.MANUAL, spec=spec
+)
 print(version.id, version.file_path, version.status)
 "
 ```
@@ -222,5 +272,9 @@ works too, per `.claude/skills/backtest`.)
 - Write the generated `.py` file directly instead of going through
   `StrategyVersionService.save_generated_code` — that produces an orphaned,
   unregistered strategy that nothing in the app can see.
+- Call `save_generated_code` without a `spec=` argument (or with a
+  placeholder one) — that leaves the Bots page's "Spec snapshot" panel
+  showing generic auto-derived text instead of this strategy's actual entry/
+  exit rules and indicators.
 - Run backtests against anything but the replay/paper path (already true of
   `/backtest/run` and the CLI) — never a live account.

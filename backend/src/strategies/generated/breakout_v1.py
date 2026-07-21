@@ -2,9 +2,9 @@
 
 Proves the engine pipe end-to-end before the AI codegen loop (Phase 6)
 exists. Sandbox-safe: only `math`/`pandas` — no I/O, no broker access.
+No `from __future__ import annotations` — the sandbox's import whitelist
+rejects it, and every generated strategy must pass that whitelist.
 """
-
-from __future__ import annotations
 
 from src.strategies.domain.models import Direction, MarketContext, Signal, StrategySpec
 

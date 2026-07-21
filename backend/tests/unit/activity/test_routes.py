@@ -126,3 +126,45 @@ async def test_delete_by_filter_with_no_body_fields_deletes_everything(api):
     assert response.json() == {"deleted": 3}
     remaining = await api.get("/activity/history")
     assert remaining.json()["total"] == 0
+
+
+async def test_get_bot_signals_returns_this_bots_signal_trail(api, repository):
+    skill = "normal/xauusd/breakout_v1"
+    repository.save(
+        created_at=1000,
+        level="INFO",
+        logger="src.engine.application.trade_loop",
+        message=f"SIGNAL: XAUUSD buy via strategy=breakout_v1 skill={skill} — RBR-retest(30m)",
+    )
+    repository.save(
+        created_at=1001,
+        level="INFO",
+        logger="src.broker.application.order_service",
+        message=(
+            "ENTRY OPENED: ticket=1 buy XAUUSD 0.01 lots @ 4000.00 sl=None tp=None spread=1pts "
+            f"strategy=breakout_v1:v1 skill={skill} magic=1 reason=RBR-retest(30m)"
+        ),
+    )
+    # A different bot's signal on the same symbol must not leak in.
+    repository.save(
+        created_at=1002,
+        level="INFO",
+        logger="src.engine.application.trade_loop",
+        message=(
+            "SIGNAL: XAUUSD sell via strategy=mean_reversion skill=normal/xauusd/mean_reversion "
+            "— fade the spike"
+        ),
+    )
+
+    response = await api.get("/activity/signals", params={"skill": skill, "from": 0})
+
+    assert response.status_code == 200
+    (signal,) = response.json()
+    assert signal["direction"] == "buy"
+    assert signal["outcome"] == "opened"
+    assert signal["reason"] == "RBR-retest(30m)"
+
+
+async def test_get_bot_signals_requires_skill_param(api):
+    response = await api.get("/activity/signals")
+    assert response.status_code == 422

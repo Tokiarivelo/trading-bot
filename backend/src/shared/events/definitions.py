@@ -60,9 +60,13 @@ class PositionClosed(Event):
 
 @dataclass(frozen=True, kw_only=True)
 class TenTradesCompleted(Event):
-    """Emitted by the journal every 10 closed trades → triggers AI review."""
+    """Emitted by the journal every 10 closed trades for one bot → triggers
+    AI review. Scoped by `skill` (a bot's unique `NormalSkill.name`), not
+    just `symbol`, since several bots may trade the same symbol
+    concurrently, each on its own 10-trade cadence."""
 
     symbol: str
+    skill: str
     trade_ids: tuple[str, ...]
 
 

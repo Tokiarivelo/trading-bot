@@ -346,6 +346,51 @@ async def test_delete_report_rejects_path_traversal(api):
     assert response.status_code == 404
 
 
+# ── POST /backtest/reports/import ─────────────────────────────────────────────
+
+
+async def test_import_report_round_trips_a_downloaded_report(api):
+    client, reports_dir = api
+    zone = BacktestZone(
+        kind="demand", price_low=99.7, price_high=100.3, time_start=T0, time_end=T1
+    )
+    trade = dataclasses.replace(
+        make_report().trades[0],
+        zone=zone,
+        pattern="bullish_engulfing",
+        structure=(("HH", 105.0, T0), ("LL", 95.0, T1)),
+    )
+    report = dataclasses.replace(make_report(), trades=(trade,))
+    original_path = write_report(report, reports_dir)
+
+    downloaded = await client.get(f"/backtest/reports/{original_path.stem}")
+    assert downloaded.status_code == 200
+    downloaded_json = downloaded.json()
+
+    response = await client.post("/backtest/reports/import", json=downloaded_json)
+    assert response.status_code == 201
+    summary = response.json()
+    assert summary["id"] != original_path.stem  # a fresh id, never overwrites
+    assert summary["strategy"] == "breakout_v1"
+    assert summary["symbol"] == "XAUUSD"
+    assert summary["trade_count"] == 1
+    assert summary["profit_factor"] is None  # inf round-trips as null both ways
+
+    reimported = await client.get(f"/backtest/reports/{summary['id']}")
+    assert reimported.status_code == 200
+    assert reimported.json()["trades"] == downloaded_json["trades"]
+    assert reimported.json()["equity_curve"] == downloaded_json["equity_curve"]
+
+    listing = await client.get("/backtest/reports")
+    assert listing.json()["total"] == 2
+
+
+async def test_import_report_rejects_malformed_json(api):
+    client, _reports_dir = api
+    response = await client.post("/backtest/reports/import", json={"strategy": "x"})
+    assert response.status_code == 422
+
+
 async def test_list_bots_ids_stay_distinct_despite_shared_spec_name(api_with_strategies):
     client, _db_url, original, duplicate = api_with_strategies
 

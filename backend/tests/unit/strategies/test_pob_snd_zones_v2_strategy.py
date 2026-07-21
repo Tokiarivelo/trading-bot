@@ -202,7 +202,8 @@ def test_fx_buys_rbr_retest_in_h1_uptrend():
     assert signal.direction == Direction.BUY
     assert signal.zone is not None
     assert signal.zone.kind == ZoneKind.DEMAND
-    assert signal.tp_points == signal.sl_points * 2.5
+    spread_distance = 1.0 * 0.01  # ctx.spread_points * XAUUSD point size
+    assert signal.tp_points == (signal.sl_points + spread_distance) * 2.5
 
 
 def test_fx_vetoes_demand_retest_against_h1_downtrend():

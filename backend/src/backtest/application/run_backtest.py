@@ -28,6 +28,7 @@ from src.backtest.adapters.context_builder import CachedContextBuilder
 from src.backtest.adapters.fixed_skill_selector import FixedSkillSelector
 from src.backtest.application import metrics
 from src.backtest.application.period import parse_period
+from src.backtest.application.signals import extract_signals
 from src.backtest.domain.models import ActivityLogEntry, BacktestReport
 from src.broker.adapters.paper import PaperBroker
 from src.broker.application.order_service import OrderService
@@ -50,6 +51,7 @@ from src.shared.events.definitions import CandleClosed, PositionClosed, Position
 from src.strategies.adapters.repository import StrategyVersionRepository
 from src.strategies.application.versioning import StrategyVersionService
 from src.strategies.generated.breakout_v1 import BreakoutV1
+from src.strategies.generated.breakout_v2 import BreakoutV2
 from src.strategies.generated.mean_reversion_v1 import MeanReversionV1
 from src.strategies.generated.trend_structure_v1 import TrendStructureV1
 from src.strategies.generated.trend_structure_v2 import TrendStructureV2
@@ -181,14 +183,18 @@ async def run_backtest(
     repository = CandleRepository(session_factory)
     history_start = start - HISTORY_BUFFER
     # Only the timeframes this run can ever read: the strategy's entry and
-    # confirmation frames (all the engine fetches for context) plus M5, which
-    # `ReplayMarketDataPort` always needs to derive bid/ask from the current
-    # bar. Loading all nine timeframes made DB reads the single biggest fixed
-    # cost of a run (e.g. ~100k M1 rows for an M5 strategy that never looks
-    # at them).
-    needed_timeframes = {entry_tf, Timeframe.M5} | {
-        Timeframe(tf) for tf in strategy.spec.confirmation_timeframes
-    }
+    # confirmation frames plus its engine HTF-veto frame (the timeframe
+    # immediately above entry_tf — see trade_loop._veto_timeframe), plus M5,
+    # which `ReplayMarketDataPort` always needs to derive bid/ask from the
+    # current bar. Loading all nine timeframes made DB reads the single
+    # biggest fixed cost of a run (e.g. ~100k M1 rows for an M5 strategy that
+    # never looks at them).
+    veto_tf = entry_tf.next_up() if strategy.spec.htf_veto else None
+    needed_timeframes = (
+        {entry_tf, Timeframe.M5}
+        | {Timeframe(tf) for tf in strategy.spec.confirmation_timeframes}
+        | ({veto_tf} if veto_tf is not None else set())
+    )
     candles: dict[Timeframe, list[Candle]] = {
         tf: repository.get_range(symbol, tf, history_start, end) for tf in needed_timeframes
     }
@@ -252,7 +258,6 @@ async def run_backtest(
         skill_selector=FixedSkillSelector(strategy_name),
         strategy_source=registry,
         entry_timeframe=strategy.spec.entry_timeframe,
-        confirmation_timeframes=strategy.spec.confirmation_timeframes,
         clock=clock,
         context_builder=CachedContextBuilder(candles),
     )
@@ -314,6 +319,7 @@ async def run_backtest(
         avg_r=metrics.avg_r(trades),
         worst_losing_streak=metrics.worst_losing_streak(trades),
         activity_log=tuple(activity_capture.entries),
+        signals=extract_signals(activity_capture.entries),
         min_rr=resolved_min_rr,
         risk_per_trade_pct=risk_caps.risk_per_trade_pct,
         daily_loss_limit_pct=risk_caps.daily_loss_limit_pct,
@@ -420,6 +426,8 @@ def _default_registry(database_url: str) -> StrategyRegistry:
     registry = StrategyRegistry()
     breakout_v1 = BreakoutV1()
     registry.register(breakout_v1.spec.name, breakout_v1)
+    breakout_v2 = BreakoutV2()
+    registry.register(breakout_v2.spec.name, breakout_v2)
     trend_structure_v1 = TrendStructureV1()
     registry.register(trend_structure_v1.spec.name, trend_structure_v1)
     trend_structure_v2 = TrendStructureV2()

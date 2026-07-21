@@ -5,4 +5,7 @@ symbols: [XAUUSD, XAGUSD, BTCUSD, 'Boom 1000 Index', 'Volatility 75 Index']
 engine:
   enabled: true
   entry_timeframe: M5
-  confirmation_timeframes: [H1, H4]
+  # HTF veto is per-bot now: each bot is vetoed by the single timeframe
+  # immediately above its own strategy's entry_timeframe (see
+  # src/engine/application/trade_loop.py:_veto_timeframe) — no engine-wide
+  # list to configure here anymore.

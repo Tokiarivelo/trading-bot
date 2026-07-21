@@ -154,6 +154,38 @@ async def test_upload_rejects_non_pdf(api):
     assert response.status_code == 400
 
 
+STRUCTURED_SPEC = {
+    **EXTRACTED_SPEC,
+    "indicators": [{"type": "ema", "period": 200, "label": "EMA200"}],
+}
+
+
+async def test_from_spec_creates_draft_without_llm_call(api):
+    response = await api.post("/ai/pdf-strategy/from-spec", json={"spec": STRUCTURED_SPEC})
+    assert response.status_code == 200
+    draft = response.json()
+    assert draft["status"] == "pending_review"
+    assert draft["extracted_spec"]["name"] == "gold_ema_pullback"
+    assert draft["edited_spec"] is None
+    assert draft["source_filename"] == "(uploaded JSON)"
+
+
+async def test_from_spec_with_symbol_overrides_spec(api):
+    response = await api.post(
+        "/ai/pdf-strategy/from-spec", json={"spec": STRUCTURED_SPEC, "symbol": "EURUSD"}
+    )
+    assert response.status_code == 200
+    draft = response.json()
+    assert draft["extracted_spec"]["symbols"] == ["XAUUSD"]
+    assert draft["edited_spec"]["symbols"] == ["EURUSD"]
+    assert draft["effective_spec"]["symbols"] == ["EURUSD"]
+
+
+async def test_from_spec_rejects_malformed_json(api):
+    response = await api.post("/ai/pdf-strategy/from-spec", json={"spec": {"name": "x"}})
+    assert response.status_code == 422
+
+
 async def test_get_draft_not_found(api):
     response = await api.get("/ai/pdf-strategy/drafts/does-not-exist")
     assert response.status_code == 404

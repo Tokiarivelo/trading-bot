@@ -84,6 +84,15 @@ export function NavigationDrawer() {
       ),
     },
     {
+      name: "Bot Control",
+      path: "/bot-control",
+      icon: (
+        <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+          <path strokeLinecap="round" strokeLinejoin="round" d="M12 3v6m6.364 1.636a9 9 0 11-12.728 0" />
+        </svg>
+      ),
+    },
+    {
       name: "Backtests",
       path: "/backtest",
       icon: (

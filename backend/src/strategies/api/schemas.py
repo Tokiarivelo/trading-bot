@@ -157,6 +157,13 @@ class StrategyVersionOut(BaseModel):
         )
 
 
+class UpdateVersionSpecRequest(StrategySpecSnapshotOut):
+    """Full replacement for a version's spec snapshot — same shape as
+    `StrategySpecSnapshotOut`, submitted back after the trader hand-edits it
+    on the version detail page rather than derived from code or AI
+    extraction."""
+
+
 class DuplicateVersionRequest(BaseModel):
     name: str = Field(
         description="New strategy family name for the duplicate — must not already be in "

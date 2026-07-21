@@ -568,7 +568,9 @@ symbols: [XAUUSD, XAGUSD, BTCUSD]
 engine:
   enabled: true
   entry_timeframe: M5
-  confirmation_timeframes: [H1, H4]
+  # Pas de confirmation_timeframes ici : le veto HTF de chaque bot est
+  # l'unique unité de temps juste au-dessus de son propre entry_timeframe
+  # (M1→M5, M5→M15, M15→M30, …) — calculé automatiquement, pas configuré.
 ```
 
 ```yaml

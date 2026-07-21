@@ -1,5 +1,0 @@
-name: normal/volatility 75 index
-symbol: Volatility 75 Index
-strategy: pob_price_action_snd for vix75
-risk_multiplier: 1.0
-sessions: []

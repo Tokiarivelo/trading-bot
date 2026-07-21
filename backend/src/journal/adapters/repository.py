@@ -47,16 +47,37 @@ class JournalRepository:
         return [_to_domain(row) for row in rows]
 
     def get_markers(
-        self, symbol: str, frm: int | None = None, to: int | None = None
+        self,
+        symbol: str,
+        frm: int | None = None,
+        to: int | None = None,
+        skill: str | None = None,
+        limit: int = 1000,
     ) -> list[TradeRecord]:
-        query = select(TradeRow).where(TradeRow.symbol == symbol).order_by(TradeRow.open_time)
+        """`skill`, when given, scopes markers to one bot's own trades — lets
+        the chart show a single bot's positions in isolation instead of every
+        trade (any bot, or manual) ever placed on the symbol. `limit` bounds
+        the query to the most recent `limit` trades by open_time — the chart
+        polls this every few seconds for the life of a session, so an
+        unbounded scan here would grow with the account's entire trade
+        history instead of staying constant."""
+        query = (
+            select(TradeRow)
+            .where(TradeRow.symbol == symbol)
+            .order_by(TradeRow.open_time.desc())
+            .limit(limit)
+        )
         if frm is not None:
             query = query.where(TradeRow.open_time >= frm)
         if to is not None:
             query = query.where(TradeRow.open_time <= to)
+        if skill is not None:
+            query = query.where(TradeRow.skill == skill)
         with self._session_factory() as session:
             rows = session.scalars(query).all()
-        return [_to_domain(row) for row in rows]
+        # Re-ascending: callers (chart markers) expect oldest-first, same as
+        # the previous unbounded `order_by(open_time)` query returned.
+        return [_to_domain(row) for row in reversed(rows)]
 
     def get_open(self, symbol: str | None = None) -> list[TradeRecord]:
         """Trades journaled as opened but never journaled as closed —
@@ -68,23 +89,32 @@ class JournalRepository:
             rows = session.scalars(query).all()
         return [_to_domain(row) for row in rows]
 
-    def get_last_n_closed(self, symbol: str, count: int) -> list[TradeRecord]:
+    def get_last_n_closed(
+        self, symbol: str, count: int, skill: str | None = None
+    ) -> list[TradeRecord]:
         query = (
             select(TradeRow)
             .where(TradeRow.symbol == symbol, TradeRow.close_time.is_not(None))
             .order_by(TradeRow.close_time.desc())
             .limit(count)
         )
+        if skill is not None:
+            query = query.where(TradeRow.skill == skill)
         with self._session_factory() as session:
             rows = session.scalars(query).all()
         return [_to_domain(row) for row in rows]
 
-    def count_closed(self, symbol: str) -> int:
+    def count_closed(self, symbol: str, skill: str | None = None) -> int:
+        """`skill`, when given, scopes the count to one bot's trades on
+        `symbol` — several bots trading the same symbol concurrently each
+        get reviewed on their own 10-trade cadence, not a shared one."""
         query = (
             select(func.count())
             .select_from(TradeRow)
             .where(TradeRow.symbol == symbol, TradeRow.close_time.is_not(None))
         )
+        if skill is not None:
+            query = query.where(TradeRow.skill == skill)
         with self._session_factory() as session:
             return session.scalar(query) or 0
 

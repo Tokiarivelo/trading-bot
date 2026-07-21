@@ -1,0 +1,5 @@
+name: normal/btcusd/scalp_range_breakout_v1
+symbol: BTCUSD
+strategy: scalp_range_breakout_v1
+risk_multiplier: 1.0
+sessions: []

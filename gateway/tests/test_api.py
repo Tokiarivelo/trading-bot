@@ -175,6 +175,29 @@ def test_order_opens_a_position(api):
     assert positions[0]["sl"] == 2390.0
 
 
+def test_order_magic_round_trips_to_the_opened_position(api):
+    # Lets the backend tell multiple bots' positions on the same symbol
+    # apart — echoed straight back on the order result and readable on
+    # GET /positions afterwards, matching MT5's own per-position magic field.
+    _login(api)
+    response = api.post(
+        "/order",
+        json={"symbol": "XAUUSD", "side": "buy", "volume": 0.1, "magic": 424242},
+    )
+    assert response.status_code == 200
+    assert response.json()["magic"] == 424242
+
+    positions = api.get("/positions").json()
+    assert positions[0]["magic"] == 424242
+
+
+def test_order_defaults_to_zero_magic(api):
+    _login(api)
+    response = api.post("/order", json={"symbol": "XAUUSD", "side": "buy", "volume": 0.1})
+    assert response.json()["magic"] == 0
+    assert api.get("/positions").json()[0]["magic"] == 0
+
+
 def test_order_bumps_volume_up_to_symbol_minimum(api, fake_mt5):
     # A synthetic index (e.g. Deriv's Boom/Crash) with a coarser minimum
     # than the forex-sized default rejected with retcode=10014 (invalid

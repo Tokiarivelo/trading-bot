@@ -129,3 +129,22 @@ async def test_pagination_limit_offset(api):
     body = response.json()
     assert body["total"] == 3
     assert [t["id"] for t in body["items"]] == ["2"]
+
+
+async def test_markers_filters_by_skill(api, repository):
+    repository.save(make_record("4", symbol="XAUUSD", skill="normal/xauusd/breakout_v1"))
+    repository.save(make_record("5", symbol="XAUUSD", skill="normal/xauusd/mean_reversion"))
+
+    response = await api.get(
+        "/journal/markers", params={"symbol": "XAUUSD", "skill": "normal/xauusd/breakout_v1"}
+    )
+
+    assert response.status_code == 200
+    assert [t["id"] for t in response.json()] == ["4"]
+
+
+async def test_markers_without_skill_returns_every_bot(api):
+    response = await api.get("/journal/markers", params={"symbol": "XAUUSD"})
+
+    assert response.status_code == 200
+    assert {t["id"] for t in response.json()} == {"1", "3"}

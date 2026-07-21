@@ -309,8 +309,38 @@ async def test_close_position_updates_journal_and_markers(api):
     assert markers[0]["profit"] is not None
 
 
-async def test_ten_trade_review_fires_after_threshold(api):
-    """ContainerForTest is built with review_every_n_trades=2 for a fast test."""
+async def test_close_all_positions_closes_every_open_position_on_symbol(api):
+    await _backfill_market_context(api)
+
+    tickets = []
+    for _ in range(2):
+        opened = await api.post(
+            "/broker/orders",
+            json={"symbol": "XAUUSD", "side": "buy", "volume": 0.1, "sl": 2390.0, "tp": 2420.0},
+        )
+        tickets.append(opened.json()["ticket"])
+
+    assert len((await api.get("/broker/positions")).json()) == 2
+
+    closed = await api.post("/broker/positions/close-all", params={"symbol": "XAUUSD"})
+    assert closed.status_code == 200
+    closed_tickets = [r["ticket"] for r in closed.json()]
+    assert sorted(closed_tickets) == sorted(tickets)
+
+    assert (await api.get("/broker/positions")).json() == []
+
+    trades = (await api.get("/journal/trades", params={"symbol": "XAUUSD"})).json()
+    assert len(trades) == 2
+    assert all(t["close_time"] is not None for t in trades)
+
+
+async def test_manually_placed_trades_never_trigger_the_ten_trade_review(api):
+    """ContainerForTest is built with review_every_n_trades=2 for a fast test.
+    Manual/API-placed orders (this endpoint, `POST /broker/orders`) carry no
+    `skill` attribution — there's no bot whose strategy the AI review loop
+    could meaningfully review — so, unlike engine-driven entries
+    (tests/integration/test_phase4_engine_flow.py), they must never trigger
+    TenTradesCompleted, no matter how many close."""
     await _backfill_market_context(api)
 
     for _ in range(2):
@@ -324,10 +354,9 @@ async def test_ten_trade_review_fires_after_threshold(api):
     trades = (await api.get("/journal/trades", params={"symbol": "XAUUSD"})).json()
     assert len(trades) == 2
     assert all(t["close_time"] is not None for t in trades)
+    assert all(t["skill"] is None for t in trades)
 
-    assert len(api.container.review_events) == 1
-    assert api.container.review_events[0].symbol == "XAUUSD"
-    assert len(api.container.review_events[0].trade_ids) == 2
+    assert api.container.review_events == []
 
 
 async def test_market_order_rejected_at_max_open_positions(api_capped):

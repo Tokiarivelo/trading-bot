@@ -71,9 +71,21 @@ class StrategySpec:
     name: str
     version: int
     symbols: tuple[str, ...]
-    entry_timeframe: str  # always "M5" per project rules
+    entry_timeframe: str  # the bar size this strategy evaluates on, e.g. "M1", "M5"
     confirmation_timeframes: tuple[str, ...]
     params: dict[str, Any]
+    # Whether the engine's HTF veto (the timeframe above entry_timeframe,
+    # see trade_loop._veto_timeframe) applies to this bot. True for every
+    # existing strategy; a strategy can opt out when it does its own
+    # trend/quality gating and the engine veto would be redundant or unwanted.
+    htf_veto: bool = True
+    # When True, a fresh signal whose direction opposes this bot's currently
+    # open position (matched by OrderRequest.magic, so only this bot's own
+    # position on the symbol) closes that position before the normal entry
+    # pipeline runs, instead of waiting for SL/TP/time-stop — see
+    # trade_loop._close_opposite_position. False (default) preserves today's
+    # behavior for every existing strategy.
+    close_on_opposite_signal: bool = False
 
 
 @dataclass(frozen=True)

@@ -100,9 +100,18 @@ class RefinementLoopService:
             )
 
     async def _handle(self, event: TenTradesCompleted) -> None:
-        decision = self._skill_selector.select(event.symbol)
-        if not decision.strategy_name:
-            logger.info("refinement loop: no strategy configured for %s, skipping", event.symbol)
+        # `event.skill` pins this review to the one bot whose 10 trades
+        # these are — a symbol may have several bots active at once, each
+        # reviewed independently, so this must not just grab "a" decision
+        # for the symbol.
+        decisions = self._skill_selector.select_all(event.symbol)
+        decision = next((d for d in decisions if d.skill_name == event.skill), None)
+        if decision is None or not decision.strategy_name:
+            logger.info(
+                "refinement loop: bot %s no longer active on %s, skipping",
+                event.skill,
+                event.symbol,
+            )
             return
 
         # Deliberately NOT resolved from TradeRecord.strategy_version — that

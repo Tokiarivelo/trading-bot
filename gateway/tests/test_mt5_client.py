@@ -34,6 +34,43 @@ def test_filling_type_falls_back_to_return_when_neither_supported(fake_mt5):
     assert mt5_client.client._filling_type("Boom 1000 Index") == fake_mt5.ORDER_FILLING_RETURN
 
 
+def test_order_send_passes_magic_through_to_the_request_and_echoes_it(fake_mt5, monkeypatch):
+    monkeypatch.setattr(mt5_client.client, "_connected", True)
+    sent_requests = []
+    original_order_send = fake_mt5.order_send
+
+    def capture(request):
+        sent_requests.append(request)
+        return original_order_send(request)
+
+    monkeypatch.setattr(fake_mt5, "order_send", capture)
+
+    result = mt5_client.client.order_send("XAUUSD", "buy", 0.1, None, None, "", magic=777)
+
+    assert sent_requests[-1]["magic"] == 777
+    assert result["magic"] == 777
+
+
+def test_positions_reads_native_mt5_magic_field(fake_mt5, monkeypatch):
+    monkeypatch.setattr(mt5_client.client, "_connected", True)
+    fake_mt5._positions[555] = FakePosition(
+        ticket=555,
+        symbol="XAUUSD",
+        type_=fake_mt5.ORDER_TYPE_BUY,
+        volume=0.1,
+        price_open=2400.0,
+        sl=2390.0,
+        tp=2410.0,
+        time=1_752_100_812,
+        profit=0.0,
+        magic=321,
+    )
+
+    (position,) = mt5_client.client.positions()
+
+    assert position["magic"] == 321
+
+
 def test_normalize_volume_bumps_up_to_symbol_minimum(fake_mt5):
     # Boom/Crash-style synthetics reject anything below their (much coarser)
     # minimum with retcode=10014 (invalid volume) rather than adjusting it —

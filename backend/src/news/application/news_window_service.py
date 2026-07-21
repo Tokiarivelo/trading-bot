@@ -9,7 +9,7 @@ Two cadences, deliberately separate:
     `NewsWindowExited` close to real time, with zero extra network calls.
 
 `active_window_for()` is synchronous and reads only the last-fetched cache —
-it's called from `NewsSkillSelector.select()` on the engine's hot path
+it's called from `NewsSkillSelector.select_all()` on the engine's hot path
 (every M5 close) and must never block on I/O.
 """
 

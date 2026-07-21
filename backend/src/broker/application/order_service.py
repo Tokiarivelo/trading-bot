@@ -52,6 +52,7 @@ class OrderService:
         comment: str = "",
         strategy_version: str | None = None,
         skill: str | None = None,
+        magic: int = 0,
         max_spread_points: int | None = None,
         zone_kind: str | None = None,
         zone_price_low: float | None = None,
@@ -64,13 +65,16 @@ class OrderService:
         """`max_spread_points`, when set, overrides the symbol's configured
         cap for this order only — used by news skills to widen (or, in
         principle, tighten) the allowance during a post-event window
-        (`SkillDecision.max_spread_points`, §6.6). `zone_*`/`pattern`/
-        `structure` are optional chart-annotation passthrough from the
-        strategy's Signal (see strategies/domain/models.py) — kept as flat
-        primitives here rather than importing that module's domain types, so
-        the broker layer stays independent of the strategies module; they
-        flow straight into the published `PositionOpened` event unused by
-        order placement itself."""
+        (`SkillDecision.max_spread_points`, §6.6). `magic`, when set, is the
+        MT5 magic number identifying which bot placed the order — lets
+        several bots trading the same symbol be told apart on open
+        positions (`SkillDecision.magic`, §6.6); 0 for manual/API orders.
+        `zone_*`/`pattern`/`structure` are optional chart-annotation
+        passthrough from the strategy's Signal (see strategies/domain/models.py)
+        — kept as flat primitives here rather than importing that module's
+        domain types, so the broker layer stays independent of the
+        strategies module; they flow straight into the published
+        `PositionOpened` event unused by order placement itself."""
         info = await self._market_data.get_symbol_info(symbol)
         reference_price = info.ask if side is Side.BUY else info.bid
         sl_distance = abs(reference_price - sl) if sl is not None else None
@@ -86,21 +90,45 @@ class OrderService:
         )
         if veto is not None:
             logger.info(
-                "ENTRY REJECTED (spread/RR gate): %s %s spread=%dpts sl=%s tp=%s — %s",
+                "ENTRY REJECTED (spread/RR gate): %s %s spread=%dpts sl=%s tp=%s "
+                "strategy=%s skill=%s — %s",
                 side.value,
                 symbol,
                 info.spread_points,
                 sl,
                 tp,
+                strategy_version,
+                skill,
                 veto.reason,
             )
             raise OrderRejected(veto.reason)
 
-        order = OrderRequest(symbol=symbol, side=side, volume=volume, sl=sl, tp=tp, comment=comment)
-        result = await self._broker.open_position(order)
+        order = OrderRequest(
+            symbol=symbol, side=side, volume=volume, sl=sl, tp=tp, comment=comment, magic=magic
+        )
+        try:
+            result = await self._broker.open_position(order)
+        except OrderRejected as exc:
+            # Unlike the spread/RR veto above, this is the broker/MT5 itself
+            # refusing the order (stops too close, market closed, filling
+            # mode, price moved, ...) — without this log the rejection was
+            # previously invisible: the caller only sees `OrderRejected`
+            # propagate and silently gives up on the candle.
+            logger.info(
+                "ENTRY REJECTED (broker): %s %s %.2f lots sl=%s tp=%s strategy=%s skill=%s — %s",
+                side.value,
+                symbol,
+                volume,
+                sl,
+                tp,
+                strategy_version,
+                skill,
+                exc,
+            )
+            raise
         logger.info(
             "ENTRY OPENED: ticket=%d %s %s %.2f lots @ %.5f sl=%s tp=%s spread=%dpts "
-            "strategy=%s skill=%s reason=%s",
+            "strategy=%s skill=%s magic=%d reason=%s",
             result.ticket,
             side.value,
             symbol,
@@ -111,6 +139,7 @@ class OrderService:
             result.spread_points,
             strategy_version,
             skill,
+            magic,
             comment or "manual",
         )
         await self._event_bus.publish(
@@ -181,6 +210,25 @@ class OrderService:
             )
         )
         return result
+
+    async def close_all_positions(self, symbol: str) -> list[ExecutionResult]:
+        """Closes every currently open position on `symbol`, one broker call
+        per ticket via `close_position` (so each still logs and publishes its
+        own `PositionClosed`). A single ticket's `OrderRejected` (e.g. broker
+        refuses that specific close) is logged and skipped rather than
+        aborting the rest of the batch — the caller sees which tickets
+        actually closed via the returned list's length against the symbol's
+        position count."""
+        positions = await self._broker.get_positions(symbol)
+        results: list[ExecutionResult] = []
+        for position in positions:
+            try:
+                results.append(await self.close_position(position.ticket))
+            except OrderRejected as exc:
+                logger.info(
+                    "close-all skipped ticket=%d %s — %s", position.ticket, symbol, exc
+                )
+        return results
 
     async def modify_position(self, ticket: int, sl: float | None, tp: float | None) -> None:
         await self._broker.modify_position(ticket, sl, tp)

@@ -10,6 +10,10 @@ Run from `backend/`:
 
 Safely re-runnable: a family that already has any recorded version is
 skipped (logged, not overwritten) rather than erroring the whole run.
+
+Also backfills a derived spec snapshot (symbols/timeframes/params from the
+code's own `StrategySpec`) onto any already-recorded version that has none,
+so every bot on the Bots page shows a spec and supports symbol retargeting.
 """
 
 from __future__ import annotations
@@ -32,6 +36,8 @@ _GENERATED_DIR = Path(__file__).resolve().parent.parent / "src" / "strategies" /
 # a hand-written baseline; seeding copies its current contents into a
 # proper version-1 record rather than mutating the original file.
 _BASELINE_STRATEGIES: tuple[tuple[str, str], ...] = (
+    ("breakout_v1", "breakout_v1"),
+    ("breakout_v2", "breakout_v2"),
     ("trend_structure_v1", "trend_structure_v1"),
     ("trend_structure_v2", "trend_structure_v2"),
 )
@@ -48,6 +54,9 @@ def seed(service: StrategyVersionService, repository: StrategyVersionRepository)
         logger.info(
             "seeded and activated %r (version=%d, id=%s)", name, version.version, version.id
         )
+
+    backfilled = service.backfill_missing_specs()
+    logger.info("backfilled spec snapshots on %d pre-existing version(s)", backfilled)
 
 
 def main() -> None:

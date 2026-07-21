@@ -85,26 +85,46 @@ class TradeJournalService:
             "trade journaled (close): id=%s %s profit=%.2f", closed.id, closed.symbol, event.profit
         )
 
-        closed_count = await asyncio.to_thread(self._repository.count_closed, event.symbol)
+        if closed.skill is None:
+            # No bot attributed this trade (manual/API-placed) — nothing to
+            # review, and folding it into a shared per-symbol count would
+            # misattribute it to whichever bot happens to run next.
+            return
+        closed_count = await asyncio.to_thread(
+            self._repository.count_closed, event.symbol, closed.skill
+        )
         if closed_count > 0 and closed_count % self._review_every_n_trades == 0:
             last_n = await asyncio.to_thread(
-                self._repository.get_last_n_closed, event.symbol, self._review_every_n_trades
+                self._repository.get_last_n_closed,
+                event.symbol,
+                self._review_every_n_trades,
+                closed.skill,
             )
             logger.info(
-                "%d trades completed for %s — triggering AI review",
+                "%d trades completed for %s [%s] — triggering AI review",
                 self._review_every_n_trades,
                 event.symbol,
+                closed.skill,
             )
             await self._event_bus.publish(
                 TenTradesCompleted(
-                    symbol=event.symbol, trade_ids=tuple(t.id for t in reversed(last_n))
+                    symbol=event.symbol,
+                    skill=closed.skill,
+                    trade_ids=tuple(t.id for t in reversed(last_n)),
                 )
             )
 
     async def get_markers(
-        self, symbol: str, frm: int | None = None, to: int | None = None
+        self,
+        symbol: str,
+        frm: int | None = None,
+        to: int | None = None,
+        skill: str | None = None,
+        limit: int = 1000,
     ) -> list[TradeRecord]:
-        return await asyncio.to_thread(self._repository.get_markers, symbol, frm, to)
+        return await asyncio.to_thread(
+            self._repository.get_markers, symbol, frm, to, skill, limit
+        )
 
     async def get_last_n(self, symbol: str, count: int) -> list[TradeRecord]:
         return await asyncio.to_thread(self._repository.get_last_n, symbol, count)

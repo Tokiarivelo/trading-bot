@@ -10,6 +10,7 @@ from __future__ import annotations
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Path, Query, Request
+from pydantic import BaseModel
 
 from src.strategies.api.schemas import (
     DuplicateVersionRequest,
@@ -17,6 +18,7 @@ from src.strategies.api.schemas import (
     RenameVersionRequest,
     StrategyVersionDetailOut,
     StrategyVersionOut,
+    UpdateVersionSpecRequest,
 )
 from src.strategies.application.versioning import (
     StrategyNameConflictError,
@@ -226,6 +228,34 @@ async def edit_version_code(
     return StrategyVersionDetailOut.from_domain_with_code(edited, body.code)
 
 
+@router.patch(
+    "/versions/{version_id}/spec",
+    response_model=StrategyVersionOut,
+    summary="Edit a strategy version's spec snapshot",
+    description=(
+        "Overwrites the descriptive spec snapshot shown on the version detail page — "
+        "symbols, timeframes, indicators, entry/exit rules, risk notes, params, price "
+        "levels, chart notes — with the given values. This is annotation only: unlike "
+        "POST .../edit, it never touches the generated Python source or re-runs sandbox "
+        "validation, and it updates this exact version's record in place rather than "
+        "creating a new version — the same way PATCH .../rename does. To change what the "
+        "code actually does, edit the code (POST .../edit) or regenerate it with AI."
+    ),
+    responses=_VERSION_NOT_FOUND,
+)
+async def update_version_spec(
+    request: Request,
+    body: UpdateVersionSpecRequest,
+    version_id: str = Path(description="Version id whose spec snapshot is being edited."),
+) -> StrategyVersionOut:
+    service = _service(request)
+    try:
+        updated = service.update_spec(version_id, body.model_dump())
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return StrategyVersionOut.from_domain(updated)
+
+
 @router.post(
     "/versions/{version_id}/archive",
     response_model=StrategyVersionOut,
@@ -339,9 +369,6 @@ async def resume_version(
     return StrategyVersionOut.from_domain(resumed)
 
 
-from pydantic import BaseModel, Field
-
-
 class CustomSignalOut(BaseModel):
     time: int
     direction: str
@@ -369,22 +396,25 @@ class EvaluateCustomCodeResponse(BaseModel):
     "/evaluate-custom",
     response_model=EvaluateCustomCodeResponse,
     summary="Evaluate custom strategy code against symbol history",
-    description="Loads arbitrary strategy code, compiles it in the sandbox, runs evaluate() over the historical candles, and returns signals/indicators.",
+    description="Loads arbitrary strategy code, compiles it in the sandbox, runs evaluate() "
+    "over the historical candles, and returns signals/indicators.",
 )
 async def evaluate_custom_code(
     request: Request,
     body: EvaluateCustomCodeRequest,
 ) -> EvaluateCustomCodeResponse:
-    from src.strategies.sandbox import validate_and_load
-    from src.shared.db.base import make_session_factory
-    from src.market_data.adapters.candle_repository import CandleRepository
+    import logging
+    from datetime import timedelta
+
+    import pandas as pd
+
     from src.backtest.application.period import parse_period
     from src.engine.application.context import candles_to_dataframe
+    from src.market_data.adapters.candle_repository import CandleRepository
     from src.market_data.domain.models import Timeframe
-    from datetime import timedelta
+    from src.shared.db.base import make_session_factory
     from src.strategies.domain.models import MarketContext
-    from pydantic import BaseModel
-    import logging
+    from src.strategies.sandbox import validate_and_load
 
     logger = logging.getLogger(__name__)
 
@@ -435,7 +465,9 @@ async def evaluate_custom_code(
         if tf_str != body.timeframe:
             try:
                 c_enum = Timeframe(tf_str)
-                candles_by_tf[tf_str] = candle_repo.get_range(body.symbol, c_enum, history_start, end)
+                candles_by_tf[tf_str] = candle_repo.get_range(
+                    body.symbol, c_enum, history_start, end
+                )
             except Exception:
                 pass
 

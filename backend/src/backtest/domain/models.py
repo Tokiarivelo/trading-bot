@@ -44,6 +44,19 @@ class BacktestTrade:
 
 
 @dataclass(frozen=True, kw_only=True)
+class BacktestSignal:
+    """One strategy signal emitted during the replay — including the ones
+    that never became trades. Extracted from the engine's decision-trail log
+    lines (see `application/signals.py`), so the report can show every valid
+    setup the strategy saw and what the engine did with it."""
+
+    time: datetime  # simulated bot clock (the M5 bar's close time)
+    direction: str  # "buy" | "sell"
+    outcome: str  # "opened" | "htf_veto" | "risk_rejected" | "spread_veto" | "skipped"
+    reason: str  # the strategy's own Signal.reason (pattern, zone, entry/sl/tp lines)
+
+
+@dataclass(frozen=True, kw_only=True)
 class EquityPoint:
     time: datetime
     balance: float
@@ -77,6 +90,9 @@ class BacktestReport:
     avg_r: float
     worst_losing_streak: int
     activity_log: tuple[ActivityLogEntry, ...] = ()
+    # Every signal the strategy emitted (taken or vetoed), oldest first —
+    # empty for report files predating this field.
+    signals: tuple[BacktestSignal, ...] = ()
     # The spread-adjusted minimum reward:risk ratio SpreadGate actually
     # enforced for this run — configs/symbols/<symbol>.yaml's value, the
     # run's own min_rr override, or SpreadGate.DEFAULT_MIN_RR if the symbol

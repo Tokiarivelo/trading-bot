@@ -194,7 +194,9 @@ def _make(tmp_path, llm_router, refinement_config: RefinementConfig | None = Non
         journal_repository.save(_trade(trade_id))
 
     skill_selector = SkillSelector(
-        skills={"XAUUSD": NormalSkill(name="normal-xauusd", symbol="XAUUSD", strategy="sample")}
+        skills={
+            "XAUUSD": [NormalSkill(name="normal/xauusd/sample", symbol="XAUUSD", strategy="sample")]
+        }
     )
 
     proposal_repository = RefinementProposalRepository(session_factory)
@@ -211,7 +213,7 @@ def _make(tmp_path, llm_router, refinement_config: RefinementConfig | None = Non
         backtest_period="2026-01:2026-06",
         backtest_database_url=f"sqlite:///{tmp_path}/candles.db",
     )
-    event = TenTradesCompleted(symbol="XAUUSD", trade_ids=trade_ids)
+    event = TenTradesCompleted(symbol="XAUUSD", skill="normal/xauusd/sample", trade_ids=trade_ids)
     return service, strategy_versions, registry, base_version, event, proposal_repository
 
 

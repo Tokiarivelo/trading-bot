@@ -58,3 +58,67 @@ async def test_delete_by_filter_delegates_to_repository():
     assert repository.calls[0][0] == "delete_by_filter"
     assert repository.calls[0][1]["level"] == "WARNING"
     assert repository.calls[0][1]["q"] == "veto"
+
+
+class FakeLoggerFilteringRepository:
+    """Unlike `FakeRepository` above, filters by `logger_contains` like the
+    real repository does — needed to test `get_bot_signals`, which queries
+    the trade_loop and order_service loggers separately and merges."""
+
+    def __init__(self, entries: list[LogEntry]) -> None:
+        self.entries = entries
+        self.calls = []
+
+    def search(self, *, logger_contains=None, **kwargs):
+        self.calls.append(("search", logger_contains, kwargs))
+        rows = [e for e in self.entries if logger_contains in e.logger]
+        return rows, len(rows)
+
+
+def _log(seconds: int, logger: str, message: str) -> LogEntry:
+    return LogEntry(
+        id=seconds,
+        created_at=datetime(2026, 7, 17, 12, 0, seconds, tzinfo=UTC),
+        level="INFO",
+        logger=logger,
+        message=message,
+    )
+
+
+async def test_get_bot_signals_merges_both_loggers_in_time_order():
+    skill = "normal/xauusd/breakout_v1"
+    entries = [
+        _log(
+            0,
+            "src.engine.application.trade_loop",
+            f"SIGNAL: XAUUSD buy via strategy=breakout_v1 skill={skill} — retest",
+        ),
+        _log(
+            1,
+            "src.broker.application.order_service",
+            f"ENTRY OPENED: ticket=1 buy XAUUSD 0.01 lots @ 4000.00 sl=None tp=None spread=1pts "
+            f"strategy=breakout_v1:v1 skill={skill} magic=1 reason=retest",
+        ),
+    ]
+    repository = FakeLoggerFilteringRepository(entries)
+    service = ActivityLogService(repository)
+
+    signals = await service.get_bot_signals(skill=skill)
+
+    assert len(signals) == 1
+    assert signals[0].outcome == "opened"
+    queried_loggers = {call[1] for call in repository.calls}
+    assert queried_loggers == {
+        "src.engine.application.trade_loop",
+        "src.broker.application.order_service",
+    }
+
+
+async def test_get_bot_signals_defaults_a_bounded_time_window():
+    repository = FakeLoggerFilteringRepository([])
+    service = ActivityLogService(repository)
+
+    await service.get_bot_signals(skill="normal/xauusd/breakout_v1")
+
+    for _, _, kwargs in repository.calls:
+        assert kwargs["created_from"] is not None

@@ -137,7 +137,14 @@ class ExtractedStrategySpec:
     @staticmethod
     def from_dict(data: dict[str, Any]) -> ExtractedStrategySpec:
         indicators: list[IndicatorSpec] = []
-        unrecognized: list[str] = list(data.get("unrecognized_indicators", []))
+        # Callers (e.g. a raw JSON upload) may pass {"name": ..., "description":
+        # ...} objects here instead of plain strings — collapse to the name so a
+        # malformed upload can't get a non-string wedged into stored spec JSON,
+        # where it would fail StrategySpecSnapshotOut validation on every read.
+        unrecognized: list[str] = [
+            str(entry["name"]) if isinstance(entry, dict) and "name" in entry else str(entry)
+            for entry in data.get("unrecognized_indicators", [])
+        ]
         for entry in data.get("indicators", []):
             if isinstance(entry, dict):
                 indicators.append(IndicatorSpec.from_dict(entry))

@@ -118,14 +118,27 @@ export function bollinger(candles: Candle[], period: number, stdDev: number): Bo
   const middle: LinePoint[] = [];
   const lower: LinePoint[] = [];
 
-  for (let i = period - 1; i < candles.length; i++) {
-    const window = candles.slice(i - period + 1, i + 1);
-    const mean = window.reduce((sum, c) => sum + c.close, 0) / period;
-    const variance = window.reduce((sum, c) => sum + (c.close - mean) ** 2, 0) / period;
-    const sd = Math.sqrt(variance);
-    middle.push(toPoint(candles[i], mean));
-    upper.push(toPoint(candles[i], mean + stdDev * sd));
-    lower.push(toPoint(candles[i], mean - stdDev * sd));
+  // Rolling sum/sum-of-squares instead of re-slicing + reducing the last
+  // `period` candles at every bar — O(n) instead of O(n * period).
+  let sum = 0;
+  let sumSq = 0;
+  for (let i = 0; i < candles.length; i++) {
+    const close = candles[i].close;
+    sum += close;
+    sumSq += close * close;
+    if (i >= period) {
+      const dropped = candles[i - period].close;
+      sum -= dropped;
+      sumSq -= dropped * dropped;
+    }
+    if (i >= period - 1) {
+      const mean = sum / period;
+      const variance = Math.max(0, sumSq / period - mean * mean);
+      const sd = Math.sqrt(variance);
+      middle.push(toPoint(candles[i], mean));
+      upper.push(toPoint(candles[i], mean + stdDev * sd));
+      lower.push(toPoint(candles[i], mean - stdDev * sd));
+    }
   }
   return { upper, middle, lower };
 }

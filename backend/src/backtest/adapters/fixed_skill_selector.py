@@ -16,10 +16,12 @@ class FixedSkillSelector:
     def __init__(self, strategy_name: str) -> None:
         self._strategy_name = strategy_name
 
-    def select(self, symbol: str, now: datetime) -> SkillDecision:
-        return SkillDecision(
-            allowed=True,
-            skill_name="backtest",
-            strategy_name=self._strategy_name,
-            risk_multiplier=1.0,
-        )
+    def select_all(self, symbol: str, now: datetime) -> list[SkillDecision]:
+        return [
+            SkillDecision(
+                allowed=True,
+                skill_name="backtest",
+                strategy_name=self._strategy_name,
+                risk_multiplier=1.0,
+            )
+        ]

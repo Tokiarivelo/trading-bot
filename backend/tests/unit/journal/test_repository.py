@@ -85,6 +85,16 @@ def test_get_markers_filters_by_time_range(repository):
     assert [r.id for r in markers] == ["1", "2"]
 
 
+def test_get_markers_filters_by_skill(repository):
+    repository.save(make_record("1", skill="normal/xauusd/breakout_v1"))
+    repository.save(make_record("2", skill="normal/xauusd/mean_reversion"))
+    repository.save(make_record("3", skill=None))
+
+    markers = repository.get_markers("XAUUSD", skill="normal/xauusd/breakout_v1")
+
+    assert [r.id for r in markers] == ["1"]
+
+
 def test_count_closed_only_counts_closed_trades(repository):
     repository.save(make_record("1"))
     repository.save(

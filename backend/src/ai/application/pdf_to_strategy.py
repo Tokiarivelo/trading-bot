@@ -136,6 +136,32 @@ class PdfToStrategyService:
         )
         return draft
 
+    async def create_draft_from_spec(
+        self,
+        spec: ExtractedStrategySpec,
+        filename: str = "(uploaded JSON)",
+        symbol: str | None = None,
+    ) -> StrategyDraft:
+        """Same draft pipeline as `create_draft_from_pdf`/`create_draft_from_text`,
+        but the caller already has a structured `ExtractedStrategySpec` (e.g. a
+        JSON upload) — no LLM call needed, `spec` becomes `extracted_spec` as-is."""
+        edited_spec = replace(spec, symbols=(symbol,)) if symbol else None
+        draft = StrategyDraft(
+            id=str(uuid.uuid4()),
+            source_filename=filename,
+            created_at=datetime.now(UTC),
+            extracted_spec=spec,
+            edited_spec=edited_spec,
+        )
+        await asyncio.to_thread(self._drafts.save, draft)
+        logger.info(
+            "strategy draft created from JSON upload: id=%s filename=%s symbol=%s",
+            draft.id,
+            filename,
+            symbol or spec.symbols,
+        )
+        return draft
+
     async def get_draft(self, draft_id: str) -> StrategyDraft | None:
         return await asyncio.to_thread(self._drafts.get, draft_id)
 

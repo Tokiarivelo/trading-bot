@@ -27,8 +27,13 @@ from src.strategies.domain.models import (
 PIVOT_WING = 3  # bars required on each side of a candidate to confirm a swing
 MIN_HISTORY = 30  # enough bars for at least 3 alternating swing pivots to form
 # Must clear every symbol's configs/symbols/<sym>.yaml min_rr (highest: XAGUSD
-# at 1.8) with headroom — see breakout_v1.py for the same constraint.
+# at 1.8) — enforced explicitly below via POINT_VALUES + ctx.spread_points
+# (tp_points = (sl_points + spread) * TP_RR), the same formula SpreadGate
+# applies at the broker gate.
 TP_RR = 2.2
+# Point size per traded symbol (configs/symbols/*.yaml) — converts
+# ctx.spread_points (raw broker points) into a price distance.
+POINT_VALUES = {"XAUUSD": 0.01, "XAGUSD": 0.001, "BTCUSD": 0.01}
 
 
 def _swing_flags(highs: np.ndarray, lows: np.ndarray, wing: int) -> tuple[np.ndarray, np.ndarray]:
@@ -122,7 +127,8 @@ class TrendStructureV1:
         sl_points = abs(entry_price - sl_reference)
         if sl_points <= 0:
             return None
-        tp_points = sl_points * tp_rr
+        spread_price = float(ctx.spread_points) * POINT_VALUES.get(ctx.symbol, 0.01)
+        tp_points = (sl_points + spread_price) * tp_rr
 
         structure: tuple[StructurePoint, ...] = ()
         if "time" in m5.columns:

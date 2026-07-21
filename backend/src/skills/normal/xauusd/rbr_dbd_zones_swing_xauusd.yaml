@@ -1,0 +1,5 @@
+name: normal/xauusd/rbr_dbd_zones_swing_xauusd
+symbol: XAUUSD
+strategy: rbr_dbd_zones_swing_xauusd
+risk_multiplier: 1.0
+sessions: []

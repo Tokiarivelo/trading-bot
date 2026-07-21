@@ -62,3 +62,25 @@ class LogDeleteResult(BaseModel):
     """Result of a bulk or single activity-log delete."""
 
     deleted: int = Field(description="Number of log entries removed.")
+
+
+class BotSignalOut(BaseModel):
+    """One strategy signal a live bot emitted — including signals that never
+    became a trade (vetoed or rejected). Reconstructed from that bot's own
+    decision-trail log lines, so the chart can show every setup the strategy
+    saw for this bot, not only its fills."""
+
+    time: int = Field(
+        description="Epoch seconds UTC — when the strategy emitted this signal."
+    )
+    direction: str = Field(description="'buy' or 'sell'.")
+    outcome: str = Field(
+        description="What the engine did with it: 'opened' (became a trade), 'htf_veto' "
+        "(higher-timeframe trend opposed it), 'risk_rejected' (position sizing failed the "
+        "risk caps), 'spread_veto' (spread/RR gate), 'broker_rejected' (the broker/MT5 itself "
+        "refused the order), or 'skipped' (no outcome line followed within the queried window)."
+    )
+    reason: str = Field(
+        description="The strategy's own reason string — pattern matched, zone rectangle, "
+        "entry/SL/TP lines, confirmations."
+    )

@@ -157,17 +157,22 @@ async def test_run_backtest_records_configured_min_rr_without_override(database_
 
 async def test_run_backtest_records_configured_risk_caps(database_url):
     """The full RiskCaps actually enforced for the run is recorded on the
-    report, not just min_rr — configs/risk.yaml's real values here."""
+    report, not just min_rr. Compared against configs/risk.yaml as loaded,
+    not hardcoded values — that file is user-owned and retuned at will."""
+    from src.shared.config.loaders import load_risk_caps
+    from src.shared.config.settings import CONFIGS_DIR
+
+    caps = load_risk_caps(CONFIGS_DIR)
     report = await run_backtest(
         "breakout_v1", "XAUUSD", "2025-01:2025-01", database_url=database_url
     )
-    assert report.risk_per_trade_pct == 0.5
-    assert report.daily_loss_limit_pct == 2.0
-    assert report.max_open_positions == 100
-    assert report.max_trades_per_day == 8
-    assert report.consecutive_loss_pause == 10
-    assert report.min_lot_fallback_enabled is True
-    assert report.max_risk_per_trade_pct == 2.0
+    assert report.risk_per_trade_pct == caps.risk_per_trade_pct
+    assert report.daily_loss_limit_pct == caps.daily_loss_limit_pct
+    assert report.max_open_positions == caps.max_open_positions
+    assert report.max_trades_per_day == caps.max_trades_per_day
+    assert report.consecutive_loss_pause == caps.consecutive_loss_pause
+    assert report.min_lot_fallback_enabled is caps.min_lot_fallback_enabled
+    assert report.max_risk_per_trade_pct == caps.max_risk_per_trade_pct
 
 
 async def test_run_backtest_records_risk_override(database_url):

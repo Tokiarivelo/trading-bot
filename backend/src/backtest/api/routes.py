@@ -27,6 +27,7 @@ from src.backtest.api.schemas import (
     BacktestReportDetailOut,
     BacktestReportListOut,
     BacktestReportSummaryOut,
+    ImportBacktestReportIn,
 )
 from src.backtest.application.period import parse_period
 from src.backtest.application.run_backtest import (
@@ -574,6 +575,7 @@ async def get_report(
         trades=[_trade_out(t) for t in data["trades"]],
         equity_curve=_equity_curve_out(data["equity_curve"]),
         activity_log=[_activity_log_entry_out(e) for e in data.get("activity_log", [])],
+        signals=[_signal_out(s) for s in data.get("signals", [])],
     )
 
 
@@ -596,6 +598,104 @@ async def delete_report(
     if not path.is_file():
         raise HTTPException(status_code=404, detail="report not found")
     path.unlink()
+
+
+@router.post(
+    "/reports/import",
+    response_model=BacktestReportSummaryOut,
+    status_code=201,
+    summary="Import a backtest report from JSON",
+    description=(
+        "Saves a new report file from a JSON body shaped exactly like "
+        "`GET /backtest/reports/{id}`'s response — the trader can always get a valid "
+        "example by downloading an existing report and re-uploading that same file. A "
+        "fresh id is assigned (any `id` in the body is ignored) so this never overwrites "
+        "an existing report, even for the same strategy/symbol/period."
+    ),
+)
+async def import_report(body: ImportBacktestReportIn) -> BacktestReportSummaryOut:
+    data: dict[str, Any] = {
+        "strategy": body.strategy,
+        "symbol": body.symbol,
+        "period": body.period,
+        "starting_balance": body.starting_balance,
+        "ending_balance": body.ending_balance,
+        "win_rate": body.win_rate,
+        "profit_factor": body.profit_factor,
+        "max_drawdown_pct": body.max_drawdown_pct,
+        "avg_r": body.avg_r,
+        "worst_losing_streak": body.worst_losing_streak,
+        "min_rr": body.min_rr,
+        "risk_per_trade_pct": body.risk_per_trade_pct,
+        "daily_loss_limit_pct": body.daily_loss_limit_pct,
+        "max_open_positions": body.max_open_positions,
+        "max_trades_per_day": body.max_trades_per_day,
+        "consecutive_loss_pause": body.consecutive_loss_pause,
+        "min_lot_fallback_enabled": body.min_lot_fallback_enabled,
+        "max_risk_per_trade_pct": body.max_risk_per_trade_pct,
+        "trades": [_trade_in(t) for t in body.trades],
+        "equity_curve": [
+            {"time": _iso(p.time), "balance": p.balance} for p in body.equity_curve
+        ],
+        "activity_log": [
+            {
+                "time": _iso(e.time),
+                "level": e.level,
+                "logger": e.logger,
+                "message": e.message,
+            }
+            for e in body.activity_log
+        ],
+        "signals": [
+            {
+                "time": _iso(s.time),
+                "direction": s.direction,
+                "outcome": s.outcome,
+                "reason": s.reason,
+            }
+            for s in body.signals
+        ],
+    }
+    filename = (
+        f"{body.strategy}_{body.symbol}_{body.period.replace(':', '_')}"
+        f"_import-{uuid.uuid4().hex[:8]}"
+    )
+    path = REPORTS_DIR / f"{filename}.json"
+    REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, indent=2))
+    return _summary(data, filename)
+
+
+def _iso(epoch: int) -> str:
+    return datetime.fromtimestamp(epoch, tz=UTC).isoformat()
+
+
+def _trade_in(trade: Any) -> dict[str, Any]:
+    return {
+        "side": trade.side,
+        "volume": trade.volume,
+        "open_time": _iso(trade.open_time),
+        "open_price": trade.open_price,
+        "sl": trade.sl,
+        "tp": trade.tp,
+        "close_time": _iso(trade.close_time),
+        "close_price": trade.close_price,
+        "profit": trade.profit,
+        "r_multiple": trade.r_multiple,
+        "zone": (
+            {
+                "kind": trade.zone.kind,
+                "price_low": trade.zone.price_low,
+                "price_high": trade.zone.price_high,
+                "time_start": _iso(trade.zone.time_start),
+                "time_end": _iso(trade.zone.time_end),
+            }
+            if trade.zone is not None
+            else None
+        ),
+        "pattern": trade.pattern,
+        "structure": [[s.label, s.price, _iso(s.time)] for s in trade.structure],
+    }
 
 
 def _load(path: Any) -> dict[str, Any]:
@@ -657,6 +757,10 @@ def _epoch(iso: str) -> int:
 
 def _activity_log_entry_out(entry: dict[str, Any]) -> dict[str, Any]:
     return {**entry, "time": _epoch(entry["time"])}
+
+
+def _signal_out(signal: dict[str, Any]) -> dict[str, Any]:
+    return {**signal, "time": _epoch(signal["time"])}
 
 
 def _equity_curve_out(points: list[dict[str, Any]]) -> list[dict[str, Any]]:

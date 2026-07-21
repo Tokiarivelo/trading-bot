@@ -10,6 +10,7 @@ import {
   type BacktestReportSummary,
 } from "@/shared/api/client";
 import { downloadJson } from "@/shared/utils/download";
+import { BacktestReportUploadForm } from "./BacktestReportUploadForm";
 import { RunBacktestPanel } from "./RunBacktestPanel";
 
 const PAGE_SIZE = 10;
@@ -25,6 +26,8 @@ export function BacktestReportList() {
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const [downloadingId, setDownloadingId] = useState<string | null>(null);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [bulkDeleting, setBulkDeleting] = useState(false);
 
   async function handleDownload(id: string, strategy: string, symbol: string) {
     setDownloadingId(id);
@@ -68,6 +71,12 @@ export function BacktestReportList() {
     setDeleteError(null);
     try {
       await deleteBacktestReport(id);
+      setSelectedIds((prev) => {
+        if (!prev.has(id)) return prev;
+        const next = new Set(prev);
+        next.delete(id);
+        return next;
+      });
       if (reports?.length === 1 && page > 0) setPage(page - 1);
       else fetchReports(page);
     } catch (e) {
@@ -77,10 +86,98 @@ export function BacktestReportList() {
     }
   }
 
+  function toggleSelect(id: string) {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+
+  const allOnPageSelected = reports !== null && reports.length > 0 && reports.every((r) => selectedIds.has(r.id));
+
+  function toggleSelectAllOnPage() {
+    if (!reports) return;
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (allOnPageSelected) {
+        for (const r of reports) next.delete(r.id);
+      } else {
+        for (const r of reports) next.add(r.id);
+      }
+      return next;
+    });
+  }
+
+  async function deleteIdsAndRefresh(ids: string[]) {
+    setBulkDeleting(true);
+    setDeleteError(null);
+    try {
+      const results = await Promise.allSettled(ids.map((id) => deleteBacktestReport(id)));
+      const failed = results.filter((r) => r.status === "rejected").length;
+      setSelectedIds(new Set());
+      setPage(0);
+      fetchReports(0);
+      if (failed > 0) {
+        setDeleteError(`failed to delete ${failed} of ${ids.length} report(s)`);
+      }
+    } finally {
+      setBulkDeleting(false);
+    }
+  }
+
+  async function handleBulkDeleteSelected() {
+    const ids = Array.from(selectedIds);
+    if (ids.length === 0) return;
+    if (!window.confirm(`Permanently delete ${ids.length} selected report(s)? This cannot be undone.`)) return;
+    await deleteIdsAndRefresh(ids);
+  }
+
+  async function handleDeleteAll() {
+    if (total === 0) return;
+    if (
+      !window.confirm(
+        `Permanently delete ALL ${total} saved backtest report(s)? This cannot be undone.`,
+      )
+    )
+      return;
+    setBulkDeleting(true);
+    setDeleteError(null);
+    try {
+      const ids: string[] = [];
+      let offset = 0;
+      const limit = 200;
+      // The list endpoint caps `limit` at 200, so a large report set needs
+      // multiple pages to collect every id before deleting.
+      while (offset < total) {
+        const res = await getBacktestReports(limit, offset);
+        ids.push(...res.items.map((r) => r.id));
+        offset += limit;
+        if (res.items.length === 0) break;
+      }
+      const results = await Promise.allSettled(ids.map((id) => deleteBacktestReport(id)));
+      const failed = results.filter((r) => r.status === "rejected").length;
+      setSelectedIds(new Set());
+      setPage(0);
+      fetchReports(0);
+      if (failed > 0) {
+        setDeleteError(`failed to delete ${failed} of ${ids.length} report(s)`);
+      }
+    } catch (e) {
+      setDeleteError(e instanceof ApiError ? e.message : "failed to delete all reports");
+    } finally {
+      setBulkDeleting(false);
+    }
+  }
+
   return (
     <div>
       {/* ── Run Backtest Launcher ─────────────────────────────────────────── */}
       <RunBacktestPanel onDone={handleJobDone} />
+
+      {/* ── Import Report JSON ────────────────────────────────────────────── */}
+      <BacktestReportUploadForm onImported={() => { setPage(0); fetchReports(0); }} />
 
       {/* ── Saved Report List ─────────────────────────────────────────────── */}
       <div className="report-list-section">
@@ -91,6 +188,40 @@ export function BacktestReportList() {
             </svg>
           </div>
           <h3 className="report-list-title">Saved Reports</h3>
+          {selectedIds.size > 0 && (
+            <>
+              <span className="report-list-selection-count">{selectedIds.size} selected</span>
+              <button
+                type="button"
+                className="report-list-delete-selected-btn"
+                disabled={bulkDeleting || deletingId !== null}
+                onClick={handleBulkDeleteSelected}
+                title="Delete selected reports"
+              >
+                {bulkDeleting ? "…" : "Delete selected"}
+              </button>
+              <button
+                type="button"
+                className="report-list-clear-selection-btn"
+                disabled={bulkDeleting}
+                onClick={() => setSelectedIds(new Set())}
+                title="Clear selection"
+              >
+                Clear
+              </button>
+            </>
+          )}
+          {total > 0 && (
+            <button
+              type="button"
+              className="report-list-delete-all-btn"
+              disabled={bulkDeleting || deletingId !== null}
+              onClick={handleDeleteAll}
+              title="Delete every saved report"
+            >
+              {bulkDeleting ? "…" : "Delete all"}
+            </button>
+          )}
           <button
             className="report-list-refresh"
             onClick={() => fetchReports(page)}
@@ -122,6 +253,15 @@ export function BacktestReportList() {
             <table className="w-full min-w-[720px] border-collapse text-sm">
               <thead>
                 <tr className="border-b border-line text-left text-xs text-ink-muted">
+                  <th className="py-2 pr-2 font-medium w-8">
+                    <input
+                      type="checkbox"
+                      checked={allOnPageSelected}
+                      onChange={toggleSelectAllOnPage}
+                      title="Select all on this page"
+                      aria-label="Select all reports on this page"
+                    />
+                  </th>
                   <Th>Strategy</Th>
                   <Th>Symbol</Th>
                   <Th>Period</Th>
@@ -143,6 +283,14 @@ export function BacktestReportList() {
                     key={r.id}
                     className="border-b border-line last:border-0 hover:bg-panel/60"
                   >
+                    <td className="py-2 pr-2">
+                      <input
+                        type="checkbox"
+                        checked={selectedIds.has(r.id)}
+                        onChange={() => toggleSelect(r.id)}
+                        aria-label={`Select report ${r.strategy} / ${r.symbol} / ${r.period}`}
+                      />
+                    </td>
                     <Td>
                       <Link
                         href={`/backtest/${encodeURIComponent(r.id)}`}
@@ -252,6 +400,48 @@ export function BacktestReportList() {
           font-weight: 700;
           color: var(--ink, #f1f5f9);
           flex: 1;
+        }
+        .report-list-selection-count {
+          font-size: 12px;
+          color: var(--ink-muted, #94a3b8);
+        }
+        .report-list-delete-selected-btn,
+        .report-list-delete-all-btn {
+          padding: 4px 10px;
+          background: rgba(248,113,113,.1);
+          border: 1px solid rgba(248,113,113,.3);
+          border-radius: 6px;
+          color: #f87171;
+          font-size: 12px;
+          cursor: pointer;
+          transition: all .15s;
+        }
+        .report-list-delete-selected-btn:hover:not(:disabled),
+        .report-list-delete-all-btn:hover:not(:disabled) {
+          background: rgba(248,113,113,.2);
+          border-color: rgba(248,113,113,.5);
+        }
+        .report-list-delete-selected-btn:disabled,
+        .report-list-delete-all-btn:disabled {
+          opacity: .4;
+          cursor: not-allowed;
+        }
+        .report-list-clear-selection-btn {
+          padding: 4px 10px;
+          background: rgba(255,255,255,.05);
+          border: 1px solid rgba(255,255,255,.1);
+          border-radius: 6px;
+          color: var(--ink-muted, #94a3b8);
+          font-size: 12px;
+          cursor: pointer;
+          transition: all .15s;
+        }
+        .report-list-clear-selection-btn:hover:not(:disabled) {
+          background: rgba(255,255,255,.1);
+        }
+        .report-list-clear-selection-btn:disabled {
+          opacity: .4;
+          cursor: not-allowed;
         }
         .report-list-refresh {
           width: 28px; height: 28px;

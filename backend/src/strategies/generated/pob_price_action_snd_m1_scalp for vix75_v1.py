@@ -12,6 +12,12 @@ from src.strategies.domain.models import (
     ZoneKind,
 )
 
+# Volatility 75 Index point size (configs/symbols/volatility 75 index.yaml) —
+# converts ctx.spread_points (raw broker points) into a price distance so
+# reward_risk_ratio below is applied to (sl + spread), not sl alone — the
+# same floor SpreadGate enforces at the broker gate (tp >= min_rr * (sl + spread)).
+POINT_VALUE = 0.01
+
 # Perf note: helpers below operate on numpy arrays extracted once per
 # evaluate() (`df[col].to_numpy()`) instead of per-element `.iloc` reads —
 # the math, comparisons, and results are identical, but a backtest calls
@@ -311,15 +317,13 @@ class PobPriceActionSndM1Scalp:
       M5's literal bar count (which would span multiple days on M1 and defeat
       the point of scalping recent structure).
 
-    NOTE — live trading caveat: the engine's live TradeEngine (see
-    src/container.py) is wired to a single global entry_timeframe/
-    confirmation_timeframes from configs/app.yaml's `engine:` block (M5 by
-    default), shared by every active strategy — it does NOT read this
-    class's own spec.entry_timeframe. Activating this strategy live today
-    would never see M1 candles and would silently never signal. Backtesting
-    (which builds a TradeEngine per run from *this* spec) works correctly.
-    Making live per-strategy entry timeframes work is a separate engine
-    change, not something a generated strategy file can fix.
+    NOTE — live trading: since 2026-07-19 the live TradeEngine evaluates
+    each bot on its own spec.entry_timeframe's candle closes and fetches
+    that strategy's confirmation timeframes into the context (see
+    trade_loop.py), so M1-entry strategies like this one fire live exactly
+    as they do in backtests. configs/app.yaml's `engine:` block only sets
+    the position-management cadence and the engine-level HTF-veto
+    timeframes.
     """
 
     def __init__(self) -> None:
@@ -450,7 +454,8 @@ class PobPriceActionSndM1Scalp:
             structural_dist = structural_level - entry_price
 
         sl_points = max(structural_dist, atr_val * params["sl_atr_mult"])
-        tp_points = sl_points * params["reward_risk_ratio"]
+        spread_price = float(ctx.spread_points) * POINT_VALUE
+        tp_points = (sl_points + spread_price) * params["reward_risk_ratio"]
 
         if direction == Direction.BUY:
             sl_price = entry_price - sl_points

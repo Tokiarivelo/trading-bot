@@ -195,6 +195,29 @@ async def test_create_draft_from_pdf_extracts_structured_indicators_and_levels(s
     assert spec.chart_notes == ("Fibonacci retracement on the swing points",)
 
 
+async def test_create_draft_from_spec_skips_llm_and_uses_spec_as_is(service):
+    spec = ExtractedStrategySpec.from_dict(json.loads(EXTRACTED_SPEC_JSON))
+
+    draft = await service.create_draft_from_spec(spec, filename="my_upload.json")
+
+    assert draft.status == DraftStatus.PENDING_REVIEW
+    assert draft.source_filename == "my_upload.json"
+    assert draft.extracted_spec == spec
+    assert draft.edited_spec is None
+    assert draft.effective_spec == spec
+
+
+async def test_create_draft_from_spec_with_symbol_overrides_spec(service):
+    spec = ExtractedStrategySpec.from_dict(json.loads(EXTRACTED_SPEC_JSON))
+
+    draft = await service.create_draft_from_spec(spec, symbol="EURUSD")
+
+    assert draft.extracted_spec.symbols == ("XAUUSD",)  # untouched, for audit
+    assert draft.edited_spec is not None
+    assert draft.edited_spec.symbols == ("EURUSD",)
+    assert draft.effective_spec.symbols == ("EURUSD",)
+
+
 async def test_update_draft_spec_keeps_original_and_resets_review(service):
     draft = await service.create_draft_from_pdf("method.pdf", _fake_pdf_bytes())
     edited = ExtractedStrategySpec.from_dict({**draft.extracted_spec.to_dict(), "name": "renamed"})

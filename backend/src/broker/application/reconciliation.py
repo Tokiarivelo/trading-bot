@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import logging
 
+from src.broker.domain.account import BrokerUnavailable
 from src.broker.domain.trading import Side
 from src.broker.ports.trading import BrokerPort
 from src.journal.application.trade_journal import TradeJournalService
@@ -40,14 +41,33 @@ class ReconciliationService:
         open_trades = await self._journal.get_open_trades()
         if not open_trades:
             return
-        open_tickets = {p.ticket for p in await self._broker.get_positions()}
+        try:
+            open_tickets = {p.ticket for p in await self._broker.get_positions()}
+        except BrokerUnavailable as exc:
+            logger.warning("reconciliation skipped: broker unavailable: %s", exc)
+            return
         stale = [t for t in open_trades if int(t.id) not in open_tickets]
         for trade in stale:
-            await self._close_from_history(trade.symbol, trade.id)
+            try:
+                await self._close_from_history(trade.symbol, trade.id)
+            except BrokerUnavailable as exc:
+                logger.warning(
+                    "reconciliation: could not get close history for ticket=%s: %s",
+                    trade.id,
+                    exc,
+                )
 
     async def reconcile_vanished(self, symbol: str, vanished_tickets: set[int]) -> None:
         for ticket in vanished_tickets:
-            await self._close_from_history(symbol, str(ticket))
+            try:
+                await self._close_from_history(symbol, str(ticket))
+            except BrokerUnavailable as exc:
+                logger.warning(
+                    "reconciliation: could not reconcile vanished ticket=%d symbol=%s: %s",
+                    ticket,
+                    symbol,
+                    exc,
+                )
 
     async def reconcile_pending_fill(
         self, symbol: str, ticket: int, side: Side, volume: float
@@ -61,7 +81,15 @@ class ReconciliationService:
         `OrderService.open_position` had been called directly. Returns
         whether a match was found — `False` just means we cancelled it
         ourselves (nothing to reconcile), not an error."""
-        positions = await self._broker.get_positions(symbol)
+        try:
+            positions = await self._broker.get_positions(symbol)
+        except BrokerUnavailable as exc:
+            logger.warning(
+                "reconciliation: could not check pending fill for ticket=%d: %s",
+                ticket,
+                exc,
+            )
+            return False
         match = next((p for p in positions if p.ticket == ticket), None)
         if match is None:
             match = next((p for p in positions if p.side is side and p.volume == volume), None)

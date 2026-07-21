@@ -1,0 +1,5 @@
+name: normal/btcusd/rbr_dbd_zones_scalp_btcusd
+symbol: BTCUSD
+strategy: rbr_dbd_zones_scalp_btcusd
+risk_multiplier: 1.0
+sessions: []

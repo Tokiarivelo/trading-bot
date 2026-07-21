@@ -179,6 +179,19 @@ class CreateDraftFromPromptIn(BaseModel):
     )
 
 
+class CreateDraftFromSpecIn(BaseModel):
+    spec: ExtractedStrategySpecSchema = Field(
+        description="A trading method already structured as JSON, e.g. downloaded from "
+        "another draft's effective_spec and hand-edited, or authored directly against this "
+        "shape. Skips the LLM extraction step entirely — this becomes extracted_spec as-is."
+    )
+    symbol: str | None = Field(
+        default=None,
+        description="Broker symbol to scope this draft to, e.g. the symbol currently on the "
+        "chart. Overrides spec.symbols in edited_spec, same as the PDF upload's `symbol` field.",
+    )
+
+
 class GeneratedCodeOut(BaseModel):
     draft_id: str = Field(description="The draft this code was generated from.")
     code: str = Field(description="The generated Python source, whether or not it validated.")

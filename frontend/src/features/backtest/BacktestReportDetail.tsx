@@ -7,6 +7,7 @@ import { getBacktestReport, type BacktestReportDetail as ReportDetail } from "@/
 import { downloadJson } from "@/shared/utils/download";
 import { BacktestStrategyEditor } from "./BacktestStrategyEditor";
 import { EquityChart } from "./EquityChart";
+import { SIGNAL_OUTCOME_META } from "./signalOutcome";
 import { StatTile } from "./StatTile";
 
 export function BacktestReportDetail({ reportId }: { reportId: string }) {
@@ -121,6 +122,48 @@ export function BacktestReportDetail({ reportId }: { reportId: string }) {
             ))}
           </tbody>
         </table>
+      </section>
+
+      <section className="overflow-x-auto rounded-md border border-line bg-panel">
+        <header className="border-b border-line px-3 py-2 text-sm text-ink-muted">
+          Signals — every valid setup the strategy emitted during the replay, including the ones
+          the engine vetoed or rejected before they became trades.
+        </header>
+        {(report.signals ?? []).length === 0 ? (
+          <p className="px-3 py-2 text-sm text-ink-muted">
+            No signals recorded for this report (older reports predate this feature — re-run the
+            backtest to get them).
+          </p>
+        ) : (
+          <table className="w-full min-w-[640px] border-collapse text-sm">
+            <thead>
+              <tr className="border-b border-line text-left text-xs text-ink-muted">
+                <th className="px-3 py-2 font-medium">Time</th>
+                <th className="px-3 py-2 font-medium">Direction</th>
+                <th className="px-3 py-2 font-medium">Outcome</th>
+                <th className="px-3 py-2 font-medium">Details</th>
+              </tr>
+            </thead>
+            <tbody>
+              {report.signals.map((s, i) => (
+                <tr key={i} className="border-b border-line last:border-0">
+                  <td className="px-3 py-2 whitespace-nowrap text-ink-muted">
+                    {formatTime(s.time)}
+                  </td>
+                  <td className={`px-3 py-2 ${s.direction === "buy" ? "text-ok" : "text-err"}`}>
+                    {s.direction.toUpperCase()}
+                  </td>
+                  <td className={`px-3 py-2 whitespace-nowrap ${SIGNAL_OUTCOME_META[s.outcome].className}`}>
+                    {SIGNAL_OUTCOME_META[s.outcome].label}
+                  </td>
+                  <td className="max-w-[480px] truncate px-3 py-2 text-ink-muted" title={s.reason}>
+                    {s.reason}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
       </section>
 
       <section className="rounded-md border border-line bg-panel">

@@ -38,6 +38,27 @@ _UNSET = object()
 _SYMBOLS_LITERAL_RE = re.compile(r"symbols\s*=\s*\([^)]*\)")
 
 
+def _derive_spec_snapshot(instance: Strategy) -> dict[str, object]:
+    """Minimal spec snapshot built from a validated instance's own
+    `StrategySpec`, for versions saved without an extracted spec (manual
+    uploads/edits, baseline seeds). Gives the Bots UI real symbols/
+    timeframes/params to display and retarget instead of no snapshot at
+    all — entry/exit rules aren't recoverable from code, so they point at
+    the source."""
+    spec = instance.spec
+    return {
+        "name": spec.name,
+        "symbols": list(spec.symbols),
+        "entry_timeframe": spec.entry_timeframe,
+        "confirmation_timeframes": list(spec.confirmation_timeframes),
+        "indicators": [],
+        "entry_rules": "Not extracted from a spec — defined in the strategy source.",
+        "exit_rules": "Not extracted from a spec — defined in the strategy source.",
+        "risk_notes": "Derived from code. Enforced caps live in configs/risk.yaml.",
+        "params": dict(spec.params),
+    }
+
+
 def _rewrite_symbols(code: str, symbols: tuple[str, ...]) -> tuple[str, bool]:
     """Best-effort rewrite of the `symbols=(...)` literal in generated code.
     Returns (new_code, replaced) — `replaced` is False if no such literal was
@@ -103,11 +124,16 @@ class StrategyVersionService:
         draft_id: str | None = None,
     ) -> StrategyVersion:
         """Validate `code` in the sandbox and, if it passes, write it to
-        `generated/` and record a new version. Raises `StrategyValidationError`
-        if the sandbox rejects it — nothing is written to disk in that case."""
+        `generated/` and record a new version. When no `spec` snapshot is
+        given (manual uploads, baseline seeds), a minimal one is derived from
+        the code's own `StrategySpec` so the Bots UI can always show and
+        retarget symbols. Raises `StrategyValidationError` if the sandbox
+        rejects it — nothing is written to disk in that case."""
         instance, errors = validate_and_load(code)
         if instance is None:
             raise StrategyValidationError(errors)
+        if spec is None:
+            spec = _derive_spec_snapshot(instance)
 
         next_version = self._repository.latest_version_number(name) + 1
         file_name = f"{name}_v{next_version}.py"
@@ -174,6 +200,10 @@ class StrategyVersionService:
         instance, errors = validate_and_load(code)
         if instance is None:
             raise StrategyValidationError(errors)
+        if new_spec is None:
+            # Derived after the symbols rewrite, so a retargeted clone's
+            # snapshot reflects the new symbols, not the source's.
+            new_spec = _derive_spec_snapshot(instance)
 
         file_name = f"{new_name}_v1.py"
         (self._generated_dir / file_name).write_text(code)
@@ -248,6 +278,12 @@ class StrategyVersionService:
         next_version = 1 if forking else self._repository.latest_version_number(base.name) + 1
         parent_version_id = None if forking else base.id
         effective_spec = base.spec if spec is _UNSET else spec
+        if spec is _UNSET and effective_spec is None:
+            # Base version predates spec snapshots (or was saved without
+            # one) — derive from the edited code so the new version shows
+            # up with symbols/params instead of no snapshot. An explicit
+            # `spec=None` still clears it, per the docstring.
+            effective_spec = _derive_spec_snapshot(instance)
 
         file_name = f"{target_name}_v{next_version}.py"
         (self._generated_dir / file_name).write_text(code)
@@ -300,6 +336,28 @@ class StrategyVersionService:
         logger.info("strategy family renamed: %s -> %s (id=%s)", anchor.name, new_name, version_id)
         assert renamed_anchor is not None
         return renamed_anchor
+
+    def update_spec(self, version_id: str, spec: dict[str, object]) -> StrategyVersion:
+        """Overwrite `version_id`'s spec snapshot in place with `spec` — an
+        annotation-only edit, like `rename_family`: it never touches the
+        generated code, never re-runs sandbox validation, and doesn't create
+        a new version, because the spec snapshot is descriptive metadata for
+        the trader/chart, not the tradeable artifact (that's the code, which
+        `edit_code` always version-forks instead of mutating). Raises
+        `ValueError` if `version_id` doesn't exist."""
+        version = self._repository.get(version_id)
+        if version is None:
+            raise ValueError(f"no strategy version with id {version_id!r}")
+
+        updated = replace(version, spec=spec)
+        self._repository.save(updated)
+        logger.info(
+            "strategy version spec updated: name=%s version=%d id=%s",
+            version.name,
+            version.version,
+            version.id,
+        )
+        return updated
 
     def list_versions(
         self, name: str | None = None, status: VersionStatus | None = None
@@ -445,6 +503,35 @@ class StrategyVersionService:
             version.id,
         )
         return resumed
+
+    def backfill_missing_specs(self) -> int:
+        """One-shot repair for versions recorded before spec snapshots were
+        derived for manual saves: any version with no spec gets one derived
+        from its own code's `StrategySpec` (symbols, timeframes, params).
+        Versions whose code no longer validates are logged and skipped.
+        Returns the number of versions backfilled. Safe to re-run."""
+        backfilled = 0
+        for version in self._repository.list_all():
+            if version.spec is not None:
+                continue
+            try:
+                instance = self._load_instance(version)
+            except Exception:
+                logger.exception(
+                    "spec backfill skipped — code failed validation: name=%s version=%d",
+                    version.name,
+                    version.version,
+                )
+                continue
+            self._repository.save(replace(version, spec=_derive_spec_snapshot(instance)))
+            backfilled += 1
+            logger.info(
+                "spec snapshot backfilled: name=%s version=%d id=%s",
+                version.name,
+                version.version,
+                version.id,
+            )
+        return backfilled
 
     def load_active_into_registry(self) -> None:
         """Called once at startup so a backend restart doesn't lose whichever

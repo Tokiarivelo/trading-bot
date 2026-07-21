@@ -1,53 +1,120 @@
 "use client";
 
 /**
- * The real "apply a bot to a symbol" control (§6.6): shows every symbol
- * currently routed for live trading (skills/normal/<symbol>.yaml, what
- * TradeEngine._try_enter actually reads via SkillSelector — including any
- * symbol activated at runtime via BotSelector, not just ones configured at
- * backend startup) and lets the trader reroute it to any other
- * currently-active bot family. Reassigning here writes the YAML and
- * hot-swaps the live selector immediately — no restart needed.
+ * The real "activate bots on a symbol" control (§6.6): shows every symbol
+ * currently routed for live trading, grouped by symbol, with every
+ * concurrently-active bot on it (skills/normal/<symbol>/<bot_name>.yaml,
+ * what TradeEngine._try_enter actually reads via SkillSelector — including
+ * any bot activated at runtime via BotSelector, not just ones configured at
+ * backend startup). Each bot can be independently reassigned to another
+ * strategy family or stopped, and a symbol's card lets a trader add another
+ * bot alongside whatever's already running. Every change here writes the
+ * YAML and hot-swaps the live selector immediately — no restart needed.
  */
 
 import { useCallback, useEffect, useState } from "react";
 import {
   ApiError,
-  assignStrategyToSymbol,
+  addBotToSymbol,
+  getLiveBotSignals,
   getSkillAssignments,
   getStrategyVersions,
   getSymbolSpreadConfig,
   putSymbolMinRr,
+  removeBotFromSymbol,
+  updateBotAssignment,
+  type BacktestSignal,
   type NormalSkillAssignment,
 } from "@/shared/api/client";
+import { BotConfigEditor } from "./BotConfigEditor";
+
+/** Per-bot signal→outcome tally for the activity badge below (last 14 days,
+ * `getLiveBotSignals`'s default window). `confirmed` counts every signal the
+ * strategy emitted; `opened`/`rejected` split its outcomes into "became a
+ * trade" vs. "vetoed or rejected" (htf_veto/risk_rejected/spread_veto/
+ * broker_rejected) — `skipped` (no outcome logged yet) counts toward
+ * `confirmed` only. */
+interface BotSignalCounts {
+  confirmed: number;
+  opened: number;
+  rejected: number;
+}
+
+function summarizeSignals(signals: BacktestSignal[]): BotSignalCounts {
+  let opened = 0;
+  let rejected = 0;
+  for (const s of signals) {
+    if (s.outcome === "opened") opened += 1;
+    else if (s.outcome !== "skipped") rejected += 1;
+  }
+  return { confirmed: signals.length, opened, rejected };
+}
 
 export function SymbolAssignmentPanel() {
   const [assignments, setAssignments] = useState<NormalSkillAssignment[] | null>(null);
   const [activeBots, setActiveBots] = useState<string[] | null>(null);
-  const [busySymbol, setBusySymbol] = useState<string | null>(null);
+  const [busyKey, setBusyKey] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [newBotStrategy, setNewBotStrategy] = useState<Record<string, string>>({});
+  const [signalCounts, setSignalCounts] = useState<Map<string, BotSignalCounts>>(new Map());
+  const [configuringKey, setConfiguringKey] = useState<string | null>(null);
 
   const refresh = useCallback(() => {
     Promise.all([getSkillAssignments(), getStrategyVersions(undefined, "active")])
       .then(([skills, versions]) => {
         setAssignments(skills);
         setActiveBots(Array.from(new Set(versions.map((v) => v.name))).sort());
+        Promise.all(
+          skills.map((a) =>
+            getLiveBotSignals(a.name)
+              .then((signals): [string, BotSignalCounts] => [a.name, summarizeSignals(signals)])
+              .catch((): [string, BotSignalCounts] => [a.name, { confirmed: 0, opened: 0, rejected: 0 }]),
+          ),
+        ).then((entries) => setSignalCounts(new Map(entries)));
       })
       .catch(() => setError("failed to load symbol assignments"));
   }, []);
 
   useEffect(refresh, [refresh]);
 
-  async function reassign(symbol: string, strategyName: string) {
-    setBusySymbol(symbol);
+  async function reassign(symbol: string, botName: string, strategyName: string) {
+    setBusyKey(`${symbol}:${botName}`);
     setError(null);
     try {
-      await assignStrategyToSymbol(symbol, strategyName);
+      await updateBotAssignment(symbol, botName, strategyName);
       refresh();
     } catch (e) {
-      setError(e instanceof ApiError ? e.message : `failed to reassign ${symbol}`);
+      setError(e instanceof ApiError ? e.message : `failed to reassign ${botName} on ${symbol}`);
     } finally {
-      setBusySymbol(null);
+      setBusyKey(null);
+    }
+  }
+
+  async function stop(symbol: string, botName: string) {
+    setBusyKey(`${symbol}:${botName}`);
+    setError(null);
+    try {
+      await removeBotFromSymbol(symbol, botName);
+      refresh();
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : `failed to stop ${botName} on ${symbol}`);
+    } finally {
+      setBusyKey(null);
+    }
+  }
+
+  async function addBot(symbol: string, fallbackStrategy: string | undefined) {
+    const strategyName = newBotStrategy[symbol] ?? fallbackStrategy;
+    if (!strategyName) return;
+    setBusyKey(`${symbol}:__new__`);
+    setError(null);
+    try {
+      await addBotToSymbol(symbol, strategyName);
+      refresh();
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : `failed to add a bot to ${symbol}`);
+    } finally {
+      setBusyKey(null);
     }
   }
 
@@ -63,6 +130,14 @@ export function SymbolAssignmentPanel() {
     );
   }
 
+  const bySymbol = new Map<string, NormalSkillAssignment[]>();
+  for (const a of assignments) {
+    const bots = bySymbol.get(a.symbol) ?? [];
+    bots.push(a);
+    bySymbol.set(a.symbol, bots);
+  }
+  const symbols = Array.from(bySymbol.keys()).sort();
+
   return (
     <div className="flex flex-col gap-4 p-4">
       <div className="flex items-start gap-3 rounded-lg border border-ok/20 bg-ok/5 p-4 text-xs text-ok">
@@ -71,7 +146,7 @@ export function SymbolAssignmentPanel() {
         </svg>
         <div>
           <span className="font-semibold block mb-0.5">Live Connection Router</span>
-          Changes to symbol assignments below write to backend configuration and hot-swap active trading rules immediately. No restart of the Trade Engine or MT5 bridge is required.
+          Changes to bot assignments below write to backend configuration and hot-swap active trading rules immediately. No restart of the Trade Engine or MT5 bridge is required. A symbol can run several bots concurrently, each independently trading its own strategy.
         </div>
       </div>
 
@@ -81,7 +156,7 @@ export function SymbolAssignmentPanel() {
         </div>
       )}
 
-      {assignments.length === 0 ? (
+      {symbols.length === 0 ? (
         <div className="flex flex-col items-center justify-center py-10 text-center rounded-xl border border-line bg-panel/30">
           <svg className="h-10 w-10 text-ink-muted mb-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M18.364 5.636l-3.536 3.536m0 5.656l3.536 3.536M9.172 9.172L5.636 5.636m3.536 9.192l-3.536 3.536M21 12a9 9 0 11-18 0 9 9 0 0118 0zm-5 0a4 4 0 11-8 0 4 4 0 018 0z" />
@@ -93,69 +168,160 @@ export function SymbolAssignmentPanel() {
         </div>
       ) : (
         <div className="grid gap-4 grid-cols-1 sm:grid-cols-2 lg:grid-cols-3">
-          {assignments.map((a) => {
-            const isBusy = busySymbol === a.symbol;
+          {symbols.map((symbol) => {
+            const bots = bySymbol.get(symbol)!;
+            const addBusy = busyKey === `${symbol}:__new__`;
             return (
               <div
-                key={a.symbol}
-                className={`relative overflow-hidden rounded-xl border p-4 bg-panel shadow-md transition-all duration-200 ${
-                  isBusy ? "border-accent ring-1 ring-accent" : "border-line hover:border-line-hover"
-                }`}
+                key={symbol}
+                className="relative overflow-hidden rounded-xl border border-line p-4 bg-panel shadow-md transition-all duration-200 hover:border-line-hover"
               >
-                {/* Header */}
                 <div className="flex items-center justify-between mb-3">
                   <span className="text-sm font-bold text-ink tracking-wider bg-bg px-2 py-1 rounded">
-                    {a.symbol}
+                    {symbol}
                   </span>
                   <div className="flex items-center gap-1.5">
                     <span className="h-2 w-2 rounded-full bg-ok animate-pulse" />
-                    <span className="text-3xs font-semibold text-ok uppercase tracking-wider">Live</span>
+                    <span className="text-3xs font-semibold text-ok uppercase tracking-wider">
+                      {bots.length} bot{bots.length === 1 ? "" : "s"} live
+                    </span>
                   </div>
                 </div>
 
-                {/* Body Selector */}
-                <div className="flex flex-col gap-1.5">
-                  <label className="text-[10px] font-semibold text-ink-muted uppercase tracking-wider">
-                    Assigned Bot Family
-                  </label>
-                  <div className="relative">
+                <div className="flex flex-col gap-2">
+                  {bots.map((bot) => {
+                    const key = `${symbol}:${bot.bot_name}`;
+                    const isBusy = busyKey === key;
+                    return (
+                      <div
+                        key={bot.bot_name}
+                        className={`rounded-lg border p-2 transition-all duration-200 ${
+                          isBusy ? "border-accent ring-1 ring-accent" : "border-line"
+                        }`}
+                      >
+                        <div className="flex items-center justify-between gap-2 mb-1">
+                          <span
+                            className="text-xs font-semibold text-ink truncate"
+                            title={bot.bot_name}
+                          >
+                            {bot.bot_name}
+                          </span>
+                          <div className="flex shrink-0 items-center gap-2">
+                            <button
+                              type="button"
+                              className="text-3xs font-semibold text-accent hover:underline"
+                              onClick={() => setConfiguringKey(configuringKey === key ? null : key)}
+                            >
+                              {configuringKey === key ? "Hide" : "Configure"}
+                            </button>
+                            <button
+                              type="button"
+                              className="text-3xs font-semibold text-err hover:underline disabled:opacity-40"
+                              disabled={busyKey !== null}
+                              onClick={() => stop(symbol, bot.bot_name)}
+                            >
+                              {isBusy ? "…" : "Stop"}
+                            </button>
+                          </div>
+                        </div>
+                        <BotSignalBadge counts={signalCounts.get(bot.name)} />
+                        <select
+                          className="w-full rounded border border-line bg-bg/80 px-2 py-1 text-xs text-ink focus:border-accent focus:ring-1 focus:ring-accent focus:outline-none disabled:opacity-50 transition-all duration-200"
+                          value={bot.strategy}
+                          disabled={busyKey !== null}
+                          onChange={(e) => reassign(symbol, bot.bot_name, e.target.value)}
+                        >
+                          {!activeBots.includes(bot.strategy) && (
+                            <option value={bot.strategy}>{bot.strategy} (Inactive)</option>
+                          )}
+                          {activeBots.map((name) => (
+                            <option key={name} value={name}>
+                              {name}
+                            </option>
+                          ))}
+                        </select>
+                        {configuringKey === key && (
+                          <BotConfigEditor
+                            symbol={symbol}
+                            bot={bot}
+                            onSaved={() => {
+                              setConfiguringKey(null);
+                              refresh();
+                            }}
+                          />
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+
+                {activeBots.length > 0 && (
+                  <div className="mt-3 flex items-center gap-1.5">
                     <select
-                      className="w-full rounded-lg border border-line bg-bg/80 px-3 py-2 text-sm text-ink focus:border-accent focus:ring-1 focus:ring-accent focus:outline-none disabled:opacity-50 transition-all duration-200"
-                      value={a.strategy}
-                      disabled={busySymbol !== null}
-                      onChange={(e) => reassign(a.symbol, e.target.value)}
+                      className="flex-1 min-w-0 rounded border border-line bg-bg/80 px-2 py-1 text-xs text-ink focus:border-accent focus:outline-none disabled:opacity-50"
+                      value={newBotStrategy[symbol] ?? activeBots[0]}
+                      disabled={busyKey !== null}
+                      onChange={(e) =>
+                        setNewBotStrategy((prev) => ({ ...prev, [symbol]: e.target.value }))
+                      }
                     >
-                      {!activeBots.includes(a.strategy) && (
-                        <option value={a.strategy}>{a.strategy} (Inactive)</option>
-                      )}
                       {activeBots.map((name) => (
                         <option key={name} value={name}>
                           {name}
                         </option>
                       ))}
                     </select>
-                  </div>
-                </div>
-
-                <SymbolMinRrEditor symbol={a.symbol} />
-
-                {/* Busy overlay */}
-                {isBusy && (
-                  <div className="absolute inset-0 bg-panel/85 flex items-center justify-center backdrop-blur-xs">
-                    <div className="flex items-center gap-2 text-xs font-semibold text-accent">
-                      <svg className="animate-spin h-4 w-4 text-accent" fill="none" viewBox="0 0 24 24">
-                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
-                      </svg>
-                      Applying...
-                    </div>
+                    <button
+                      type="button"
+                      className="shrink-0 rounded border border-accent px-2 py-1 text-3xs font-semibold text-accent hover:bg-accent hover:text-bg disabled:opacity-40"
+                      disabled={busyKey !== null}
+                      onClick={() => addBot(symbol, activeBots[0])}
+                    >
+                      {addBusy ? "…" : "+ Add bot"}
+                    </button>
                   </div>
                 )}
+
+                <SymbolMinRrEditor symbol={symbol} />
               </div>
             );
           })}
         </div>
       )}
+    </div>
+  );
+}
+
+/** Activity badge for one bot card: how many signals its strategy confirmed,
+ * how many became trades, and how many were vetoed/rejected, over the last
+ * 14 days (`GET /activity/signals`'s default window) — lets a trader
+ * eyeball which of several concurrently-active bots is actually doing
+ * anything without opening the activity log. `undefined` while its own
+ * fetch is still in flight. */
+function BotSignalBadge({ counts }: { counts: BotSignalCounts | undefined }) {
+  if (!counts) {
+    return <p className="mb-1.5 text-3xs text-ink-muted">Loading activity…</p>;
+  }
+  return (
+    <div className="mb-1.5 flex items-center gap-1">
+      <span
+        className="rounded border border-accent/20 bg-accent/10 px-1 py-0.5 text-3xs font-semibold text-accent"
+        title="Signals confirmed by this bot's strategy (last 14 days)"
+      >
+        {counts.confirmed} signal{counts.confirmed === 1 ? "" : "s"}
+      </span>
+      <span
+        className="rounded border border-ok/20 bg-ok/10 px-1 py-0.5 text-3xs font-semibold text-ok"
+        title="Signals that became trades"
+      >
+        {counts.opened} opened
+      </span>
+      <span
+        className="rounded border border-err/20 bg-err/10 px-1 py-0.5 text-3xs font-semibold text-err"
+        title="Signals vetoed or rejected (HTF veto, risk sizing, spread/RR gate, broker)"
+      >
+        {counts.rejected} rejected
+      </span>
     </div>
   );
 }

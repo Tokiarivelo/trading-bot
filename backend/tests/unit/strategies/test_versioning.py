@@ -196,6 +196,27 @@ def test_rename_family_unknown_version_raises(service):
         svc.rename_family("does-not-exist", "renamed")
 
 
+def test_update_spec_overwrites_in_place_without_new_version(service):
+    svc, _ = service
+    v1 = svc.save_generated_code(name="sample", code=VALID_CODE, source=CodeSource.AI_GENERATED)
+    new_spec = {**v1.spec, "entry_rules": "buy on close above EMA200"}
+
+    updated = svc.update_spec(v1.id, new_spec)
+    assert updated.id == v1.id
+    assert updated.version == 1
+    assert updated.spec["entry_rules"] == "buy on close above EMA200"
+    assert svc.get_version(v1.id).spec["entry_rules"] == "buy on close above EMA200"
+    # Code and version number are untouched — this is annotation only.
+    assert svc.get_code(updated) == VALID_CODE
+    assert svc.list_versions("sample") == [updated]
+
+
+def test_update_spec_unknown_version_raises(service):
+    svc, _ = service
+    with pytest.raises(ValueError, match="no strategy version"):
+        svc.update_spec("does-not-exist", {})
+
+
 def test_load_active_into_registry_restores_after_restart(service, tmp_path):
     svc, registry = service
     v1 = svc.save_generated_code(name="sample", code=VALID_CODE, source=CodeSource.AI_GENERATED)
@@ -431,3 +452,59 @@ def test_edit_code_spec_override_can_clear_spec(service):
     )
     edited = svc.edit_code(v1.id, VALID_CODE, spec=None)
     assert edited.spec is None
+
+
+def test_save_without_spec_derives_snapshot_from_code(service):
+    svc, _ = service
+    version = svc.save_generated_code(name="sample", code=VALID_CODE, source=CodeSource.MANUAL)
+    assert version.spec is not None
+    assert version.spec["symbols"] == ["XAUUSD"]
+    assert version.spec["entry_timeframe"] == "M5"
+    assert version.spec["params"] == {}
+
+
+def test_edit_code_derives_snapshot_when_base_has_none(service):
+    svc, _ = service
+    # A base with an explicitly cleared spec (pre-derivation rows look the same).
+    v1 = svc.save_generated_code(name="sample", code=VALID_CODE, source=CodeSource.MANUAL)
+    cleared = svc.edit_code(v1.id, VALID_CODE, spec=None)
+    edited = svc.edit_code(cleared.id, VALID_CODE)
+    assert edited.spec is not None
+    assert edited.spec["symbols"] == ["XAUUSD"]
+
+
+def test_duplicate_with_symbols_override_derives_retargeted_snapshot(service):
+    svc, _ = service
+    v1 = svc.save_generated_code(name="sample", code=VALID_CODE, source=CodeSource.MANUAL)
+    dup = svc.duplicate_version(
+        replace_spec_with_none(svc, v1).id, new_name="sample_fork", symbols=("BTCUSD",)
+    )
+    assert dup.spec is not None
+    assert dup.spec["symbols"] == ["BTCUSD"]
+
+
+def replace_spec_with_none(svc, version):
+    """Simulate a pre-derivation row (spec never recorded) for `version`."""
+    from dataclasses import replace
+
+    stripped = replace(version, spec=None)
+    svc._repository.save(stripped)  # noqa: SLF001 — test-only backdoor
+    return stripped
+
+
+def test_backfill_missing_specs_fills_only_specless_rows(service):
+    svc, _ = service
+    with_spec = svc.save_generated_code(
+        name="has_spec", code=VALID_CODE, source=CodeSource.AI_GENERATED, spec={"name": "kept"}
+    )
+    without_spec = replace_spec_with_none(
+        svc, svc.save_generated_code(name="no_spec", code=VALID_CODE, source=CodeSource.MANUAL)
+    )
+
+    assert svc.backfill_missing_specs() == 1
+    assert svc.get_version(with_spec.id).spec == {"name": "kept"}
+    backfilled = svc.get_version(without_spec.id).spec
+    assert backfilled is not None
+    assert backfilled["symbols"] == ["XAUUSD"]
+    # Re-running finds nothing left to do.
+    assert svc.backfill_missing_specs() == 0

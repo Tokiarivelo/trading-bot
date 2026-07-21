@@ -17,5 +17,8 @@
       "Read(**/*.key)",
       "Edit(configs/risk.yaml)"
     ]
+  },
+  "enabledPlugins": {
+    "frontend-design@claude-plugins-official": true
   }
 }

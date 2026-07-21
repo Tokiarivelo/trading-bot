@@ -3,21 +3,59 @@
 import { useState } from "react";
 import type { TradeHistoryItem } from "@/shared/api/client";
 import { StatusBadge } from "@/features/strategies/StatusBadge";
+import { useSortableRows } from "@/shared/hooks/useSortableRows";
+import { SortTh } from "@/shared/ui/SortTh";
 import { type GroupBy, type TradeGroup, groupTrades, outcomeOf } from "./groupTrades";
+
+type TradeSortKey =
+  | "symbol"
+  | "side"
+  | "volume"
+  | "open_time"
+  | "close_time"
+  | "open_price"
+  | "close_price"
+  | "profit"
+  | "strategy_version"
+  | "skill"
+  | "outcome";
+
+function tradeSortValue(t: TradeHistoryItem, key: TradeSortKey): string | number | null {
+  switch (key) {
+    case "outcome":
+      return outcomeOf(t);
+    case "strategy_version":
+      return t.strategy_version;
+    case "skill":
+      return t.skill;
+    default:
+      return t[key];
+  }
+}
 
 export function TradeHistoryTable({
   trades,
   groupBy,
+  selectedTicket = null,
+  onSelectTicket,
 }: {
   trades: TradeHistoryItem[];
   groupBy: GroupBy;
+  /** Ticket currently highlighted on the chart (see page.tsx's
+   * `selectedOrderTicket`) — used to mark the matching row, same convention
+   * as AllOrdersPanel's active-orders tables. */
+  selectedTicket?: number | null;
+  /** Called with a row's ticket + symbol when clicked. The caller owns
+   * toggling selection off on a repeat click and switching the chart to that
+   * symbol if it isn't already on screen. */
+  onSelectTicket?: (ticket: number, symbol: string) => void;
 }) {
   const groups = groupTrades(trades, groupBy);
 
   if (groupBy === "none") {
     return (
       <div className="overflow-x-auto p-4">
-        <TradesTable trades={trades} />
+        <TradesTable trades={trades} selectedTicket={selectedTicket} onSelectTicket={onSelectTicket} />
       </div>
     );
   }
@@ -25,13 +63,26 @@ export function TradeHistoryTable({
   return (
     <div className="flex flex-col gap-3 p-4">
       {groups.map((group) => (
-        <GroupSection key={group.key} group={group} />
+        <GroupSection
+          key={group.key}
+          group={group}
+          selectedTicket={selectedTicket}
+          onSelectTicket={onSelectTicket}
+        />
       ))}
     </div>
   );
 }
 
-function GroupSection({ group }: { group: TradeGroup }) {
+function GroupSection({
+  group,
+  selectedTicket = null,
+  onSelectTicket,
+}: {
+  group: TradeGroup;
+  selectedTicket?: number | null;
+  onSelectTicket?: (ticket: number, symbol: string) => void;
+}) {
   const [collapsed, setCollapsed] = useState(false);
 
   return (
@@ -58,14 +109,28 @@ function GroupSection({ group }: { group: TradeGroup }) {
       </button>
       {!collapsed && (
         <div className="overflow-x-auto">
-          <TradesTable trades={group.trades} />
+          <TradesTable trades={group.trades} selectedTicket={selectedTicket} onSelectTicket={onSelectTicket} />
         </div>
       )}
     </div>
   );
 }
 
-function TradesTable({ trades }: { trades: TradeHistoryItem[] }) {
+function TradesTable({
+  trades,
+  selectedTicket = null,
+  onSelectTicket,
+}: {
+  trades: TradeHistoryItem[];
+  selectedTicket?: number | null;
+  onSelectTicket?: (ticket: number, symbol: string) => void;
+}) {
+  const { sorted, sort, toggle } = useSortableRows<TradeHistoryItem, TradeSortKey>(
+    trades,
+    tradeSortValue,
+    { key: "open_time", dir: "desc" },
+  );
+
   if (trades.length === 0) {
     return <p className="px-3 py-2 text-sm text-ink-muted">No trades.</p>;
   }
@@ -73,22 +138,32 @@ function TradesTable({ trades }: { trades: TradeHistoryItem[] }) {
     <table className="w-full min-w-[960px] border-collapse text-sm">
       <thead>
         <tr className="border-b border-line text-left text-xs text-ink-muted">
-          <Th>Symbol</Th>
-          <Th>Side</Th>
-          <Th align="right">Volume</Th>
-          <Th>Opened</Th>
-          <Th>Closed</Th>
-          <Th align="right">Open price</Th>
-          <Th align="right">Close price</Th>
-          <Th align="right">P/L</Th>
-          <Th>Strategy</Th>
-          <Th>Skill</Th>
-          <Th>Outcome</Th>
+          <SortTh className="px-3 py-2 font-medium" label="Symbol" sortKey="symbol" sort={sort} onSort={toggle} />
+          <SortTh className="px-3 py-2 font-medium" label="Side" sortKey="side" sort={sort} onSort={toggle} />
+          <SortTh className="px-3 py-2 font-medium" label="Volume" sortKey="volume" sort={sort} onSort={toggle} align="right" />
+          <SortTh className="px-3 py-2 font-medium" label="Opened" sortKey="open_time" sort={sort} onSort={toggle} />
+          <SortTh className="px-3 py-2 font-medium" label="Closed" sortKey="close_time" sort={sort} onSort={toggle} />
+          <SortTh className="px-3 py-2 font-medium" label="Open price" sortKey="open_price" sort={sort} onSort={toggle} align="right" />
+          <SortTh className="px-3 py-2 font-medium" label="Close price" sortKey="close_price" sort={sort} onSort={toggle} align="right" />
+          <SortTh className="px-3 py-2 font-medium" label="P/L" sortKey="profit" sort={sort} onSort={toggle} align="right" />
+          <SortTh className="px-3 py-2 font-medium" label="Strategy" sortKey="strategy_version" sort={sort} onSort={toggle} />
+          <SortTh className="px-3 py-2 font-medium" label="Skill" sortKey="skill" sort={sort} onSort={toggle} />
+          <SortTh className="px-3 py-2 font-medium" label="Outcome" sortKey="outcome" sort={sort} onSort={toggle} />
         </tr>
       </thead>
       <tbody>
-        {trades.map((t) => (
-          <tr key={t.id} className="border-b border-line last:border-0 hover:bg-panel/40">
+        {sorted.map((t) => {
+          const ticket = Number(t.id);
+          const selected = selectedTicket === ticket;
+          return (
+          <tr
+            key={t.id}
+            onClick={() => onSelectTicket?.(ticket, t.symbol)}
+            className={`cursor-pointer border-b border-line last:border-0 ${
+              selected ? "bg-accent/10 ring-1 ring-inset ring-accent" : "hover:bg-panel/40"
+            }`}
+            title={`Highlight #${t.id} on the chart`}
+          >
             <Td>{t.symbol}</Td>
             <Td className={t.side === "buy" ? "text-ok" : "text-err"}>{t.side}</Td>
             <Td align="right">{t.volume}</Td>
@@ -105,7 +180,8 @@ function TradesTable({ trades }: { trades: TradeHistoryItem[] }) {
               <StatusBadge status={outcomeOf(t)} />
             </Td>
           </tr>
-        ))}
+          );
+        })}
       </tbody>
     </table>
   );
@@ -118,12 +194,6 @@ function plTone(profit: number | null): string {
 
 function formatTime(epochSeconds: number): string {
   return new Date(epochSeconds * 1000).toISOString().replace("T", " ").slice(0, 16);
-}
-
-function Th({ children, align = "left" }: { children: React.ReactNode; align?: "left" | "right" }) {
-  return (
-    <th className={`px-3 py-2 font-medium ${align === "right" ? "text-right" : ""}`}>{children}</th>
-  );
 }
 
 function Td({

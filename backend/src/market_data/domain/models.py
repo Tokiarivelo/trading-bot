@@ -38,6 +38,13 @@ class Timeframe(StrEnum):
     def seconds(self) -> int:
         return _TIMEFRAME_SECONDS[self.value]
 
+    def next_up(self) -> Timeframe | None:
+        """The next-larger timeframe (declaration order above is the
+        hierarchy), or `None` for `MN` — there is nothing above it."""
+        members = list(Timeframe)
+        index = members.index(self) + 1
+        return members[index] if index < len(members) else None
+
     def bar_open(self, moment: datetime) -> datetime:
         """Open time of the bar containing `moment` (UTC-aligned; broker
         server-time offsets for D1 are a Phase 4 concern). W1 bars open on

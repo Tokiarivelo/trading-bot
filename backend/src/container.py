@@ -106,6 +106,7 @@ from src.skills.ports.skill_selector import SkillSelectorPort
 from src.strategies.adapters.repository import StrategyVersionRepository
 from src.strategies.application.versioning import StrategyVersionService
 from src.strategies.generated.breakout_v1 import BreakoutV1
+from src.strategies.generated.breakout_v2 import BreakoutV2
 from src.strategies.generated.mean_reversion_v1 import MeanReversionV1
 from src.strategies.generated.trend_structure_v1 import TrendStructureV1
 from src.strategies.generated.trend_structure_v2 import TrendStructureV2
@@ -284,6 +285,8 @@ def build_container(settings: Settings | None = None) -> Container:
     strategy_registry = StrategyRegistry()
     breakout_v1 = BreakoutV1()
     strategy_registry.register(breakout_v1.spec.name, breakout_v1)
+    breakout_v2 = BreakoutV2()
+    strategy_registry.register(breakout_v2.spec.name, breakout_v2)
     trend_structure_v1 = TrendStructureV1()
     strategy_registry.register(trend_structure_v1.spec.name, trend_structure_v1)
     trend_structure_v2 = TrendStructureV2()
@@ -406,7 +409,6 @@ def build_container(settings: Settings | None = None) -> Container:
         skill_selector=skill_selector,
         strategy_source=strategy_registry,
         entry_timeframe=engine_config.get("entry_timeframe", "M5"),
-        confirmation_timeframes=tuple(engine_config.get("confirmation_timeframes", ["H1", "H4"])),
         event_bus=event_bus,
         enabled=engine_config.get("enabled", True),
     )

@@ -40,32 +40,36 @@ function PositionRow({
   const [tp, setTp] = useState(position.tp === null ? "" : String(position.tp));
 
   return (
-    <div className="flex flex-col gap-0.5 text-xs">
-      <div className="flex items-center justify-between gap-1">
-        <span className={position.side === "buy" ? "text-ok" : "text-err"}>
+    <div className="flex min-w-0 flex-col gap-0.5 text-xs">
+      <div className="flex min-w-0 items-center justify-between gap-1">
+        <span className={`truncate ${position.side === "buy" ? "text-ok" : "text-err"}`}>
           {position.side} {position.volume} @ {position.open_price}
         </span>
-        <span className={position.profit >= 0 ? "text-ok" : "text-err"}>
+        <span className={`shrink-0 ${position.profit >= 0 ? "text-ok" : "text-err"}`}>
           {position.profit.toFixed(2)}
         </span>
         <button
           onClick={onClose}
           disabled={busy}
-          className="cursor-pointer text-ink-muted hover:text-err"
+          className="shrink-0 cursor-pointer text-ink-muted hover:text-err"
           title={`Close #${position.ticket}`}
         >
           ×
         </button>
       </div>
-      <div className="flex gap-1">
+      <div className="flex min-w-0 gap-1">
         <input
-          className="w-16 rounded border border-line bg-transparent px-1 py-0.5 text-xs"
+          type="number"
+          step="0.01"
+          className="w-0 min-w-0 flex-1 rounded border border-line bg-transparent px-1 py-0.5 text-xs"
           value={sl}
           onChange={(e) => setSl(e.target.value)}
           placeholder="SL"
         />
         <input
-          className="w-16 rounded border border-line bg-transparent px-1 py-0.5 text-xs"
+          type="number"
+          step="0.01"
+          className="w-0 min-w-0 flex-1 rounded border border-line bg-transparent px-1 py-0.5 text-xs"
           value={tp}
           onChange={(e) => setTp(e.target.value)}
           placeholder="TP"
@@ -73,7 +77,7 @@ function PositionRow({
         <button
           onClick={() => onModify(numOrNull(sl), numOrNull(tp))}
           disabled={busy}
-          className="cursor-pointer rounded border border-line px-1 text-ink-muted hover:border-accent hover:text-accent"
+          className="shrink-0 cursor-pointer rounded border border-line px-1 text-ink-muted hover:border-accent hover:text-accent"
         >
           Set
         </button>
@@ -97,29 +101,33 @@ function PendingOrderRow({
   const [tp, setTp] = useState(order.tp === null ? "" : String(order.tp));
 
   return (
-    <div className="flex flex-col gap-0.5 text-xs">
-      <div className="flex items-center justify-between gap-1">
-        <span className={order.side === "buy" ? "text-ok" : "text-err"}>
+    <div className="flex min-w-0 flex-col gap-0.5 text-xs">
+      <div className="flex min-w-0 items-center justify-between gap-1">
+        <span className={`truncate ${order.side === "buy" ? "text-ok" : "text-err"}`}>
           {order.side} {order.order_type} {order.volume} @ {order.price}
         </span>
         <button
           onClick={onCancel}
           disabled={busy}
-          className="cursor-pointer text-ink-muted hover:text-err"
+          className="shrink-0 cursor-pointer text-ink-muted hover:text-err"
           title={`Cancel #${order.ticket}`}
         >
           ×
         </button>
       </div>
-      <div className="flex gap-1">
+      <div className="flex min-w-0 gap-1">
         <input
-          className="w-16 rounded border border-line bg-transparent px-1 py-0.5 text-xs"
+          type="number"
+          step="0.01"
+          className="w-0 min-w-0 flex-1 rounded border border-line bg-transparent px-1 py-0.5 text-xs"
           value={sl}
           onChange={(e) => setSl(e.target.value)}
           placeholder="SL"
         />
         <input
-          className="w-16 rounded border border-line bg-transparent px-1 py-0.5 text-xs"
+          type="number"
+          step="0.01"
+          className="w-0 min-w-0 flex-1 rounded border border-line bg-transparent px-1 py-0.5 text-xs"
           value={tp}
           onChange={(e) => setTp(e.target.value)}
           placeholder="TP"
@@ -127,7 +135,7 @@ function PendingOrderRow({
         <button
           onClick={() => onModify(numOrNull(sl), numOrNull(tp))}
           disabled={busy}
-          className="cursor-pointer rounded border border-line px-1 text-ink-muted hover:border-accent hover:text-accent"
+          className="shrink-0 cursor-pointer rounded border border-line px-1 text-ink-muted hover:border-accent hover:text-accent"
         >
           Set
         </button>
@@ -211,50 +219,56 @@ export function TradePanel({ symbol, trading }: { symbol: string; trading: Tradi
   }
 
   return (
-    <div className="flex flex-col gap-3 text-sm">
+    <div className="flex min-w-0 flex-col gap-3 text-sm">
       {error && <p className="text-xs text-err">{error}</p>}
 
-      <div className="flex gap-2">
+      <div className="flex min-w-0 flex-wrap gap-2">
         <input
-          className="w-20 rounded border border-line bg-transparent px-1 py-0.5 text-xs"
+          type="number"
+          step="0.01"
+          className="w-0 min-w-16 flex-1 rounded border border-line bg-transparent px-1 py-0.5 text-xs"
           value={volume}
           onChange={(e) => setVolume(e.target.value)}
           placeholder="lots"
         />
         <input
-          className="w-24 rounded border border-line bg-transparent px-1 py-0.5 text-xs"
+          type="number"
+          step="0.01"
+          className="w-0 min-w-16 flex-1 rounded border border-line bg-transparent px-1 py-0.5 text-xs"
           value={sl}
           onChange={(e) => setSl(e.target.value)}
           placeholder="SL (optional)"
         />
         <input
-          className="w-24 rounded border border-line bg-transparent px-1 py-0.5 text-xs"
+          type="number"
+          step="0.01"
+          className="w-0 min-w-16 flex-1 rounded border border-line bg-transparent px-1 py-0.5 text-xs"
           value={tp}
           onChange={(e) => setTp(e.target.value)}
           placeholder="TP (optional)"
         />
       </div>
 
-      <div className="flex gap-2">
+      <div className="flex min-w-0 gap-2">
         <button
           onClick={() => handleMarket("buy")}
           disabled={busy}
-          className="flex-1 cursor-pointer rounded bg-ok px-2 py-1 font-bold text-[#04211e] disabled:opacity-50"
+          className="flex-1 cursor-pointer rounded bg-ok px-2 py-1 font-bold text-white disabled:opacity-50"
         >
           Buy
         </button>
         <button
           onClick={() => handleMarket("sell")}
           disabled={busy}
-          className="flex-1 cursor-pointer rounded bg-err px-2 py-1 font-bold text-[#2b0808] disabled:opacity-50"
+          className="flex-1 cursor-pointer rounded bg-err px-2 py-1 font-bold text-white disabled:opacity-50"
         >
           Sell
         </button>
       </div>
 
-      <div className="flex flex-col gap-1 border-t border-line pt-2">
+      <div className="flex min-w-0 flex-col gap-1 border-t border-line pt-2">
         <span className="text-xs text-ink-muted">Pending order</span>
-        <div className="flex gap-1">
+        <div className="flex min-w-0 flex-wrap gap-1">
           {(["buy", "sell"] as const).map((s) => (
             <button
               key={s}
@@ -278,16 +292,18 @@ export function TradePanel({ symbol, trading }: { symbol: string; trading: Tradi
             </button>
           ))}
         </div>
-        <div className="flex gap-2">
+        <div className="flex min-w-0 flex-wrap gap-2">
           <input
-            className="w-24 rounded border border-line bg-transparent px-1 py-0.5 text-xs"
+            type="number"
+            step="0.01"
+            className="w-0 min-w-24 flex-1 rounded border border-line bg-transparent px-1 py-0.5 text-xs"
             value={price}
             onChange={(e) => setPrice(e.target.value)}
             placeholder="trigger price"
           />
           <button
             onClick={() => armPlacementMode(pendingSide, pendingType)}
-            className={`cursor-pointer rounded border px-2 py-0.5 text-xs ${
+            className={`shrink-0 cursor-pointer rounded border px-2 py-0.5 text-xs ${
               trading.placementMode === `${pendingSide}_${pendingType}`
                 ? "border-accent text-accent"
                 : "border-line text-ink-muted"

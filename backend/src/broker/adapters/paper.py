@@ -35,6 +35,7 @@ class _OpenPosition:
     tp: float | None
     open_time: datetime
     comment: str
+    magic: int = 0
 
 
 class PaperBroker:
@@ -59,6 +60,7 @@ class PaperBroker:
             tp=order.tp,
             open_time=now,
             comment=order.comment,
+            magic=order.magic,
         )
         logger.info(
             "paper fill: %s %s %.2f lots @ %.5f sl=%s tp=%s spread=%dpts",
@@ -81,6 +83,7 @@ class PaperBroker:
             time=now,
             spread_points=info.spread_points,
             comment=order.comment,
+            magic=order.magic,
         )
 
     async def close_position(self, ticket: int, volume: float | None = None) -> ExecutionResult:
@@ -117,6 +120,7 @@ class PaperBroker:
             time=now,
             spread_points=info.spread_points,
             comment=position.comment,
+            magic=position.magic,
             profit=profit,
         )
 
@@ -151,6 +155,7 @@ class PaperBroker:
             time=time,
             spread_points=info.spread_points,
             comment=position.comment,
+            magic=position.magic,
             profit=profit,
         )
 
@@ -181,6 +186,7 @@ class PaperBroker:
                     open_time=p.open_time,
                     profit=floating_profit,
                     comment=p.comment,
+                    magic=p.magic,
                 )
             )
         return positions

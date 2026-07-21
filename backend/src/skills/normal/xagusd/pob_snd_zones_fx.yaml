@@ -1,0 +1,5 @@
+name: normal/xagusd/pob_snd_zones_fx
+symbol: XAGUSD
+strategy: pob_snd_zones_fx
+risk_multiplier: 1.0
+sessions: []

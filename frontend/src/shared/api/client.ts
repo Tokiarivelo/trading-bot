@@ -120,7 +120,7 @@ export const logout = async () => {
 export interface AppConfig {
   mode: "paper" | "live";
   symbols: string[];
-  engine: { enabled: boolean; entry_timeframe: string; confirmation_timeframes: string[] };
+  engine: { enabled: boolean; entry_timeframe: string };
 }
 
 export const getHealth = () => api.get<{ status: string }>("/health");
@@ -237,8 +237,15 @@ export interface TradeMarker {
   comment: string;
 }
 
-export const getTradeMarkers = (symbol: string) =>
-  api.get<TradeMarker[]>(`/journal/markers?symbol=${encodeURIComponent(symbol)}`);
+/** `skill` (a bot's full id from `getSkillAssignments`, e.g.
+ * 'normal/xauusd/breakout_v1'), when given, scopes markers to just that
+ * bot's own trades instead of every trade (any bot, or manual) on the
+ * symbol — used by the chart's per-bot "eye" overlay. */
+export const getTradeMarkers = (symbol: string, skill?: string) => {
+  const params = new URLSearchParams({ symbol });
+  if (skill) params.set("skill", skill);
+  return api.get<TradeMarker[]>(`/journal/markers?${params}`);
+};
 
 // ── Journal (trade history, filterable/paginated) ───────────────────────────
 
@@ -393,6 +400,37 @@ export interface ActivityLogEntry {
   message: string;
 }
 
+/** One strategy signal emitted during the replay — including signals that
+ * never became trades (vetoed or rejected by the engine), so the report
+ * page and chart can show every valid setup the strategy saw. Also reused
+ * as-is for a *live* bot's signal trail (`getLiveBotSignals` below,
+ * `GET /activity/signals`) — same shape, same chart rendering, just sourced
+ * from the live decision-trail log instead of a backtest replay. */
+export interface BacktestSignal {
+  time: number; // epoch seconds UTC — simulated bot clock (bar close time), or live wall clock
+  direction: "buy" | "sell";
+  /** 'opened' (became a trade), 'htf_veto' (higher-TF trend opposed it),
+   * 'risk_rejected' (sizing failed the risk caps), 'spread_veto'
+   * (spread/RR gate), 'broker_rejected' (the broker/MT5 itself refused the
+   * order — live only), or 'skipped'. */
+  outcome: "opened" | "htf_veto" | "risk_rejected" | "spread_veto" | "broker_rejected" | "skipped";
+  /** The strategy's own reason string — pattern, zone rect, entry/SL/TP. */
+  reason: string;
+}
+
+/** Reconstructs one live bot's own signal→outcome trail — every setup its
+ * strategy saw, whether it became a trade or was vetoed/rejected — for the
+ * chart's per-bot "eye" overlay. `skill` is a bot's full id from
+ * `getSkillAssignments` (e.g. 'normal/xauusd/breakout_v1') and already
+ * fully identifies the symbol, so no separate `symbol` param is needed.
+ * Defaults to the last 14 days server-side if `from` is omitted. */
+export const getLiveBotSignals = (skill: string, from?: number, to?: number) => {
+  const params = new URLSearchParams({ skill });
+  if (from !== undefined) params.set("from", String(from));
+  if (to !== undefined) params.set("to", String(to));
+  return api.get<BacktestSignal[]>(`/activity/signals?${params}`);
+};
+
 export interface BacktestReportSummary {
   id: string;
   strategy: string;
@@ -429,6 +467,9 @@ export interface BacktestReportDetail extends BacktestReportSummary {
   trades: BacktestTrade[];
   equity_curve: EquityPoint[];
   activity_log: ActivityLogEntry[];
+  /** Every signal the strategy emitted (taken or vetoed), oldest first —
+   * empty for report files predating this field. */
+  signals: BacktestSignal[];
 }
 
 export interface BacktestReportPage {
@@ -447,6 +488,12 @@ export const getBacktestReport = (id: string) =>
 /** Hard-deletes this report's file. This cannot be undone. */
 export const deleteBacktestReport = (id: string) =>
   api.delete<void>(`/backtest/reports/${encodeURIComponent(id)}`);
+/** Saves a new report from JSON shaped exactly like getBacktestReport()'s
+ * response — download an existing report to get a valid example. A fresh
+ * id is always assigned (any `id` in `body` is ignored), so this never
+ * overwrites an existing report. */
+export const importBacktestReport = (body: BacktestReportDetail) =>
+  api.post<BacktestReportSummary>("/backtest/reports/import", body);
 
 // ── Backtest bots + on-demand run ─────────────────────────────────────────────
 
@@ -569,6 +616,12 @@ export const uploadStrategyPdf = (file: File, symbol?: string) => {
 export const createStrategyDraftFromText = (description: string, symbol?: string) =>
   api.post<StrategyDraft>("/ai/pdf-strategy/from-prompt", { description, symbol });
 
+/** Same draft pipeline, but `spec` is already structured JSON (e.g. a file
+ * upload) — skips LLM extraction entirely, `spec` becomes the draft's
+ * extracted_spec as-is. Lands on the same review/approve/generate flow. */
+export const createStrategyDraftFromJson = (spec: ExtractedStrategySpec, symbol?: string) =>
+  api.post<StrategyDraft>("/ai/pdf-strategy/from-spec", { spec, symbol });
+
 export const getStrategyDrafts = () => api.get<StrategyDraft[]>("/ai/pdf-strategy/drafts");
 export const getStrategyDraft = (id: string) =>
   api.get<StrategyDraft>(`/ai/pdf-strategy/drafts/${encodeURIComponent(id)}`);
@@ -664,6 +717,11 @@ export const editStrategyVersionCode = (id: string, code: string, newName?: stri
     code,
     new_name: newName,
   });
+/** Overwrites this version's spec snapshot in place — annotation only, never
+ * touches the generated code or creates a new version (the same way
+ * renameStrategyVersion mutates in place rather than forking). */
+export const updateStrategyVersionSpec = (id: string, spec: ExtractedStrategySpec) =>
+  api.patch<StrategyVersionSummary>(`/strategies/versions/${encodeURIComponent(id)}/spec`, spec);
 
 // ── AI: user-triggered code regeneration (§6.5 code editor) ────────────────
 
@@ -807,13 +865,34 @@ export interface SessionWindowWire {
   end: string; // HH:MM
 }
 
+/** JSON-scalar value a strategy param can hold — mirrors the backend's
+ * `dict[str, float | int | str | bool]`. */
+export type ParamValue = number | string | boolean;
+
 export interface NormalSkillAssignment {
   name: string;
+  /** This bot's short id on its symbol (the last segment of `name`) — the
+   * path segment used by updateBotAssignment/removeBotFromSymbol. */
+  bot_name: string;
   symbol: string;
   strategy: string;
   risk_multiplier: number;
   sessions: SessionWindowWire[];
-  /** True only on the assignStrategyToSymbol response when that call just
+  /** Per-bot overrides of this strategy's tunable params, keyed by param
+   * name — only explicitly overridden keys appear here; every other param
+   * runs at its `strategy_default_params` value. Set via updateBotConfig. */
+  param_overrides: Record<string, ParamValue>;
+  /** Per-bot override of the engine's HTF veto. `null` means this bot
+   * inherits `strategy_default_htf_veto`. */
+  htf_veto_override: boolean | null;
+  /** This bot's strategy's own declared param defaults (its registered
+   * StrategySpec.params) — the base every key in `param_overrides` layers
+   * on top of. Empty if the strategy isn't currently registered (paused). */
+  strategy_default_params: Record<string, ParamValue>;
+  /** This bot's strategy's own declared StrategySpec.htf_veto — the base
+   * `htf_veto_override` layers on top of. */
+  strategy_default_htf_veto: boolean;
+  /** True only on the addBotToSymbol response when that call just
    * activated a previously-inactive symbol for live automated trading
    * (persisted to configs/app.yaml, hot-added to candle streaming and the
    * spread gate). Always false in getSkillAssignments()'s list — a listing
@@ -821,24 +900,65 @@ export interface NormalSkillAssignment {
   newly_activated: boolean;
 }
 
-/** Every symbol currently routed for live trading — the real "which bot
- * trades this symbol live" state (`TradeEngine._try_enter` reads this via
- * `SkillSelector`), distinct from a version's `spec.symbols` membership.
- * Includes any symbol activated at runtime via `assignStrategyToSymbol`,
- * not just symbols configured at backend startup. */
+/** Every bot currently routed for live trading, on every symbol — the real
+ * "which bots trade this symbol live" state (`TradeEngine._try_enter` reads
+ * this via `SkillSelector`), distinct from a version's `spec.symbols`
+ * membership. A symbol may appear multiple times, once per active bot.
+ * Includes any bot activated at runtime via `addBotToSymbol`, not just bots
+ * configured at backend startup. */
 export const getSkillAssignments = () => api.get<NormalSkillAssignment[]>("/skills/normal");
 
-/** Reroutes `symbol` to `strategyName` — writes skills/normal/<symbol>.yaml
- * and hot-swaps the live SkillSelector, no restart needed. If `symbol` isn't
- * yet live-traded, this is also the action that activates it: persists it
- * into configs/app.yaml and hot-adds it to candle streaming/the spread gate
- * (see the response's `newly_activated`). `strategyName` must currently
- * have an active, non-paused StrategyVersion (422 otherwise); 404 if
- * `symbol` has no configs/symbols/<symbol>.yaml. */
-export const assignStrategyToSymbol = (symbol: string, strategyName: string) =>
-  api.put<NormalSkillAssignment>(`/skills/normal/${encodeURIComponent(symbol)}`, {
+/** Activates a new bot on `symbol`, alongside any bots already routed there
+ * — never replaces one (see `updateBotAssignment` to reassign an existing
+ * bot instead). Writes skills/normal/<symbol>/<bot_name>.yaml and hot-swaps
+ * the live SkillSelector, no restart needed. If `symbol` isn't yet
+ * live-traded, this is also the action that activates it: persists it into
+ * configs/app.yaml and hot-adds it to candle streaming/the spread gate (see
+ * the response's `newly_activated`). `strategyName` must currently have an
+ * active, non-paused StrategyVersion (422 otherwise); 404 if `symbol` has no
+ * configs/symbols/<symbol>.yaml; 409 if `botName` is already taken on this
+ * symbol. */
+export const addBotToSymbol = (symbol: string, strategyName: string, botName?: string) =>
+  api.post<NormalSkillAssignment>(`/skills/normal/${encodeURIComponent(symbol)}/bots`, {
     strategy_name: strategyName,
+    bot_name: botName,
   });
+
+/** Reassigns `botName`'s strategy on `symbol` in place, keeping its
+ * sessions/risk_multiplier and leaving every other bot on the symbol
+ * untouched — hot-swaps the live SkillSelector, no restart needed. */
+export const updateBotAssignment = (symbol: string, botName: string, strategyName: string) =>
+  api.put<NormalSkillAssignment>(
+    `/skills/normal/${encodeURIComponent(symbol)}/bots/${encodeURIComponent(botName)}`,
+    { strategy_name: strategyName },
+  );
+
+/** Replaces `botName`'s risk_multiplier, sessions, and per-bot strategy
+ * param/htf_veto overrides in one call — every field is a full replacement,
+ * not a partial patch. Doesn't change which strategy family the bot trades
+ * (see `updateBotAssignment`) — reassigning strategy resets overrides
+ * server-side, since they may not apply to the new strategy's params. */
+export const updateBotConfig = (
+  symbol: string,
+  botName: string,
+  config: {
+    risk_multiplier: number;
+    sessions: SessionWindowWire[];
+    param_overrides: Record<string, ParamValue>;
+    htf_veto_override: boolean | null;
+  },
+) =>
+  api.put<NormalSkillAssignment>(
+    `/skills/normal/${encodeURIComponent(symbol)}/bots/${encodeURIComponent(botName)}/config`,
+    config,
+  );
+
+/** Stops `botName` from trading `symbol` — every other bot on the symbol
+ * keeps trading unaffected. */
+export const removeBotFromSymbol = (symbol: string, botName: string) =>
+  api.delete<void>(
+    `/skills/normal/${encodeURIComponent(symbol)}/bots/${encodeURIComponent(botName)}`,
+  );
 
 // ── AI: 10-trade self-refinement loop (Phase 7, F5) ─────────────────────────
 
@@ -1024,6 +1144,11 @@ export const openOrder = (body: OpenOrderRequest) =>
   api.post<ExecutionResultOut>("/broker/orders", body);
 export const closePosition = (ticket: number, volume?: number) =>
   api.post<ExecutionResultOut>(`/broker/positions/${ticket}/close`, volume ? { volume } : undefined);
+export const closeAllPositions = (symbol: string) =>
+  api.post<ExecutionResultOut[]>(
+    `/broker/positions/close-all?symbol=${encodeURIComponent(symbol)}`,
+    undefined,
+  );
 export const modifyPosition = (ticket: number, sl: number | null, tp: number | null) =>
   api.post<{ status: string }>(`/broker/positions/${ticket}/modify`, { sl, tp });
 export const getPositions = (symbol?: string) =>

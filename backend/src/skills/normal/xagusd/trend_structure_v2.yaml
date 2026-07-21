@@ -1,0 +1,5 @@
+name: normal/xagusd/trend_structure_v2
+symbol: XAGUSD
+strategy: trend_structure_v2
+risk_multiplier: 1.0
+sessions: []

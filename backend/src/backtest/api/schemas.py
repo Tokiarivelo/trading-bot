@@ -83,6 +83,27 @@ class ActivityLogEntryOut(BaseModel):
     message: str = Field(description="The formatted log message, e.g. why a signal was vetoed.")
 
 
+class BacktestSignalOut(BaseModel):
+    """One strategy signal emitted during the replay — including signals that
+    never became trades (vetoed or rejected by the engine). Lets the report
+    page and chart show every valid setup the strategy saw, not only fills."""
+
+    time: int = Field(
+        description="Epoch seconds UTC — the simulated bot clock (bar close time) "
+        "when the strategy emitted this signal."
+    )
+    direction: str = Field(description="'buy' or 'sell'.")
+    outcome: str = Field(
+        description="What the engine did with it: 'opened' (became a trade), "
+        "'htf_veto' (higher-timeframe trend opposed it), 'risk_rejected' (position "
+        "sizing failed the risk caps), 'spread_veto' (spread/RR gate), or 'skipped'."
+    )
+    reason: str = Field(
+        description="The strategy's own reason string — pattern matched, zone rectangle, "
+        "entry/SL/TP lines, confirmations."
+    )
+
+
 class BacktestReportSummaryOut(BaseModel):
     """One report file's headline stats — used by the report list view."""
 
@@ -159,6 +180,37 @@ class BacktestReportDetailOut(BacktestReportSummaryOut):
         "sizing rejections, fills, circuit breakers), oldest first — explains a "
         "zero-trade report. Older report files predating this field return an "
         "empty list.",
+    )
+    signals: list[BacktestSignalOut] = Field(
+        default_factory=list,
+        description="Every signal the strategy emitted during the replay (taken or "
+        "vetoed), oldest first — the structured counterpart of the activity log's "
+        "SIGNAL lines. Older report files predating this field return an empty list.",
+    )
+
+
+class ImportBacktestReportIn(BacktestReportSummaryOut):
+    """Request body for `POST /backtest/reports/import` — the same shape as
+    `BacktestReportDetailOut`. The exact JSON produced by downloading an
+    existing report (`GET /backtest/reports/{id}`) validates against this
+    as-is — including its `id`, which is accepted but ignored, since a
+    fresh id is always assigned from the new file's name — so the trader
+    can always get a valid example by downloading one."""
+
+    id: str | None = Field(
+        default=None,
+        exclude=True,
+        description="Ignored if present — a new id is always assigned from the import.",
+    )
+    trades: list[BacktestTradeOut]
+    equity_curve: list[EquityPointOut]
+    activity_log: list[ActivityLogEntryOut] = Field(
+        default_factory=list,
+        description="Same meaning as BacktestReportDetailOut.activity_log.",
+    )
+    signals: list[BacktestSignalOut] = Field(
+        default_factory=list,
+        description="Same meaning as BacktestReportDetailOut.signals.",
     )
 
 

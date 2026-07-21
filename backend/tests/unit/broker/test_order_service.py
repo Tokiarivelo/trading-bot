@@ -180,12 +180,43 @@ async def test_open_position_fills_and_publishes_event():
     assert event.spread_points == 25
 
 
-async def test_spread_veto_blocks_order_and_publishes_nothing():
+async def test_broker_rejection_propagates_and_is_logged(caplog):
+    # Regression: a broker/MT5-level rejection (stops too close, market
+    # closed, filling mode, ...) — as opposed to the spread/RR gate above —
+    # used to propagate silently with no log line at all, making a live
+    # engine's failed entries invisible in the activity log.
+    class RejectingBroker(FakeBroker):
+        async def open_position(self, order):
+            raise OrderRejected("invalid stops")
+
+    service, broker, _, published = make_service(RejectingBroker())
+    with caplog.at_level("INFO"), pytest.raises(OrderRejected, match="invalid stops"):
+        await service.open_position("XAUUSD", Side.BUY, 0.1, sl=2390.0, tp=2420.0)
+
+    assert published == []
+    assert "ENTRY REJECTED (broker)" in caplog.text
+    assert "invalid stops" in caplog.text
+
+
+async def test_spread_veto_blocks_order_and_publishes_nothing(caplog):
     service, broker, _, published = make_service()
-    with pytest.raises(OrderRejected):
-        await service.open_position("XAUUSD", Side.BUY, 0.1, sl=2399.0, tp=2400.5)
+    with caplog.at_level("INFO"), pytest.raises(OrderRejected):
+        await service.open_position(
+            "XAUUSD",
+            Side.BUY,
+            0.1,
+            sl=2399.0,
+            tp=2400.5,
+            strategy_version="fake:v1",
+            skill="normal/xauusd/fake",
+        )
     assert broker.opened == []
     assert published == []
+    # Regression: the spread/RR-gate rejection previously carried no bot
+    # attribution, unlike every other money-touching log line — needed so a
+    # live signal viewer can tell which bot's attempt this was.
+    assert "strategy=fake:v1" in caplog.text
+    assert "skill=normal/xauusd/fake" in caplog.text
 
 
 async def test_open_position_without_sl_tp_skips_rr_check():
@@ -207,6 +238,64 @@ async def test_close_position_publishes_event_with_profit():
     assert isinstance(event, PositionClosed)
     assert event.profit == -25.0
     assert event.close_price == 2400.10
+
+
+async def test_close_all_positions_closes_every_open_position_on_symbol():
+    class MultiPositionBroker(FakeBroker):
+        async def get_positions(self, symbol=None):
+            return [
+                Position(
+                    ticket=t,
+                    symbol="XAUUSD",
+                    side=Side.BUY,
+                    volume=0.1,
+                    open_price=2400.35,
+                    sl=None,
+                    tp=None,
+                    open_time=datetime.now(UTC),
+                    profit=0.0,
+                )
+                for t in (1, 2, 3)
+            ]
+
+    service, broker, _, published = make_service(MultiPositionBroker())
+    results = await service.close_all_positions("XAUUSD")
+    assert [r.ticket for r in results] == [1, 2, 3]
+    assert broker.closed == [(1, None), (2, None), (3, None)]
+    assert len([e for e in published if isinstance(e, PositionClosed)]) == 3
+
+
+async def test_close_all_positions_skips_rejected_tickets_and_continues(caplog):
+    # A ticket the broker refuses to close (e.g. already closed server-side)
+    # must not abort the rest of the batch — the point of "close all" is to
+    # get as many closed as possible, not to guarantee atomicity.
+    class PartiallyRejectingBroker(FakeBroker):
+        async def get_positions(self, symbol=None):
+            return [
+                Position(
+                    ticket=t,
+                    symbol="XAUUSD",
+                    side=Side.BUY,
+                    volume=0.1,
+                    open_price=2400.35,
+                    sl=None,
+                    tp=None,
+                    open_time=datetime.now(UTC),
+                    profit=0.0,
+                )
+                for t in (1, 2)
+            ]
+
+        async def close_position(self, ticket, volume=None):
+            if ticket == 1:
+                raise OrderRejected("broker refused")
+            return await super().close_position(ticket, volume)
+
+    service, broker, _, published = make_service(PartiallyRejectingBroker())
+    with caplog.at_level("INFO"):
+        results = await service.close_all_positions("XAUUSD")
+    assert [r.ticket for r in results] == [2]
+    assert "close-all skipped ticket=1" in caplog.text
 
 
 async def test_modify_position_delegates_to_broker():

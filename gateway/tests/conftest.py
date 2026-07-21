@@ -17,7 +17,7 @@ from gateway.main import app
 
 class FakePosition:
     def __init__(
-        self, ticket, symbol, type_, volume, price_open, sl, tp, time, profit, comment=""
+        self, ticket, symbol, type_, volume, price_open, sl, tp, time, profit, comment="", magic=0
     ) -> None:
         self.ticket = ticket
         self.symbol = symbol
@@ -29,6 +29,7 @@ class FakePosition:
         self.time = time
         self.profit = profit
         self.comment = comment
+        self.magic = magic
 
 
 class FakePendingOrder:
@@ -257,6 +258,7 @@ class FakeMt5:
             time=1_752_100_812,
             profit=12.5,
             comment=request.get("comment", ""),
+            magic=request.get("magic", 0),
         )
         return SimpleNamespace(
             retcode=self.TRADE_RETCODE_DONE,

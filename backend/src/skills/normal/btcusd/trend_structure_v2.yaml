@@ -1,0 +1,5 @@
+name: normal/btcusd/trend_structure_v2
+symbol: BTCUSD
+strategy: trend_structure_v2
+risk_multiplier: 1.0
+sessions: []

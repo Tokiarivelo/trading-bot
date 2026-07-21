@@ -148,7 +148,8 @@ def test_evaluate_populates_zone_pattern_structure_on_signal():
 
     # The tighter M1 risk params actually took effect on this signal.
     assert signal.sl_points > 0
-    expected_tp = signal.sl_points * strategy.spec.params["reward_risk_ratio"]
+    spread_distance = 20.0 * 0.01  # ctx.spread_points * Volatility 75 Index point size
+    expected_tp = (signal.sl_points + spread_distance) * strategy.spec.params["reward_risk_ratio"]
     assert signal.tp_points == pytest.approx(expected_tp)
 
 

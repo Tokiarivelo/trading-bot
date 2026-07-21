@@ -240,6 +240,7 @@ class Mt5Client:
         sl: float | None,
         tp: float | None,
         comment: str,
+        magic: int = 0,
     ) -> dict[str, Any]:
         self._require_connection()
         self._select(symbol)
@@ -259,6 +260,7 @@ class Mt5Client:
             "tp": tp or 0.0,
             "deviation": 20,
             "comment": comment,
+            "magic": magic,
             "type_time": mt5.ORDER_TIME_GTC,
             "type_filling": self._filling_type(symbol),
         }
@@ -280,6 +282,7 @@ class Mt5Client:
             "time": int(tick.time),
             "spread_points": int(mt5.symbol_info(symbol).spread),
             "comment": comment,
+            "magic": magic,
             "profit": None,
         }
 
@@ -572,6 +575,7 @@ class Mt5Client:
             "open_time": int(p.time),
             "profit": float(p.profit),
             "comment": p.comment,
+            "magic": int(p.magic),
         }
 
     # ── internals ───────────────────────────────────────────────────────

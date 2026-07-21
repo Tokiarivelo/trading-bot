@@ -11,6 +11,7 @@
 
 import { useEffect, useState } from "react";
 import { AllOrdersPanel } from "./AllOrdersPanel";
+import type { AllPositions } from "./useAllPositions";
 
 type DockPosition = "top" | "bottom" | "left" | "right";
 
@@ -46,7 +47,20 @@ function readVisible(): boolean {
   }
 }
 
-export function OrdersDock({ children }: { children: React.ReactNode }) {
+export function OrdersDock({
+  children,
+  allPositions,
+  selectedTicket = null,
+  onSelectTicket,
+  onClearSelection,
+}: {
+  children: React.ReactNode;
+  allPositions: AllPositions;
+  /** Forwarded straight through to AllOrdersPanel — see its own prop doc. */
+  selectedTicket?: number | null;
+  onSelectTicket?: (ticket: number, symbol: string) => void;
+  onClearSelection?: () => void;
+}) {
   // Read persisted state after mount (not in useState initializers) so
   // server-rendered and first-client-render markup match — localStorage
   // isn't available during SSR.
@@ -100,7 +114,12 @@ export function OrdersDock({ children }: { children: React.ReactNode }) {
             }`
       }
     >
-      <AllOrdersPanel />
+      <AllOrdersPanel
+        allPositions={allPositions}
+        selectedTicket={selectedTicket}
+        onSelectTicket={onSelectTicket}
+        onClearSelection={onClearSelection}
+      />
     </div>
   );
 

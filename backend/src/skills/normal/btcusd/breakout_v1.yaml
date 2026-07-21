@@ -1,5 +1,5 @@
 # Default trading behavior for BTCUSD — sessions mirror configs/symbols/btcusd.yaml.
-name: normal/btcusd
+name: normal/btcusd/breakout_v1
 symbol: BTCUSD
 strategy: breakout_v1
 risk_multiplier: 1.0

@@ -1,0 +1,5 @@
+name: normal/xauusd/pob_snd_zones_xauusd
+symbol: XAUUSD
+strategy: pob_snd_zones_xauusd
+risk_multiplier: 1.0
+sessions: []

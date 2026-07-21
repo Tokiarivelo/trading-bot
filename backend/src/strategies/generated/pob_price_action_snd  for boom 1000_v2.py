@@ -3,6 +3,12 @@ import pandas as pd
 
 from src.strategies.domain.models import Direction, MarketContext, Signal, StrategySpec
 
+# Boom 1000 Index point size (configs/symbols/boom 1000 index.yaml) — converts
+# ctx.spread_points (raw broker points) into a price distance so
+# reward_risk_ratio below is applied to (sl + spread), not sl alone — the
+# same floor SpreadGate enforces at the broker gate (tp >= min_rr * (sl + spread)).
+POINT_VALUE = 0.0001
+
 # Perf note: helpers below operate on numpy arrays extracted once per
 # evaluate() (`df[col].to_numpy()`) instead of per-element `.iloc` reads —
 # the math, comparisons, and results are identical, but a backtest calls
@@ -301,7 +307,8 @@ class PobPriceActionSnd:
             structural_dist = structural_level - entry_price
 
         sl_points = max(structural_dist, atr_val * params["sl_atr_mult"])
-        tp_points = sl_points * params["reward_risk_ratio"]
+        spread_price = float(ctx.spread_points) * POINT_VALUE
+        tp_points = (sl_points + spread_price) * params["reward_risk_ratio"]
 
         if direction == Direction.BUY:
             sl_price = entry_price - sl_points

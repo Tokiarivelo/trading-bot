@@ -18,3 +18,20 @@ class LogEntry:
     level: str
     logger: str
     message: str
+
+
+@dataclass(frozen=True, kw_only=True)
+class BotSignal:
+    """One strategy signal a live bot emitted — including ones that never
+    became a trade (vetoed or rejected). Reconstructed from this bot's own
+    `LogEntry` decision-trail lines (see `application/bot_signals.py`), the
+    live analog of `backtest.domain.models.BacktestSignal` — kept as a
+    separate type rather than importing that one so `activity` doesn't reach
+    into the `backtest` module's internals (see CLAUDE.md)."""
+
+    time: datetime
+    direction: str  # "buy" | "sell"
+    outcome: str
+    """"opened" | "htf_veto" | "risk_rejected" | "spread_veto" | "broker_rejected"
+    | "skipped" (no outcome line followed within the queried window)."""
+    reason: str  # the strategy's own Signal.reason (pattern, zone, entry/sl/tp lines)

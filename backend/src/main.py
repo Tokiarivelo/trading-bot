@@ -16,6 +16,7 @@ Interactive API docs (generated from the `response_model`/`summary`/
 
 from __future__ import annotations
 
+import logging
 from contextlib import asynccontextmanager
 
 import socketio
@@ -30,6 +31,7 @@ from src.ai.api.routes_settings import router as ai_settings_router
 from src.backtest.api.routes import router as backtest_router
 from src.broker.api.routes import router as account_router
 from src.broker.api.trading_routes import router as trading_router
+from src.broker.domain.account import BrokerUnavailable
 from src.container import build_container
 from src.engine.api.routes import router as engine_router
 from src.indicators.api.routes import router as indicators_router
@@ -43,6 +45,9 @@ from src.shared.config.settings import Settings, load_yaml_config
 from src.shared.logging.setup import configure_logging
 from src.skills.api.routes import router as skills_router
 from src.strategies.api.routes import router as strategies_router
+
+logger = logging.getLogger(__name__)
+
 
 API_DESCRIPTION = """
 REST + WebSocket API for the AI trading bot backend.
@@ -176,10 +181,17 @@ async def lifespan(app: FastAPI):
     bind_auth(container.session_issuer, lambda: container.settings.app_password)
     # Reconnect with stored credentials if the gateway is already up, then
     # start the candle streams — they idle harmlessly until login succeeds.
-    await container.account.reconnect_from_stored()
-    # Catch any broker-side close (SL/TP fill) that happened while the
-    # backend was down — see broker/application/reconciliation.py.
-    await container.reconciliation.reconcile_all()
+    if await container.account.reconnect_from_stored():
+        # Catch any broker-side close (SL/TP fill) that happened while the
+        # backend was down — see broker/application/reconciliation.py.
+        try:
+            await container.reconciliation.reconcile_all()
+        except BrokerUnavailable as exc:
+            logger.warning("reconciliation failed at startup (broker unavailable): %s", exc)
+    else:
+        logger.info(
+            "reconnect from stored credentials skipped or failed; skipping startup reconciliation"
+        )
     container.candle_stream.start()
     container.live_candle.start()
     container.news_window_service.start()
@@ -224,9 +236,6 @@ class HealthOut(BaseModel):
 class EngineConfigOut(BaseModel):
     enabled: bool = Field(description="Whether the automated trade loop runs at all.")
     entry_timeframe: str = Field(description="Timeframe the engine looks for entries on.")
-    confirmation_timeframes: list[str] = Field(
-        description="Higher timeframes used for multi-timeframe trend confirmation."
-    )
 
 
 class AppConfigOut(BaseModel):

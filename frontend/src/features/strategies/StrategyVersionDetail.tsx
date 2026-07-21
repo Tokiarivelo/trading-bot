@@ -13,6 +13,7 @@ import { downloadJson } from "@/shared/utils/download";
 import { CodeEditorPanel } from "./CodeEditorPanel";
 import { DuplicateVersionForm } from "./DuplicateVersionForm";
 import { RenameVersionInline } from "./RenameVersionInline";
+import { SpecSnapshotPanel } from "./SpecSnapshotPanel";
 import { StatusBadge } from "./StatusBadge";
 import { VersionLifecycleActions } from "./VersionLifecycleActions";
 
@@ -116,46 +117,7 @@ export function StrategyVersionDetail({ versionId }: { versionId: string }) {
       </div>
 
       {version.spec && (
-        <section className="rounded-md border border-line bg-panel p-3 text-sm">
-          <header className="mb-2 text-ink-muted">Spec snapshot</header>
-          <dl className="grid gap-x-4 gap-y-1 sm:grid-cols-2">
-            <Row label="Symbols" value={version.spec.symbols.join(", ")} />
-            <Row label="Entry timeframe" value={version.spec.entry_timeframe} />
-            <Row
-              label="Confirmation timeframes"
-              value={version.spec.confirmation_timeframes.join(", ")}
-            />
-            <Row
-              label="Indicators"
-              value={
-                version.spec.indicators.map((i) => i.label).join(", ") || "—"
-              }
-            />
-            {version.spec.unrecognized_indicators.length > 0 && (
-              <Row
-                label="Other indicators (not charted)"
-                value={version.spec.unrecognized_indicators.join(", ")}
-              />
-            )}
-            {version.spec.price_levels.length > 0 && (
-              <Row
-                label="Price levels"
-                value={version.spec.price_levels
-                  .map((l) => `${l.type} @ ${l.price}`)
-                  .join(", ")}
-              />
-            )}
-            {version.spec.chart_notes.length > 0 && (
-              <Row label="Chart notes" value={version.spec.chart_notes.join(", ")} />
-            )}
-          </dl>
-          <p className="mt-2 whitespace-pre-wrap text-ink-muted">
-            <strong className="text-ink">Entry:</strong> {version.spec.entry_rules}
-          </p>
-          <p className="mt-1 whitespace-pre-wrap text-ink-muted">
-            <strong className="text-ink">Exit:</strong> {version.spec.exit_rules}
-          </p>
-        </section>
+        <SpecSnapshotPanel versionId={version.id} spec={version.spec} onSaved={load} />
       )}
 
       <CodeEditorPanel
@@ -164,15 +126,6 @@ export function StrategyVersionDetail({ versionId }: { versionId: string }) {
         code={version.code}
         spec={version.spec}
       />
-    </div>
-  );
-}
-
-function Row({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="flex justify-between gap-2 sm:block">
-      <dt className="text-xs text-ink-muted">{label}</dt>
-      <dd className="truncate">{value}</dd>
     </div>
   );
 }

@@ -12,6 +12,7 @@ from fastapi import APIRouter, File, Form, HTTPException, Path, Request, UploadF
 
 from src.ai.api.schemas import (
     CreateDraftFromPromptIn,
+    CreateDraftFromSpecIn,
     GeneratedCodeOut,
     StrategyDraftOut,
     UpdateDraftSpecIn,
@@ -121,6 +122,31 @@ async def create_draft_from_prompt(
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except LLMCallError as exc:
         raise HTTPException(status_code=504, detail=str(exc)) from exc
+    return StrategyDraftOut.from_domain(draft)
+
+
+@router.post(
+    "/from-spec",
+    response_model=StrategyDraftOut,
+    summary="Create a StrategySpec draft directly from structured JSON, no LLM call",
+    description=(
+        "Skips extraction entirely: `spec` becomes the draft's `extracted_spec` as-is — "
+        "use this when the trading method is already available as JSON matching "
+        "`ExtractedStrategySpecSchema` (e.g. downloaded from another draft or strategy "
+        "version and re-worked). Same human-gated pipeline as PDF/prompt upload: never "
+        "generates code and never touches the strategy registry; the draft must still be "
+        "reviewed, optionally edited (`PATCH .../drafts/{id}`), and approved "
+        "(`POST .../drafts/{id}/approve`) before `POST .../drafts/{id}/generate-code` can "
+        "run. If `symbol` is given, it overrides `spec.symbols` in `edited_spec`, same as "
+        "PDF upload's `symbol` field."
+    ),
+)
+async def create_draft_from_spec_json(
+    request: Request, body: CreateDraftFromSpecIn
+) -> StrategyDraftOut:
+    draft = await _service(request).create_draft_from_spec(
+        body.spec.to_domain(), symbol=body.symbol or None
+    )
     return StrategyDraftOut.from_domain(draft)
 
 

@@ -52,9 +52,9 @@ export function EngineControlPanel() {
         <span
           className={`rounded px-2 py-0.5 text-xs font-bold ${
             status.paused
-              ? "bg-err text-[#2b0808]"
+              ? "bg-err text-white"
               : status.enabled
-                ? "bg-ok text-[#04211e]"
+                ? "bg-ok text-white"
                 : "bg-line text-ink-muted"
           }`}
         >
@@ -79,7 +79,7 @@ export function EngineControlPanel() {
           <button
             onClick={handleResume}
             disabled={busy}
-            className="flex-1 cursor-pointer rounded bg-ok px-2 py-1 font-bold text-[#04211e] disabled:opacity-50"
+            className="flex-1 cursor-pointer rounded bg-ok px-2 py-1 font-bold text-white disabled:opacity-50"
           >
             Resume
           </button>
@@ -87,7 +87,7 @@ export function EngineControlPanel() {
           <button
             onClick={handleKill}
             disabled={busy}
-            className="flex-1 cursor-pointer rounded bg-err px-2 py-1 font-bold text-[#2b0808] disabled:opacity-50"
+            className="flex-1 cursor-pointer rounded bg-err px-2 py-1 font-bold text-white disabled:opacity-50"
           >
             Kill Switch
           </button>

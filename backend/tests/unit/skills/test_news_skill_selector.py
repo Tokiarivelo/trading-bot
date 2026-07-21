@@ -15,13 +15,13 @@ EVENT_TIME = datetime(2026, 7, 11, 12, 30, tzinfo=UTC)
 
 
 class FakeNormalSelector:
-    def __init__(self, decision: SkillDecision) -> None:
-        self.decision = decision
+    def __init__(self, decisions: list[SkillDecision]) -> None:
+        self.decisions = decisions
         self.calls: list[tuple[str, datetime]] = []
 
-    def select(self, symbol: str, now: datetime | None = None) -> SkillDecision:
+    def select_all(self, symbol: str, now: datetime | None = None) -> list[SkillDecision]:
         self.calls.append((symbol, now))
-        return self.decision
+        return self.decisions
 
 
 class FakeWindowSource:
@@ -69,25 +69,40 @@ def make_skill(
 
 
 def test_no_active_window_falls_through_to_normal():
-    normal_decision = SkillDecision(
-        allowed=True, skill_name="normal/xauusd", strategy_name="breakout_v1"
-    )
-    normal = FakeNormalSelector(normal_decision)
+    normal_decisions = [
+        SkillDecision(
+            allowed=True, skill_name="normal/xauusd/breakout_v1", strategy_name="breakout_v1"
+        )
+    ]
+    normal = FakeNormalSelector(normal_decisions)
     selector = NewsSkillSelector(normal, {}, FakeWindowSource(None))
 
-    decision = selector.select("XAUUSD", EVENT_TIME)
+    decisions = selector.select_all("XAUUSD", EVENT_TIME)
 
-    assert decision is normal_decision
+    assert decisions is normal_decisions
     assert normal.calls == [("XAUUSD", EVENT_TIME)]
+
+
+def test_no_active_window_falls_through_with_multiple_bots():
+    normal_decisions = [
+        SkillDecision(allowed=True, skill_name="normal/xauusd/a", strategy_name="a"),
+        SkillDecision(allowed=True, skill_name="normal/xauusd/b", strategy_name="b"),
+    ]
+    normal = FakeNormalSelector(normal_decisions)
+    selector = NewsSkillSelector(normal, {}, FakeWindowSource(None))
+
+    decisions = selector.select_all("XAUUSD", EVENT_TIME)
+
+    assert decisions is normal_decisions
 
 
 def test_pre_event_blocks_new_entries_when_configured():
     window = make_window()
     skill = make_skill(block_new_entries=True)
-    normal = FakeNormalSelector(SkillDecision(allowed=True, strategy_name="breakout_v1"))
+    normal = FakeNormalSelector([SkillDecision(allowed=True, strategy_name="breakout_v1")])
     selector = NewsSkillSelector(normal, {"nfp": skill}, FakeWindowSource(window))
 
-    decision = selector.select("XAUUSD", EVENT_TIME - timedelta(minutes=10))
+    (decision,) = selector.select_all("XAUUSD", EVENT_TIME - timedelta(minutes=10))
 
     assert not decision.allowed
     assert decision.skill_name == "nfp"
@@ -98,22 +113,22 @@ def test_pre_event_blocks_new_entries_when_configured():
 def test_pre_event_falls_through_when_not_blocking():
     window = make_window()
     skill = make_skill(block_new_entries=False)
-    normal_decision = SkillDecision(allowed=True, strategy_name="breakout_v1")
-    normal = FakeNormalSelector(normal_decision)
+    normal_decisions = [SkillDecision(allowed=True, strategy_name="breakout_v1")]
+    normal = FakeNormalSelector(normal_decisions)
     selector = NewsSkillSelector(normal, {"nfp": skill}, FakeWindowSource(window))
 
-    decision = selector.select("XAUUSD", EVENT_TIME - timedelta(minutes=10))
+    decisions = selector.select_all("XAUUSD", EVENT_TIME - timedelta(minutes=10))
 
-    assert decision is normal_decision
+    assert decisions is normal_decisions
 
 
 def test_post_event_blocks_during_wait_candles_cooldown():
     window = make_window()
     skill = make_skill(wait_candles_m5=3)  # 15 minute cooldown
-    normal = FakeNormalSelector(SkillDecision(allowed=True, strategy_name="breakout_v1"))
+    normal = FakeNormalSelector([SkillDecision(allowed=True, strategy_name="breakout_v1")])
     selector = NewsSkillSelector(normal, {"nfp": skill}, FakeWindowSource(window))
 
-    decision = selector.select("XAUUSD", EVENT_TIME + timedelta(minutes=10))
+    (decision,) = selector.select_all("XAUUSD", EVENT_TIME + timedelta(minutes=10))
 
     assert not decision.allowed
     assert "cooldown" in decision.reason
@@ -123,61 +138,87 @@ def test_post_event_blocks_during_wait_candles_cooldown():
 def test_post_event_after_cooldown_uses_strategy_override():
     window = make_window()
     skill = make_skill(wait_candles_m5=3, strategy_override="news_breakout", max_spread_points=80)
-    normal = FakeNormalSelector(SkillDecision(allowed=True, strategy_name="breakout_v1"))
+    normal = FakeNormalSelector([SkillDecision(allowed=True, strategy_name="breakout_v1")])
     selector = NewsSkillSelector(normal, {"nfp": skill}, FakeWindowSource(window))
 
-    decision = selector.select("XAUUSD", EVENT_TIME + timedelta(minutes=16))
+    (decision,) = selector.select_all("XAUUSD", EVENT_TIME + timedelta(minutes=16))
 
     assert decision.allowed
     assert decision.strategy_name == "news_breakout"
     assert decision.risk_multiplier == 0.5
     assert decision.max_spread_points == 80
+    assert decision.magic != 0
     assert normal.calls == []  # override never needs the normal skill
 
 
 def test_post_event_after_cooldown_without_override_falls_back_to_normal_strategy():
     window = make_window()
     skill = make_skill(wait_candles_m5=0, strategy_override="", max_spread_points=80)
-    normal = FakeNormalSelector(SkillDecision(allowed=True, strategy_name="breakout_v1"))
+    normal = FakeNormalSelector(
+        [SkillDecision(allowed=True, strategy_name="breakout_v1", magic=123)]
+    )
     selector = NewsSkillSelector(normal, {"nfp": skill}, FakeWindowSource(window))
 
-    decision = selector.select("XAUUSD", EVENT_TIME + timedelta(minutes=1))
+    (decision,) = selector.select_all("XAUUSD", EVENT_TIME + timedelta(minutes=1))
 
     assert decision.allowed
     assert decision.strategy_name == "breakout_v1"  # from the normal skill
     assert decision.risk_multiplier == 0.5  # from the news skill's post_event rules
     assert decision.max_spread_points == 80
+    assert decision.magic == 123  # preserved from the underlying bot's own decision
+
+
+def test_post_event_after_cooldown_without_override_maps_every_bot():
+    window = make_window()
+    skill = make_skill(wait_candles_m5=0, strategy_override="", max_spread_points=80)
+    normal = FakeNormalSelector(
+        [
+            SkillDecision(allowed=True, skill_name="normal/xauusd/a", strategy_name="a"),
+            SkillDecision(allowed=False, skill_name="normal/xauusd/b", reason="outside session"),
+        ]
+    )
+    selector = NewsSkillSelector(normal, {"nfp": skill}, FakeWindowSource(window))
+
+    decisions = selector.select_all("XAUUSD", EVENT_TIME + timedelta(minutes=1))
+
+    allowed = next(d for d in decisions if d.skill_name == "normal/xauusd/a")
+    blocked = next(d for d in decisions if d.skill_name == "normal/xauusd/b")
+    assert allowed.risk_multiplier == 0.5
+    assert allowed.max_spread_points == 80
+    # A blocked bot stays blocked — the news override doesn't resurrect it.
+    assert blocked.allowed is False
+    assert blocked.reason == "outside session"
 
 
 def test_post_event_returns_normal_blocked_decision_when_no_override():
     window = make_window()
     skill = make_skill(wait_candles_m5=0, strategy_override="")
-    blocked = SkillDecision(allowed=False, reason="outside trading session")
+    blocked = [SkillDecision(allowed=False, reason="outside trading session")]
     normal = FakeNormalSelector(blocked)
     selector = NewsSkillSelector(normal, {"nfp": skill}, FakeWindowSource(window))
 
-    decision = selector.select("XAUUSD", EVENT_TIME + timedelta(minutes=1))
+    decisions = selector.select_all("XAUUSD", EVENT_TIME + timedelta(minutes=1))
 
-    assert decision is blocked
+    assert decisions == blocked
 
 
 def test_zero_max_spread_points_means_no_override():
     window = make_window()
     skill = make_skill(wait_candles_m5=0, strategy_override="news_breakout", max_spread_points=0)
-    normal = FakeNormalSelector(SkillDecision(allowed=True, strategy_name="breakout_v1"))
+    normal = FakeNormalSelector([SkillDecision(allowed=True, strategy_name="breakout_v1")])
     selector = NewsSkillSelector(normal, {"nfp": skill}, FakeWindowSource(window))
 
-    decision = selector.select("XAUUSD", EVENT_TIME + timedelta(minutes=1))
+    (decision,) = selector.select_all("XAUUSD", EVENT_TIME + timedelta(minutes=1))
 
     assert decision.max_spread_points is None
 
 
 def test_unregistered_skill_falls_through_to_normal():
     window = make_window(skill="unknown")
-    normal_decision = SkillDecision(allowed=True, strategy_name="breakout_v1")
-    normal = FakeNormalSelector(normal_decision)
+    normal_decisions = [SkillDecision(allowed=True, strategy_name="breakout_v1")]
+    normal = FakeNormalSelector(normal_decisions)
     selector = NewsSkillSelector(normal, {}, FakeWindowSource(window))
 
-    decision = selector.select("XAUUSD", EVENT_TIME)
+    decisions = selector.select_all("XAUUSD", EVENT_TIME)
 
-    assert decision is normal_decision
+    assert decisions is normal_decisions

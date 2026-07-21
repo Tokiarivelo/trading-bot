@@ -25,6 +25,9 @@ class OrderRequest:
     sl: float | None = None
     tp: float | None = None
     comment: str = ""
+    magic: int = 0
+    """MT5 magic number identifying which bot placed this order — 0 for
+    manually/API-placed orders with no bot attribution."""
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -65,6 +68,9 @@ class Position:
     open_time: datetime
     profit: float
     comment: str = ""
+    magic: int = 0
+    """Which bot opened this position, per `OrderRequest.magic` — 0 for
+    manually/API-placed positions."""
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -79,6 +85,7 @@ class ExecutionResult:
     time: datetime
     spread_points: int
     comment: str = ""
+    magic: int = 0
     profit: float | None = None  # populated on close fills; None on open fills
 
 

@@ -10,6 +10,7 @@
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import { ApiError, createStrategyDraftFromText } from "@/shared/api/client";
+import { StrategyJsonUploadForm } from "./StrategyJsonUploadForm";
 import { StrategyUploadForm } from "./StrategyUploadForm";
 import { SymbolMultiSelect } from "./SymbolMultiSelect";
 
@@ -141,13 +142,19 @@ function PromptTab() {
   );
 }
 
+const TAB_LABELS = {
+  prompt: "✍️ Prompt Engine",
+  pdf: "📄 PDF spec upload",
+  json: "🧾 JSON spec upload",
+} as const;
+
 export function GenerateBotForm() {
-  const [tab, setTab] = useState<"prompt" | "pdf">("prompt");
+  const [tab, setTab] = useState<"prompt" | "pdf" | "json">("prompt");
 
   return (
     <div className="flex flex-col gap-4">
       <div className="flex p-0.5 rounded-lg bg-panel border border-line self-start">
-        {(["prompt", "pdf"] as const).map((t) => (
+        {(Object.keys(TAB_LABELS) as (keyof typeof TAB_LABELS)[]).map((t) => (
           <button
             key={t}
             type="button"
@@ -158,11 +165,17 @@ export function GenerateBotForm() {
             }`}
             onClick={() => setTab(t)}
           >
-            {t === "prompt" ? "✍️ Prompt Engine" : "📄 PDF spec upload"}
+            {TAB_LABELS[t]}
           </button>
         ))}
       </div>
-      {tab === "prompt" ? <PromptTab /> : <StrategyUploadForm />}
+      {tab === "prompt" ? (
+        <PromptTab />
+      ) : tab === "pdf" ? (
+        <StrategyUploadForm />
+      ) : (
+        <StrategyJsonUploadForm />
+      )}
     </div>
   );
 }

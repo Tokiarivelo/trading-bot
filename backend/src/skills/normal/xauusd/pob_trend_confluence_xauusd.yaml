@@ -1,0 +1,5 @@
+name: normal/xauusd/pob_trend_confluence_xauusd
+symbol: XAUUSD
+strategy: pob_trend_confluence_xauusd
+risk_multiplier: 1.0
+sessions: []

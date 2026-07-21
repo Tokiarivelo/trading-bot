@@ -44,6 +44,7 @@ from src.shared.events.bus import EventBus
 from src.shared.events.definitions import CandleClosed, PositionClosed, PositionOpened
 from src.skills.application.skill_selector import SkillSelector
 from src.skills.domain.models import NormalSkill
+from src.strategies.domain.models import Direction, MarketContext, Signal, StrategySpec
 from src.strategies.generated.breakout_v1 import BreakoutV1
 from src.strategies.registry import StrategyRegistry
 
@@ -70,9 +71,10 @@ RISK_CAPS = RiskCaps(
 
 
 def make_fake_gateway() -> FastAPI:
-    """M5 candles form a clean 20-bar range followed by a breakout bar; H1/H4
-    only get a handful of bars so `mtf_confirm` skips (insufficient history)
-    instead of vetoing on trend."""
+    """M5 candles form a clean 20-bar range followed by a breakout bar; every
+    other timeframe (including each bot's own HTF-veto timeframe) only gets a
+    handful of bars so `mtf_confirm` skips (insufficient history) instead of
+    vetoing on trend."""
     gw = FastAPI()
     account = {
         "login": 123456,
@@ -150,6 +152,28 @@ def make_fake_gateway() -> FastAPI:
     return gw
 
 
+class M1ScalpProbe:
+    """M1-entry probe bot: signals only when the engine actually handed it M1
+    entry bars and its own M5 confirmation bars — the exact data an M1 scalp
+    strategy (e.g. rbr_dbd_zones_scalp_*) needs live. Never fires on the M5
+    bot's closes, so the existing M5-driven tests still see one position."""
+
+    def __init__(self) -> None:
+        self.spec = StrategySpec(
+            name="m1_probe",
+            version=1,
+            symbols=("XAUUSD",),
+            entry_timeframe="M1",
+            confirmation_timeframes=("M5",),
+            params={},
+        )
+
+    def evaluate(self, ctx: MarketContext) -> Signal | None:
+        if ctx.candles.get("M1") is None or ctx.candles.get("M5") is None:
+            return None
+        return Signal(direction=Direction.BUY, sl_points=10.0, tp_points=17.0, reason="m1 probe")
+
+
 class ContainerForTest:
     def __init__(self, tmp_path):
         gateway_client = httpx.AsyncClient(
@@ -201,11 +225,23 @@ class ContainerForTest:
         position_manager = PositionManager(self.order_service, self.market_data)
         strategy_registry = StrategyRegistry()
         strategy_registry.register("breakout_v1", BreakoutV1())
+        strategy_registry.register("m1_probe", M1ScalpProbe())
         skill_selector = SkillSelector(
             skills={
-                "XAUUSD": NormalSkill(
-                    name="normal/xauusd", symbol="XAUUSD", strategy="breakout_v1", sessions=()
-                )
+                "XAUUSD": [
+                    NormalSkill(
+                        name="normal/xauusd/breakout_v1",
+                        symbol="XAUUSD",
+                        strategy="breakout_v1",
+                        sessions=(),
+                    ),
+                    NormalSkill(
+                        name="normal/xauusd/m1_probe",
+                        symbol="XAUUSD",
+                        strategy="m1_probe",
+                        sessions=(),
+                    ),
+                ]
             },
             timezone="UTC",
         )
@@ -218,7 +254,6 @@ class ContainerForTest:
             skill_selector=skill_selector,
             strategy_source=strategy_registry,
             entry_timeframe="M5",
-            confirmation_timeframes=("H1", "H4"),
             context_bars=30,
         )
         self.event_bus.subscribe(CandleClosed, self.trade_engine.on_candle_closed)
@@ -288,11 +323,27 @@ async def test_candle_close_drives_full_entry_through_the_engine(api):
     trades = (await api.get("/journal/trades", params={"symbol": "XAUUSD"})).json()
     assert len(trades) == 1
     assert trades[0]["strategy_version"] == "breakout_v1:v1"
-    assert trades[0]["skill"] == "normal/xauusd"
+    assert trades[0]["skill"] == "normal/xauusd/breakout_v1"
 
     status = (await api.get("/engine/status")).json()
     assert status["trades_today"] == 1
     assert not status["paused"]
+
+
+async def test_m1_scalp_bot_enters_on_m1_close_through_paper_broker(api):
+    # An M1 candle close must drive the M1-entry bot (and only it) through
+    # the same full paper pipe — skill routing, evaluation with M1 context,
+    # risk sizing, paper order, journal attribution.
+    await api.container.trade_engine.on_candle_closed(CandleClosed(symbol="XAUUSD", timeframe="M1"))
+
+    positions = (await api.get("/broker/positions")).json()
+    assert len(positions) == 1
+    assert positions[0]["symbol"] == "XAUUSD"
+
+    trades = (await api.get("/journal/trades", params={"symbol": "XAUUSD"})).json()
+    assert len(trades) == 1
+    assert trades[0]["strategy_version"] == "m1_probe:v1"
+    assert trades[0]["skill"] == "normal/xauusd/m1_probe"
 
 
 async def test_kill_switch_endpoint_pauses_and_closes_positions(api):

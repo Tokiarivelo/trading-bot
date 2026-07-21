@@ -12,6 +12,25 @@ import { getStrategyVersions, type StrategyVersionSummary } from "@/shared/api/c
 
 const POLL_MS = 5000;
 
+/** Whether `a` and `b` are the same strategy version for the purposes of
+ * anything that reacts to `activeStrategy` changing (chart re-plots) — not a
+ * deep-equal, just the fields that actually change when the active strategy
+ * genuinely changes (a new/edited/(de)activated version), so polling the
+ * same unchanged version doesn't hand out a new object reference. */
+function sameStrategyVersion(
+  a: StrategyVersionSummary | null,
+  b: StrategyVersionSummary | null,
+): boolean {
+  if (a === b) return true;
+  if (a === null || b === null) return false;
+  return (
+    a.id === b.id &&
+    a.code_hash === b.code_hash &&
+    a.status === b.status &&
+    a.paused === b.paused
+  );
+}
+
 export function useActiveStrategyForSymbol(symbol: string): StrategyVersionSummary | null {
   const [activeStrategy, setActiveStrategy] = useState<StrategyVersionSummary | null>(null);
   const symbolRef = useRef(symbol);
@@ -26,7 +45,14 @@ export function useActiveStrategyForSymbol(symbol: string): StrategyVersionSumma
           if (cancelled) return;
           const match =
             versions.find((v) => v.spec?.symbols.includes(symbolRef.current)) ?? null;
-          setActiveStrategy(match);
+          // Keep the previous object reference when nothing meaningful
+          // changed — otherwise every poll (every 5s, for the life of the
+          // chart) hands consumers (ChartPanel's indicator/drawing rebuild
+          // effect) a "new" activeStrategy and triggers a full teardown and
+          // recompute for no reason.
+          setActiveStrategy((prev) =>
+            sameStrategyVersion(prev, match) ? prev : match,
+          );
         })
         .catch(() => {});
     };

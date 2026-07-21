@@ -42,6 +42,12 @@ from src.strategies.domain.models import (
     ZoneKind,
 )
 
+# Volatility 75 Index point size (configs/symbols/volatility 75 index.yaml) —
+# converts ctx.spread_points (raw broker points) into a price distance so
+# reward_risk_ratio below is applied to (sl + spread), not sl alone — the
+# same floor SpreadGate enforces at the broker gate (tp >= min_rr * (sl + spread)).
+POINT_VALUE = 0.01
+
 
 def _true_range(df: pd.DataFrame) -> pd.Series:
     prev_close = df["close"].shift(1)
@@ -413,7 +419,8 @@ class PobSndZonesVix75:
             structural_level = candidate["price_high"] + atr_val * params["sl_zone_buffer_atr_mult"]
             structural_dist = structural_level - close
         sl_points = max(structural_dist, atr_val * params["sl_atr_mult"])
-        tp_points = sl_points * params["reward_risk_ratio"]
+        spread_price = float(ctx.spread_points) * POINT_VALUE
+        tp_points = (sl_points + spread_price) * params["reward_risk_ratio"]
         if demand:
             sl_price, tp_price = close - sl_points, close + tp_points
         else:

@@ -1,5 +1,5 @@
 # Default trading behavior for XAGUSD — sessions mirror configs/symbols/xagusd.yaml.
-name: normal/xagusd
+name: normal/xagusd/breakout_v1
 symbol: XAGUSD
 strategy: breakout_v1
 risk_multiplier: 0.8   # thinner book — trade a bit lighter than gold
