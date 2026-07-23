@@ -28,7 +28,9 @@ async def api(repository):
     service = ActivityLogService(repository)
     app = FastAPI()
     app.include_router(router)
-    app.state.container = SimpleNamespace(activity_log=service)
+    app.state.container = SimpleNamespace(
+        accounts={"default": SimpleNamespace(activity_log=service)}
+    )
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://backend") as client:
         yield client
@@ -57,7 +59,7 @@ def _seed(repository):
 
 
 async def test_returns_all_entries_with_total(api):
-    response = await api.get("/activity/history")
+    response = await api.get("/accounts/default/activity/history")
     assert response.status_code == 200
     body = response.json()
     assert body["total"] == 3
@@ -65,66 +67,72 @@ async def test_returns_all_entries_with_total(api):
 
 
 async def test_filters_by_level(api):
-    response = await api.get("/activity/history", params={"level": "WARNING"})
+    response = await api.get("/accounts/default/activity/history", params={"level": "WARNING"})
     body = response.json()
     assert body["total"] == 1
     assert "spread too wide" in body["items"][0]["message"]
 
 
 async def test_filters_by_logger_substring(api):
-    response = await api.get("/activity/history", params={"logger_contains": "risk_manager"})
+    response = await api.get(
+        "/accounts/default/activity/history", params={"logger_contains": "risk_manager"}
+    )
     body = response.json()
     assert body["total"] == 1
     assert body["items"][0]["message"] == "engine resumed by operator"
 
 
 async def test_filters_by_message_text(api):
-    response = await api.get("/activity/history", params={"q": "XAUUSD"})
+    response = await api.get("/accounts/default/activity/history", params={"q": "XAUUSD"})
     body = response.json()
     assert body["total"] == 2
 
 
 async def test_pagination_limit_offset(api):
-    response = await api.get("/activity/history", params={"limit": 1, "offset": 1})
+    response = await api.get("/accounts/default/activity/history", params={"limit": 1, "offset": 1})
     body = response.json()
     assert body["total"] == 3
     assert body["items"][0]["created_at"] == 200
 
 
 async def test_delete_by_ids_removes_only_given_rows(api):
-    history = await api.get("/activity/history")
+    history = await api.get("/accounts/default/activity/history")
     target_id = next(
         e["id"] for e in history.json()["items"] if e["message"] == "engine resumed by operator"
     )
 
-    response = await api.post("/activity/history/delete-by-ids", json={"ids": [target_id]})
+    response = await api.post(
+        "/accounts/default/activity/history/delete-by-ids", json={"ids": [target_id]}
+    )
 
     assert response.status_code == 200
     assert response.json() == {"deleted": 1}
-    remaining = await api.get("/activity/history")
+    remaining = await api.get("/accounts/default/activity/history")
     assert remaining.json()["total"] == 2
 
 
 async def test_delete_by_ids_requires_at_least_one_id(api):
-    response = await api.post("/activity/history/delete-by-ids", json={"ids": []})
+    response = await api.post("/accounts/default/activity/history/delete-by-ids", json={"ids": []})
     assert response.status_code == 422
 
 
 async def test_delete_by_filter_removes_matching_rows_only(api):
-    response = await api.post("/activity/history/delete-by-filter", json={"level": "WARNING"})
+    response = await api.post(
+        "/accounts/default/activity/history/delete-by-filter", json={"level": "WARNING"}
+    )
 
     assert response.status_code == 200
     assert response.json() == {"deleted": 1}
-    remaining = await api.get("/activity/history")
+    remaining = await api.get("/accounts/default/activity/history")
     assert remaining.json()["total"] == 2
 
 
 async def test_delete_by_filter_with_no_body_fields_deletes_everything(api):
-    response = await api.post("/activity/history/delete-by-filter", json={})
+    response = await api.post("/accounts/default/activity/history/delete-by-filter", json={})
 
     assert response.status_code == 200
     assert response.json() == {"deleted": 3}
-    remaining = await api.get("/activity/history")
+    remaining = await api.get("/accounts/default/activity/history")
     assert remaining.json()["total"] == 0
 
 
@@ -156,7 +164,9 @@ async def test_get_bot_signals_returns_this_bots_signal_trail(api, repository):
         ),
     )
 
-    response = await api.get("/activity/signals", params={"skill": skill, "from": 0})
+    response = await api.get(
+        "/accounts/default/activity/signals", params={"skill": skill, "from": 0}
+    )
 
     assert response.status_code == 200
     (signal,) = response.json()
@@ -166,5 +176,5 @@ async def test_get_bot_signals_returns_this_bots_signal_trail(api, repository):
 
 
 async def test_get_bot_signals_requires_skill_param(api):
-    response = await api.get("/activity/signals")
+    response = await api.get("/accounts/default/activity/signals")
     assert response.status_code == 422

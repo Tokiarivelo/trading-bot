@@ -1,6 +1,9 @@
+import dataclasses
 from datetime import UTC, datetime
 
-from src.engine.application.risk_manager import RiskManager
+import pytest
+
+from src.engine.application.risk_manager import RiskManager, apply_risk_override
 from src.engine.domain.models import RiskCaps
 
 CAPS = RiskCaps(
@@ -118,15 +121,23 @@ def test_size_position_ignores_ceiling_when_fallback_disabled():
 def test_set_min_lot_fallback_updates_caps_live():
     manager = make_manager()  # starts disabled
     decision = manager.size_position(
-        balance=100.0, sl_distance_price=50.0, contract_size=10.0,
-        volume_min=0.01, volume_max=100.0, volume_step=0.01,
+        balance=100.0,
+        sl_distance_price=50.0,
+        contract_size=10.0,
+        volume_min=0.01,
+        volume_max=100.0,
+        volume_step=0.01,
     )
     assert not decision.approved
 
     manager.set_min_lot_fallback(enabled=True, max_risk_per_trade_pct=10.0)
     decision = manager.size_position(
-        balance=100.0, sl_distance_price=50.0, contract_size=10.0,
-        volume_min=0.01, volume_max=100.0, volume_step=0.01,
+        balance=100.0,
+        sl_distance_price=50.0,
+        contract_size=10.0,
+        volume_min=0.01,
+        volume_max=100.0,
+        volume_step=0.01,
     )
     assert decision.approved
     assert decision.volume == 0.01
@@ -136,8 +147,12 @@ def test_set_min_lot_fallback_updates_caps_live():
 
     manager.set_min_lot_fallback(enabled=False, max_risk_per_trade_pct=None)
     decision = manager.size_position(
-        balance=100.0, sl_distance_price=50.0, contract_size=10.0,
-        volume_min=0.01, volume_max=100.0, volume_step=0.01,
+        balance=100.0,
+        sl_distance_price=50.0,
+        contract_size=10.0,
+        volume_min=0.01,
+        volume_max=100.0,
+        volume_step=0.01,
     )
     assert not decision.approved
 
@@ -244,3 +259,74 @@ def test_daily_counters_reset_on_new_day():
     assert manager.status.trades_today == 1
     manager.record_trade_opened(day_two)
     assert manager.status.trades_today == 1  # reset, then incremented once
+
+
+GLOBAL_CAPS = RiskCaps(
+    risk_per_trade_pct=0.5,
+    daily_loss_limit_pct=50.0,
+    max_open_positions=100,
+    max_trades_per_day=100,
+    consecutive_loss_pause=10,
+    min_lot_fallback_enabled=True,
+    max_risk_per_trade_pct=2.0,
+)
+
+
+def test_apply_risk_override_tightens_numeric_caps():
+    result = apply_risk_override(
+        GLOBAL_CAPS,
+        {"risk_per_trade_pct": 0.25, "max_open_positions": 5, "max_trades_per_day": 20},
+    )
+    assert result.risk_per_trade_pct == 0.25
+    assert result.max_open_positions == 5
+    assert result.max_trades_per_day == 20
+    # untouched fields keep the global value
+    assert result.daily_loss_limit_pct == GLOBAL_CAPS.daily_loss_limit_pct
+    assert result.consecutive_loss_pause == GLOBAL_CAPS.consecutive_loss_pause
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "risk_per_trade_pct",
+        "daily_loss_limit_pct",
+        "max_open_positions",
+        "max_trades_per_day",
+        "consecutive_loss_pause",
+    ],
+)
+def test_apply_risk_override_rejects_loosening_numeric_caps(field):
+    looser_value = getattr(GLOBAL_CAPS, field) * 2 + 1
+    with pytest.raises(ValueError, match="cannot loosen"):
+        apply_risk_override(GLOBAL_CAPS, {field: looser_value})
+
+
+def test_apply_risk_override_can_disable_min_lot_fallback():
+    result = apply_risk_override(GLOBAL_CAPS, {"min_lot_fallback_enabled": False})
+    assert result.min_lot_fallback_enabled is False
+
+
+def test_apply_risk_override_rejects_enabling_min_lot_fallback_when_globally_disabled():
+    disabled_global = dataclasses.replace(GLOBAL_CAPS, min_lot_fallback_enabled=False)
+    with pytest.raises(ValueError, match="cannot loosen"):
+        apply_risk_override(disabled_global, {"min_lot_fallback_enabled": True})
+
+
+def test_apply_risk_override_tightens_max_risk_per_trade_pct():
+    result = apply_risk_override(GLOBAL_CAPS, {"max_risk_per_trade_pct": 1.0})
+    assert result.max_risk_per_trade_pct == 1.0
+
+
+def test_apply_risk_override_rejects_loosening_max_risk_per_trade_pct():
+    with pytest.raises(ValueError, match="cannot loosen"):
+        apply_risk_override(GLOBAL_CAPS, {"max_risk_per_trade_pct": 5.0})
+
+
+def test_apply_risk_override_rejects_null_max_risk_per_trade_pct():
+    with pytest.raises(ValueError, match="cannot loosen"):
+        apply_risk_override(GLOBAL_CAPS, {"max_risk_per_trade_pct": None})
+
+
+def test_apply_risk_override_empty_dict_returns_equivalent_caps():
+    result = apply_risk_override(GLOBAL_CAPS, {})
+    assert result == GLOBAL_CAPS

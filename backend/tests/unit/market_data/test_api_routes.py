@@ -38,7 +38,9 @@ def _api(handler) -> httpx.AsyncClient:
     gateway_client = httpx.AsyncClient(transport=transport, base_url="http://gw")
     app = FastAPI()
     app.include_router(router)
-    app.state.container = SimpleNamespace(market_data=GatewayMarketData(gateway_client))
+    app.state.container = SimpleNamespace(
+        accounts={"default": SimpleNamespace(market_data=GatewayMarketData(gateway_client))}
+    )
     return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://backend")
 
 
@@ -50,7 +52,13 @@ def _candles_api(handler) -> httpx.AsyncClient:
     # Repository is never touched here — the fake gateway handler always
     # succeeds, so the DB fallback path in CandleHistoryService is unused.
     app.state.container = SimpleNamespace(
-        candle_history=CandleHistoryService(GatewayMarketData(gateway_client), repository=None)
+        accounts={
+            "default": SimpleNamespace(
+                candle_history=CandleHistoryService(
+                    GatewayMarketData(gateway_client), repository=None
+                )
+            )
+        }
     )
     return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://backend")
 
@@ -62,7 +70,7 @@ async def test_candles_omits_before_when_not_requested():
 
     async with _candles_api(handler) as client:
         response = await client.get(
-            "/market-data/candles", params={"symbol": "XAUUSD", "timeframe": "M5"}
+            "/accounts/default/market-data/candles", params={"symbol": "XAUUSD", "timeframe": "M5"}
         )
     assert response.status_code == 200
     assert response.json()[0]["time"] == 1_752_100_500
@@ -75,7 +83,7 @@ async def test_candles_forwards_before_as_epoch_seconds():
 
     async with _candles_api(handler) as client:
         response = await client.get(
-            "/market-data/candles",
+            "/accounts/default/market-data/candles",
             params={"symbol": "XAUUSD", "timeframe": "M5", "before": 1_752_100_000},
         )
     assert response.status_code == 200
@@ -87,7 +95,7 @@ async def test_broker_symbols_lists_catalog():
         return httpx.Response(200, json={"items": SYMBOLS_WIRE, "total": len(SYMBOLS_WIRE)})
 
     async with _api(handler) as client:
-        response = await client.get("/market-data/broker-symbols")
+        response = await client.get("/accounts/default/market-data/broker-symbols")
     assert response.status_code == 200
     body = response.json()
     assert {s["name"] for s in body["items"]} == {"XAUUSD", "EURUSD"}
@@ -103,7 +111,8 @@ async def test_broker_symbols_forwards_search_limit_and_offset():
 
     async with _api(handler) as client:
         response = await client.get(
-            "/market-data/broker-symbols", params={"search": "gold", "limit": 10, "offset": 5}
+            "/accounts/default/market-data/broker-symbols",
+            params={"search": "gold", "limit": 10, "offset": 5},
         )
     assert response.status_code == 200
     assert len(response.json()["items"]) == 1
@@ -114,5 +123,5 @@ async def test_broker_symbols_maps_gateway_unavailable_to_503():
         raise httpx.ConnectError("refused")
 
     async with _api(handler) as client:
-        response = await client.get("/market-data/broker-symbols")
+        response = await client.get("/accounts/default/market-data/broker-symbols")
     assert response.status_code == 503

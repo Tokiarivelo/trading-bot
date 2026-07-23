@@ -100,7 +100,7 @@ def env(tmp_path):
 async def api(env):
     app = FastAPI()
     app.include_router(router)
-    app.state.container = env
+    app.state.container = SimpleNamespace(accounts={"default": env})
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://backend") as client:
         yield client
@@ -143,39 +143,39 @@ def _proposal(env, status=ProposalStatus.BACKTESTED, new_version_id=None) -> Ref
 
 
 async def test_list_reports_empty(api):
-    response = await api.get("/ai/refinement/reports")
+    response = await api.get("/accounts/default/ai/refinement/reports")
     assert response.status_code == 200
     assert response.json() == []
 
 
 async def test_list_and_get_report(env, api):
     report = _report(env)
-    response = await api.get("/ai/refinement/reports")
+    response = await api.get("/accounts/default/ai/refinement/reports")
     assert response.status_code == 200
     (summary,) = response.json()
     assert summary["id"] == report.id
     assert summary["verdict"] == "no_action"
 
-    detail = await api.get(f"/ai/refinement/reports/{report.id}")
+    detail = await api.get(f"/accounts/default/ai/refinement/reports/{report.id}")
     assert detail.status_code == 200
     assert detail.json()["common_failure_pattern"] == "chasing breakouts"
 
 
 async def test_list_reports_filters_by_symbol(env, api):
     _report(env)
-    response = await api.get("/ai/refinement/reports", params={"symbol": "BTCUSD"})
+    response = await api.get("/accounts/default/ai/refinement/reports", params={"symbol": "BTCUSD"})
     assert response.status_code == 200
     assert response.json() == []
 
 
 async def test_get_report_not_found(api):
-    response = await api.get("/ai/refinement/reports/does-not-exist")
+    response = await api.get("/accounts/default/ai/refinement/reports/does-not-exist")
     assert response.status_code == 404
 
 
 async def test_get_proposal_includes_diff_and_backtests(env, api):
     proposal = _proposal(env)
-    response = await api.get(f"/ai/refinement/proposals/{proposal.id}")
+    response = await api.get(f"/accounts/default/ai/refinement/proposals/{proposal.id}")
     assert response.status_code == 200
     body = response.json()
     assert body["status"] == "backtested"
@@ -185,23 +185,23 @@ async def test_get_proposal_includes_diff_and_backtests(env, api):
 
 
 async def test_get_proposal_not_found(api):
-    response = await api.get("/ai/refinement/proposals/does-not-exist")
+    response = await api.get("/accounts/default/ai/refinement/proposals/does-not-exist")
     assert response.status_code == 404
 
 
 async def test_reject_pending_proposal(env, api):
     proposal = _proposal(env, status=ProposalStatus.PENDING)
-    response = await api.post(f"/ai/refinement/proposals/{proposal.id}/reject")
+    response = await api.post(f"/accounts/default/ai/refinement/proposals/{proposal.id}/reject")
     assert response.status_code == 200
     assert response.json()["status"] == "rejected"
 
 
 async def test_reject_already_applied_conflicts(env, api):
     proposal = _proposal(env, status=ProposalStatus.APPLIED)
-    response = await api.post(f"/ai/refinement/proposals/{proposal.id}/reject")
+    response = await api.post(f"/accounts/default/ai/refinement/proposals/{proposal.id}/reject")
     assert response.status_code == 409
 
 
 async def test_reject_not_found(api):
-    response = await api.post("/ai/refinement/proposals/does-not-exist/reject")
+    response = await api.post("/accounts/default/ai/refinement/proposals/does-not-exist/reject")
     assert response.status_code == 404

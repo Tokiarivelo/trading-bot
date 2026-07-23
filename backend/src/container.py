@@ -64,8 +64,9 @@ from src.broker.domain.account import AccountConfig
 from src.broker.ports.trading import BrokerPort
 from src.engine.application.manual_trading import ManualTradeGate
 from src.engine.application.position_manager import PositionManager
-from src.engine.application.risk_manager import RiskManager
+from src.engine.application.risk_manager import RiskManager, apply_risk_override
 from src.engine.application.trade_loop import TradeEngine
+from src.engine.domain.models import RiskCaps
 from src.indicators.adapters.repository import IndicatorRepository
 from src.indicators.application.service import IndicatorService
 from src.journal.adapters.market_context import CandleRepositoryMarketContext
@@ -162,6 +163,21 @@ def _resolve_gateway_secret(env_var: str) -> str:
     if env_var in os.environ:
         return os.environ[env_var]
     return dotenv_values(REPO_ROOT / ".env").get(env_var) or ""
+
+
+def _resolve_account_risk_caps(
+    global_caps: RiskCaps, account_cfg: AccountConfig, configs_dir: Path
+) -> RiskCaps:
+    """MULTI_ACCOUNT_PLAN.md Phase 7: `configs/risk.yaml` stays the global,
+    user-owned floor for every account. An account only gets a different
+    (always stricter) `RiskCaps` if its `accounts.yaml` entry sets
+    `risk_override_file`, naming a `configs/risk/{file}.yaml` — merged on top
+    of `global_caps` via `apply_risk_override`, which rejects any attempt to
+    loosen a cap."""
+    if not account_cfg.risk_override_file:
+        return global_caps
+    override_data = load_yaml_config(f"risk/{account_cfg.risk_override_file}", configs_dir)
+    return apply_risk_override(global_caps, override_data)
 
 
 def _baseline_strategies() -> list[tuple[str, Strategy]]:
@@ -376,7 +392,11 @@ def build_container(settings: Settings | None = None) -> Container:
     activity_log_repository = ActivityLogRepository(session_factory)
     strategy_version_repository = StrategyVersionRepository(session_factory)
 
-    risk_caps = load_risk_caps(settings.configs_dir)
+    global_risk_caps = load_risk_caps(settings.configs_dir)
+    account_risk_caps = {
+        cfg.id: _resolve_account_risk_caps(global_risk_caps, cfg, settings.configs_dir)
+        for cfg in account_configs
+    }
     symbol_configs = {
         symbol: load_symbol_trading_config(symbol, settings.configs_dir) for symbol in symbols
     }
@@ -504,7 +524,7 @@ def build_container(settings: Settings | None = None) -> Container:
             activity_log_repository=activity_log_repository,
             strategy_version_repository=strategy_version_repository,
             baseline_strategies=baseline_strategies,
-            risk_caps=risk_caps,
+            risk_caps=account_risk_caps[account_cfg.id],
             spread_gate=spread_gate,
             review_every_n_trades=review_every_n_trades,
             skill_selector=skill_selector,
@@ -565,7 +585,7 @@ def build_account_runtime(
     activity_log_repository: ActivityLogRepository,
     strategy_version_repository: StrategyVersionRepository,
     baseline_strategies: list[tuple[str, Strategy]],
-    risk_caps,
+    risk_caps: RiskCaps,
     spread_gate: SpreadGate,
     review_every_n_trades: int,
     skill_selector: SkillSelectorPort,

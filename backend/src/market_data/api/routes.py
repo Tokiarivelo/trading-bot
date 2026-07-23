@@ -4,9 +4,9 @@ see `src.market_data.api.ws`."""
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import Annotated, Any
+from typing import Annotated
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, HTTPException, Query
 
 from src.market_data.api.schemas import (
     BackfillRequest,
@@ -18,18 +18,15 @@ from src.market_data.api.schemas import (
 )
 from src.market_data.application.candle_stream import candle_message
 from src.market_data.domain.models import MarketDataUnavailable, Timeframe
+from src.shared.api.dependencies import AccountRuntimeDep
 
-router = APIRouter(prefix="/market-data", tags=["market-data"])
+router = APIRouter(prefix="/accounts/{account_id}/market-data", tags=["market-data"])
 
 TimeframeParam = Annotated[
     Timeframe, Query(description="Bar size: M1, M5, M15, M30, H1, H4, D1, W1, or MN.")
 ]
 
 _UNAVAILABLE = {503: {"description": "The MT5 gateway is unreachable or not logged in."}}
-
-
-def _container(request: Request) -> Any:
-    return request.app.state.container
 
 
 @router.get(
@@ -47,7 +44,7 @@ def _container(request: Request) -> Any:
     ),
 )
 async def get_candles(
-    request: Request,
+    account: AccountRuntimeDep,
     symbol: str = Query(description="Trading symbol, e.g. 'XAUUSD'."),
     timeframe: TimeframeParam = Timeframe.M5,
     count: Annotated[int, Query(ge=1, le=5000, description="Number of bars to return.")] = 300,
@@ -63,9 +60,7 @@ async def get_candles(
     ] = None,
 ) -> list[CandleOut]:
     before_dt = datetime.fromtimestamp(before, tz=UTC) if before is not None else None
-    candles = await _container(request).candle_history.get_candles(
-        symbol, timeframe, count, before_dt
-    )
+    candles = await account.candle_history.get_candles(symbol, timeframe, count, before_dt)
     return [CandleOut(**candle_message(c)) for c in candles]
 
 
@@ -77,10 +72,10 @@ async def get_candles(
     responses=_UNAVAILABLE,
 )
 async def get_symbol_info(
-    request: Request, symbol: str = Query(description="Trading symbol, e.g. 'XAUUSD'.")
+    account: AccountRuntimeDep, symbol: str = Query(description="Trading symbol, e.g. 'XAUUSD'.")
 ) -> SymbolInfoOut:
     try:
-        info = await _container(request).market_data.get_symbol_info(symbol)
+        info = await account.market_data.get_symbol_info(symbol)
     except MarketDataUnavailable as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     return SymbolInfoOut(
@@ -115,7 +110,7 @@ async def get_symbol_info(
     responses=_UNAVAILABLE,
 )
 async def get_broker_symbols(
-    request: Request,
+    account: AccountRuntimeDep,
     search: str | None = Query(
         default=None,
         max_length=64,
@@ -127,7 +122,7 @@ async def get_broker_symbols(
     ] = 0,
 ) -> BrokerSymbolPageOut:
     try:
-        page = await _container(request).market_data.list_symbols(search, limit, offset)
+        page = await account.market_data.list_symbols(search, limit, offset)
     except MarketDataUnavailable as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     return BrokerSymbolPageOut(
@@ -161,16 +156,15 @@ async def get_broker_symbols(
     ),
     responses=_UNAVAILABLE,
 )
-async def backfill(request: Request, body: BackfillRequest) -> BackfillResponse:
-    container = _container(request)
-    symbols = body.symbols or container.symbols
+async def backfill(account: AccountRuntimeDep, body: BackfillRequest) -> BackfillResponse:
+    symbols = body.symbols or account.symbols
     timeframes = body.timeframes or list(Timeframe)
     stored: dict[str, int] = {}
     try:
         for symbol in symbols:
-            await container.candle_history.sync_symbol_spec(symbol)
+            await account.candle_history.sync_symbol_spec(symbol)
             for timeframe in timeframes:
-                bars = await container.candle_history.backfill(
+                bars = await account.candle_history.backfill(
                     symbol, timeframe, body.count, body.start
                 )
                 stored[f"{symbol}:{timeframe.value}"] = bars

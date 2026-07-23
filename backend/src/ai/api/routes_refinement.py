@@ -12,16 +12,17 @@ from __future__ import annotations
 import difflib
 import json
 
-from fastapi import APIRouter, HTTPException, Path, Query, Request
+from fastapi import APIRouter, HTTPException, Path, Query
 
 from src.ai.api.schemas import AnalysisReportOut, RefinementProposalDetailOut
 from src.ai.application.refinement_loop import InvalidProposalStateError, RefinementLoopService
 from src.ai.domain.models import RefinementProposal
 from src.backtest.api.schemas import BacktestReportSummaryOut
 from src.backtest.reports.writer import REPORTS_DIR
+from src.shared.api.dependencies import AccountRuntimeDep
 from src.strategies.application.versioning import StrategyVersionService
 
-router = APIRouter(prefix="/ai/refinement", tags=["ai"])
+router = APIRouter(prefix="/accounts/{account_id}/ai/refinement", tags=["ai"])
 
 _REPORT_NOT_FOUND = {404: {"description": "No analysis report with that id."}}
 _PROPOSAL_NOT_FOUND = {404: {"description": "No refinement proposal with that id."}}
@@ -30,12 +31,12 @@ _PROPOSAL_STATE_CONFLICT = {
 }
 
 
-def _service(request: Request) -> RefinementLoopService:
-    return request.app.state.container.refinement_loop
+def _service(account: AccountRuntimeDep) -> RefinementLoopService:
+    return account.refinement_loop
 
 
-def _strategy_versions(request: Request) -> StrategyVersionService:
-    return request.app.state.container.strategy_versions
+def _strategy_versions(account: AccountRuntimeDep) -> StrategyVersionService:
+    return account.strategy_versions
 
 
 @router.get(
@@ -48,10 +49,10 @@ def _strategy_versions(request: Request) -> StrategyVersionService:
     ),
 )
 async def list_reports(
-    request: Request,
+    account: AccountRuntimeDep,
     symbol: str | None = Query(default=None, description="Filter to one symbol, e.g. XAUUSD."),
 ) -> list[AnalysisReportOut]:
-    reports = await _service(request).list_reports(symbol)
+    reports = await _service(account).list_reports(symbol)
     return [AnalysisReportOut.from_domain(r) for r in reports]
 
 
@@ -63,10 +64,10 @@ async def list_reports(
     responses=_REPORT_NOT_FOUND,
 )
 async def get_report(
-    request: Request,
+    account: AccountRuntimeDep,
     report_id: str = Path(description="Report id, as returned by GET .../reports."),
 ) -> AnalysisReportOut:
-    report = await _service(request).get_report(report_id)
+    report = await _service(account).get_report(report_id)
     if report is None:
         raise HTTPException(status_code=404, detail="report not found")
     return AnalysisReportOut.from_domain(report)
@@ -87,13 +88,13 @@ async def get_report(
     responses=_PROPOSAL_NOT_FOUND,
 )
 async def get_proposal(
-    request: Request,
+    account: AccountRuntimeDep,
     proposal_id: str = Path(description="Proposal id, from an AnalysisReport's proposal_id."),
 ) -> RefinementProposalDetailOut:
-    proposal = await _service(request).get_proposal(proposal_id)
+    proposal = await _service(account).get_proposal(proposal_id)
     if proposal is None:
         raise HTTPException(status_code=404, detail="proposal not found")
-    return _detail(request, proposal)
+    return _detail(account, proposal)
 
 
 @router.post(
@@ -108,20 +109,22 @@ async def get_proposal(
     responses={**_PROPOSAL_NOT_FOUND, **_PROPOSAL_STATE_CONFLICT},
 )
 async def reject_proposal(
-    request: Request,
+    account: AccountRuntimeDep,
     proposal_id: str = Path(description="Proposal id to reject."),
 ) -> RefinementProposalDetailOut:
     try:
-        proposal = await _service(request).reject_proposal(proposal_id)
+        proposal = await _service(account).reject_proposal(proposal_id)
     except InvalidProposalStateError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-    return _detail(request, proposal)
+    return _detail(account, proposal)
 
 
-def _detail(request: Request, proposal: RefinementProposal) -> RefinementProposalDetailOut:
-    versions = _strategy_versions(request)
+def _detail(
+    account: AccountRuntimeDep, proposal: RefinementProposal
+) -> RefinementProposalDetailOut:
+    versions = _strategy_versions(account)
     base_version = versions.get_version(proposal.base_version_id)
     base_code = versions.get_code(base_version) if base_version is not None else ""
     diff = list(

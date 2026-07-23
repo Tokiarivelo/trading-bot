@@ -3,9 +3,7 @@ never query strings, never logs, never responses."""
 
 from __future__ import annotations
 
-from typing import Any
-
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException
 
 from src.broker.api.schemas import (
     AccountInfoOut,
@@ -15,9 +13,11 @@ from src.broker.api.schemas import (
     DisconnectRequest,
     DisconnectResponse,
 )
+from src.broker.application.account_service import AccountService
 from src.broker.domain.account import BrokerUnavailable, LoginRejected, Mt5Credentials
+from src.shared.api.dependencies import AccountRuntimeDep
 
-router = APIRouter(prefix="/account", tags=["account"])
+router = APIRouter(prefix="/accounts/{account_id}/account", tags=["account"])
 
 _ERROR_RESPONSES = {
     401: {"description": "The broker rejected the login/password/server combination."},
@@ -25,8 +25,8 @@ _ERROR_RESPONSES = {
 }
 
 
-def _service(request: Request) -> Any:
-    return request.app.state.container.account
+def _service(account: AccountRuntimeDep) -> AccountService:
+    return account.account
 
 
 @router.post(
@@ -42,10 +42,10 @@ def _service(request: Request) -> Any:
     ),
     responses={401: _ERROR_RESPONSES[401], 503: _ERROR_RESPONSES[503]},
 )
-async def connect(request: Request, body: ConnectRequest) -> ConnectResponse:
+async def connect(account: AccountRuntimeDep, body: ConnectRequest) -> ConnectResponse:
     credentials = Mt5Credentials(login=body.login, password=body.password, server=body.server)
     try:
-        info = await _service(request).connect(credentials, remember=body.remember)
+        info = await _service(account).connect(credentials, remember=body.remember)
     except LoginRejected as exc:
         raise HTTPException(status_code=401, detail=str(exc)) from exc
     except BrokerUnavailable as exc:
@@ -64,9 +64,11 @@ async def connect(request: Request, body: ConnectRequest) -> ConnectResponse:
     ),
     responses={503: _ERROR_RESPONSES[503]},
 )
-async def disconnect(request: Request, body: DisconnectRequest | None = None) -> DisconnectResponse:
+async def disconnect(
+    account: AccountRuntimeDep, body: DisconnectRequest | None = None
+) -> DisconnectResponse:
     try:
-        await _service(request).disconnect(forget=body.forget if body else False)
+        await _service(account).disconnect(forget=body.forget if body else False)
     except BrokerUnavailable as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     return DisconnectResponse(connected=False)
@@ -84,5 +86,5 @@ async def disconnect(request: Request, body: DisconnectRequest | None = None) ->
         "endpoint unconditionally."
     ),
 )
-async def status(request: Request) -> AccountStatusOut:
-    return AccountStatusOut(**await _service(request).status())
+async def status(account: AccountRuntimeDep) -> AccountStatusOut:
+    return AccountStatusOut(**await _service(account).status())

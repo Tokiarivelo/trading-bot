@@ -26,6 +26,8 @@ from src.broker.api.schemas import (
     SymbolSpreadConfigOut,
     UpdateMinRrIn,
 )
+from src.broker.application.order_service import OrderService
+from src.broker.application.spread_gate import SpreadGate
 from src.broker.domain.account import BrokerUnavailable
 from src.broker.domain.trading import (
     ExecutionResult,
@@ -36,8 +38,17 @@ from src.broker.domain.trading import (
     Side,
 )
 from src.market_data.domain.models import MarketDataUnavailable
+from src.shared.api.dependencies import AccountRuntimeDep
 
-router = APIRouter(prefix="/broker", tags=["broker"])
+# Order/position endpoints are account-scoped (each account has its own
+# broker connection, open positions, and risk-gated order service).
+router = APIRouter(prefix="/accounts/{account_id}/broker", tags=["broker"])
+
+# The per-symbol spread/RR gate is process-wide (MULTI_ACCOUNT_PLAN.md Phase 5:
+# `SpreadGate` stays a genuine `Container` field, not per-`AccountRuntime`),
+# so these two endpoints stay unprefixed rather than living under
+# `/accounts/{account_id}/...` like the rest of this module.
+spread_router = APIRouter(prefix="/broker", tags=["broker"])
 
 _UNAVAILABLE = {503: {"description": "The MT5 gateway or market data feed is unreachable."}}
 _REJECTED = {
@@ -50,15 +61,15 @@ _REJECTED = {
 }
 
 
-def _service(request: Request) -> Any:
-    return request.app.state.container.order_service
+def _service(account: AccountRuntimeDep) -> OrderService:
+    return account.order_service
 
 
-def _gate(request: Request) -> Any:
-    return request.app.state.container.manual_trade_gate
+def _gate(account: AccountRuntimeDep) -> Any:
+    return account.manual_trade_gate
 
 
-def _spread_gate(request: Request) -> Any:
+def _spread_gate(request: Request) -> SpreadGate:
     return request.app.state.container.spread_gate
 
 
@@ -128,13 +139,13 @@ def _pending_order_out(order: PendingOrder) -> PendingOrderOut:
     ),
     responses={**_REJECTED, **_UNAVAILABLE},
 )
-async def open_order(request: Request, body: OpenOrderRequest) -> ExecutionResultOut:
+async def open_order(account: AccountRuntimeDep, body: OpenOrderRequest) -> ExecutionResultOut:
     try:
         side = Side(body.side)
     except ValueError:
         raise HTTPException(status_code=422, detail="side must be 'buy' or 'sell'") from None
     try:
-        result = await _gate(request).open_position(
+        result = await _gate(account).open_position(
             body.symbol, side, body.volume, body.sl, body.tp, body.comment
         )
     except OrderRejected as exc:
@@ -157,10 +168,10 @@ async def open_order(request: Request, body: OpenOrderRequest) -> ExecutionResul
     responses={**_REJECTED, **_UNAVAILABLE},
 )
 async def close_position(
-    request: Request, ticket: int, body: CloseOrderRequest | None = None
+    account: AccountRuntimeDep, ticket: int, body: CloseOrderRequest | None = None
 ) -> ExecutionResultOut:
     try:
-        result = await _service(request).close_position(ticket, body.volume if body else None)
+        result = await _service(account).close_position(ticket, body.volume if body else None)
     except OrderRejected as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except (BrokerUnavailable, MarketDataUnavailable) as exc:
@@ -183,11 +194,11 @@ async def close_position(
     responses=_UNAVAILABLE,
 )
 async def close_all_positions(
-    request: Request,
+    account: AccountRuntimeDep,
     symbol: str = Query(description="Close every open position on this symbol."),
 ) -> list[ExecutionResultOut]:
     try:
-        results = await _service(request).close_all_positions(symbol)
+        results = await _service(account).close_all_positions(symbol)
     except (BrokerUnavailable, MarketDataUnavailable) as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     return [_execution_out(r) for r in results]
@@ -204,10 +215,10 @@ async def close_all_positions(
     responses={**_REJECTED, **_UNAVAILABLE},
 )
 async def modify_position(
-    request: Request, ticket: int, body: ModifyOrderRequest
+    account: AccountRuntimeDep, ticket: int, body: ModifyOrderRequest
 ) -> ModifyOrderResponse:
     try:
-        await _service(request).modify_position(ticket, body.sl, body.tp)
+        await _service(account).modify_position(ticket, body.sl, body.tp)
     except OrderRejected as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except (BrokerUnavailable, MarketDataUnavailable) as exc:
@@ -223,11 +234,11 @@ async def modify_position(
     responses=_UNAVAILABLE,
 )
 async def get_positions(
-    request: Request,
+    account: AccountRuntimeDep,
     symbol: str | None = Query(default=None, description="Restrict results to this symbol."),
 ) -> list[PositionOut]:
     try:
-        positions = await _service(request).get_positions(symbol)
+        positions = await _service(account).get_positions(symbol)
     except (BrokerUnavailable, MarketDataUnavailable) as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     return [_position_out(p) for p in positions]
@@ -248,7 +259,9 @@ async def get_positions(
     ),
     responses={**_REJECTED, **_UNAVAILABLE},
 )
-async def place_pending_order(request: Request, body: PlacePendingOrderRequest) -> PendingOrderOut:
+async def place_pending_order(
+    account: AccountRuntimeDep, body: PlacePendingOrderRequest
+) -> PendingOrderOut:
     try:
         side = Side(body.side)
     except ValueError:
@@ -260,7 +273,7 @@ async def place_pending_order(request: Request, body: PlacePendingOrderRequest) 
             status_code=422, detail="order_type must be 'limit' or 'stop'"
         ) from None
     try:
-        result = await _gate(request).place_pending_order(
+        result = await _gate(account).place_pending_order(
             body.symbol, side, order_type, body.volume, body.price, body.sl, body.tp, body.comment
         )
     except OrderRejected as exc:
@@ -278,11 +291,11 @@ async def place_pending_order(request: Request, body: PlacePendingOrderRequest) 
     responses=_UNAVAILABLE,
 )
 async def get_pending_orders(
-    request: Request,
+    account: AccountRuntimeDep,
     symbol: str | None = Query(default=None, description="Restrict results to this symbol."),
 ) -> list[PendingOrderOut]:
     try:
-        orders = await _service(request).get_pending_orders(symbol)
+        orders = await _service(account).get_pending_orders(symbol)
     except (BrokerUnavailable, MarketDataUnavailable) as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     return [_pending_order_out(o) for o in orders]
@@ -300,10 +313,10 @@ async def get_pending_orders(
     responses={**_REJECTED, **_UNAVAILABLE},
 )
 async def modify_pending_order(
-    request: Request, ticket: int, body: ModifyPendingOrderRequest
+    account: AccountRuntimeDep, ticket: int, body: ModifyPendingOrderRequest
 ) -> ModifyOrderResponse:
     try:
-        await _service(request).modify_pending_order(ticket, body.price, body.sl, body.tp)
+        await _service(account).modify_pending_order(ticket, body.price, body.sl, body.tp)
     except OrderRejected as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except (BrokerUnavailable, MarketDataUnavailable) as exc:
@@ -318,9 +331,9 @@ async def modify_pending_order(
     description="Removes a resting order before it fills.",
     responses={**_REJECTED, **_UNAVAILABLE},
 )
-async def cancel_pending_order(request: Request, ticket: int) -> ModifyOrderResponse:
+async def cancel_pending_order(account: AccountRuntimeDep, ticket: int) -> ModifyOrderResponse:
     try:
-        await _service(request).cancel_pending_order(ticket)
+        await _service(account).cancel_pending_order(ticket)
     except OrderRejected as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except (BrokerUnavailable, MarketDataUnavailable) as exc:
@@ -328,7 +341,7 @@ async def cancel_pending_order(request: Request, ticket: int) -> ModifyOrderResp
     return ModifyOrderResponse(status="ok")
 
 
-@router.get(
+@spread_router.get(
     "/symbols/{symbol}/spread-config",
     response_model=SymbolSpreadConfigOut,
     summary="Get a symbol's live spread/RR gate config",
@@ -339,9 +352,7 @@ async def cancel_pending_order(request: Request, ticket: int) -> ModifyOrderResp
     ),
     responses={404: {"description": "No spread/RR config for this symbol yet."}},
 )
-async def get_symbol_spread_config(
-    request: Request, symbol: str
-) -> SymbolSpreadConfigOut:
+async def get_symbol_spread_config(request: Request, symbol: str) -> SymbolSpreadConfigOut:
     config = _spread_gate(request).get_config(symbol)
     if config is None:
         raise HTTPException(status_code=404, detail=f"no spread/RR config for {symbol!r}")
@@ -350,7 +361,7 @@ async def get_symbol_spread_config(
     )
 
 
-@router.put(
+@spread_router.put(
     "/symbols/{symbol}/min-rr",
     response_model=SymbolSpreadConfigOut,
     summary="Update a symbol's minimum RR, live",

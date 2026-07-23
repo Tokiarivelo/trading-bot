@@ -17,6 +17,59 @@ from src.engine.domain.models import EngineStatus, RiskCaps, RiskDecision
 
 logger = logging.getLogger(__name__)
 
+_TIGHTEN_LOWER_IS_STRICTER = (
+    "risk_per_trade_pct",
+    "daily_loss_limit_pct",
+    "max_open_positions",
+    "max_trades_per_day",
+    "consecutive_loss_pause",
+)
+
+
+def apply_risk_override(base: RiskCaps, override: dict) -> RiskCaps:
+    """Merge a per-account `configs/risk/{account_id}.yaml` override on top
+    of the global, user-owned `configs/risk.yaml` caps (`base`) —
+    MULTI_ACCOUNT_PLAN.md Phase 7. Only keys present in `override` change;
+    every other field keeps the global value. An override may only *tighten*
+    a cap, never loosen it — enforced here, not trusted from the file, per
+    CLAUDE.md's "risk caps are user-owned" rule. Raises `ValueError` naming
+    the offending field on any attempt to relax a limit.
+    """
+    updates: dict = {}
+
+    for field in _TIGHTEN_LOWER_IS_STRICTER:
+        if field not in override:
+            continue
+        value = override[field]
+        base_value = getattr(base, field)
+        if value > base_value:
+            raise ValueError(
+                f"risk override cannot loosen {field}: {value} > global cap {base_value}"
+            )
+        updates[field] = value
+
+    if "min_lot_fallback_enabled" in override:
+        value = bool(override["min_lot_fallback_enabled"])
+        if value and not base.min_lot_fallback_enabled:
+            raise ValueError(
+                "risk override cannot loosen min_lot_fallback_enabled: global caps have it disabled"
+            )
+        updates["min_lot_fallback_enabled"] = value
+
+    if "max_risk_per_trade_pct" in override:
+        value = override["max_risk_per_trade_pct"]
+        base_ceiling = base.max_risk_per_trade_pct
+        if base_ceiling is None:
+            base_ceiling = base.risk_per_trade_pct
+        if value is None or value > base_ceiling:
+            raise ValueError(
+                "risk override cannot loosen max_risk_per_trade_pct: "
+                f"{value} > global ceiling {base_ceiling}"
+            )
+        updates["max_risk_per_trade_pct"] = value
+
+    return dataclasses.replace(base, **updates)
+
 
 class RiskManager:
     def __init__(self, caps: RiskCaps, timezone: str = "UTC") -> None:

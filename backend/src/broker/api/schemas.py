@@ -203,9 +203,7 @@ class SymbolSpreadConfigOut(BaseModel):
     /broker/symbols/{symbol}/min-rr` has been called since the last restart."""
 
     symbol: str
-    max_spread_points: int = Field(
-        description="Entries are vetoed above this spread, in points."
-    )
+    max_spread_points: int = Field(description="Entries are vetoed above this spread, in points.")
     min_rr: float = Field(
         description="Minimum spread-adjusted reward:risk ratio required to open — "
         "tp_distance >= min_rr * (sl_distance + spread_value)."
@@ -221,4 +219,23 @@ class UpdateMinRrIn(BaseModel):
         "tighter-stop strategy (e.g. a scalping variant) may need this lower than a "
         "swing-trading min_rr tuned for wider distances, since a fixed-points spread "
         "eats a bigger share of a smaller take-profit.",
+    )
+
+
+class AccountSummaryOut(BaseModel):
+    """One `configs/accounts.yaml` entry, as returned by `GET /accounts` —
+    everything needed to populate an account switcher. Omits
+    `gateway_url`/`gateway_shared_secret_env`/`risk_override_file`, which are
+    internal deployment plumbing, not UI-relevant."""
+
+    id: str = Field(
+        description="Short slug identifying this account, e.g. 'ftmo-1'. "
+        "Used as the `{account_id}` path segment on every `/accounts/{account_id}/...` route."
+    )
+    label: str = Field(description="Human-readable name for the account switcher.")
+    mode: str = Field(description="'paper' (simulated fills) or 'live' (real broker orders).")
+    enabled: bool = Field(
+        description="Whether this account's gateway/runtime is wired up — "
+        "a disabled entry exists in config but has no AccountRuntime and isn't a valid "
+        "{account_id} on any route."
     )

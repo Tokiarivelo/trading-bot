@@ -3,9 +3,7 @@ and why (every `src.*` INFO+ log line, persisted)."""
 
 from __future__ import annotations
 
-from typing import Any
-
-from fastapi import APIRouter, Query, Request
+from fastapi import APIRouter, Query
 
 from src.activity.api.schemas import (
     BotSignalOut,
@@ -15,13 +13,15 @@ from src.activity.api.schemas import (
     LogEntryOut,
     LogHistoryPage,
 )
+from src.activity.application.activity_log_service import ActivityLogService
 from src.activity.domain.models import BotSignal, LogEntry
+from src.shared.api.dependencies import AccountRuntimeDep
 
-router = APIRouter(prefix="/activity", tags=["activity"])
+router = APIRouter(prefix="/accounts/{account_id}/activity", tags=["activity"])
 
 
-def _service(request: Request) -> Any:
-    return request.app.state.container.activity_log
+def _service(account: AccountRuntimeDep) -> ActivityLogService:
+    return account.activity_log
 
 
 def _log_out(entry: LogEntry) -> LogEntryOut:
@@ -46,7 +46,7 @@ def _log_out(entry: LogEntry) -> LogEntryOut:
     ),
 )
 async def get_history(
-    request: Request,
+    account: AccountRuntimeDep,
     level: str | None = Query(
         default=None, description="Exact level match, e.g. 'INFO', 'WARNING', 'ERROR'."
     ),
@@ -66,7 +66,7 @@ async def get_history(
     limit: int = Query(default=100, ge=1, le=1000, description="Page size."),
     offset: int = Query(default=0, ge=0, description="Number of matching entries to skip."),
 ) -> LogHistoryPage:
-    entries, total = await _service(request).search(
+    entries, total = await _service(account).search(
         level=level,
         logger_contains=logger_contains,
         q=q,
@@ -93,14 +93,14 @@ async def get_history(
     ),
 )
 async def get_bot_signals(
-    request: Request,
+    account: AccountRuntimeDep,
     skill: str = Query(description="Full bot id, e.g. 'normal/xauusd/breakout_v1'."),
     frm: int | None = Query(
         default=None, alias="from", description="Range start, epoch seconds UTC (inclusive)."
     ),
     to: int | None = Query(default=None, description="Range end, epoch seconds UTC (inclusive)."),
 ) -> list[BotSignalOut]:
-    signals: list[BotSignal] = await _service(request).get_bot_signals(
+    signals: list[BotSignal] = await _service(account).get_bot_signals(
         skill=skill, created_from=frm, created_to=to
     )
     return [
@@ -120,8 +120,8 @@ async def get_bot_signals(
         "multi-select bulk delete in the activity log UI. This cannot be undone."
     ),
 )
-async def delete_by_ids(request: Request, body: LogDeleteByIdsRequest) -> LogDeleteResult:
-    deleted = await _service(request).delete_by_ids(body.ids)
+async def delete_by_ids(account: AccountRuntimeDep, body: LogDeleteByIdsRequest) -> LogDeleteResult:
+    deleted = await _service(account).delete_by_ids(body.ids)
     return LogDeleteResult(deleted=deleted)
 
 
@@ -135,8 +135,10 @@ async def delete_by_ids(request: Request, body: LogDeleteByIdsRequest) -> LogDel
         "Backs 'delete all matching' in the activity log UI. This cannot be undone."
     ),
 )
-async def delete_by_filter(request: Request, body: LogDeleteByFilterRequest) -> LogDeleteResult:
-    deleted = await _service(request).delete_by_filter(
+async def delete_by_filter(
+    account: AccountRuntimeDep, body: LogDeleteByFilterRequest
+) -> LogDeleteResult:
+    deleted = await _service(account).delete_by_filter(
         level=body.level,
         logger_contains=body.logger_contains,
         q=body.q,

@@ -144,6 +144,11 @@ class ContainerForTest:
             store=FernetCredentialStore(tmp_path / "credentials.enc", key_provider=lambda: key),
         )
 
+        # Resolves `get_account_runtime`'s `container.accounts[account_id]` lookup —
+        # this flat object already carries every AccountRuntime-scoped field the
+        # per-account routes need, so it doubles as its own single-entry registry.
+        self.accounts = {"default": self}
+
 
 @pytest.fixture
 async def api(tmp_path):
@@ -160,13 +165,13 @@ async def api(tmp_path):
 
 async def _connect(api, password="good-pw", remember=True):
     return await api.post(
-        "/account/connect",
+        "/accounts/default/account/connect",
         json={"login": 123456, "password": password, "server": "Demo-Server", "remember": remember},
     )
 
 
 async def test_login_flow_end_to_end(api):
-    status = (await api.get("/account/status")).json()
+    status = (await api.get("/accounts/default/account/status")).json()
     assert status == {
         "gateway_up": True,
         "connected": False,
@@ -178,13 +183,13 @@ async def test_login_flow_end_to_end(api):
     assert response.status_code == 200
     assert response.json()["account"]["balance"] == 10_000.0
 
-    status = (await api.get("/account/status")).json()
+    status = (await api.get("/accounts/default/account/status")).json()
     assert status["connected"] is True
     assert status["has_saved_credentials"] is True
 
-    response = await api.post("/account/disconnect", json={"forget": True})
+    response = await api.post("/accounts/default/account/disconnect", json={"forget": True})
     assert response.status_code == 200
-    status = (await api.get("/account/status")).json()
+    status = (await api.get("/accounts/default/account/status")).json()
     assert status["connected"] is False
     assert status["has_saved_credentials"] is False
 
@@ -193,14 +198,17 @@ async def test_bad_credentials_return_401_and_store_nothing(api):
     response = await _connect(api, password="wrong")
     assert response.status_code == 401
     assert "Authorization failed" in response.json()["detail"]
-    assert (await api.get("/account/status")).json()["has_saved_credentials"] is False
+    assert (await api.get("/accounts/default/account/status")).json()[
+        "has_saved_credentials"
+    ] is False
 
 
 async def test_candles_flow_live_and_db_fallback(api):
     await _connect(api)
 
     live = await api.get(
-        "/market-data/candles", params={"symbol": "XAUUSD", "timeframe": "M5", "count": 5}
+        "/accounts/default/market-data/candles",
+        params={"symbol": "XAUUSD", "timeframe": "M5", "count": 5},
     )
     assert live.status_code == 200
     candles = live.json()
@@ -208,7 +216,7 @@ async def test_candles_flow_live_and_db_fallback(api):
     assert candles[0]["time"] % M5 == 0
     assert candles[-1]["spread_points"] == 25
 
-    stored = await api.post("/market-data/backfill", json={"count": 5})
+    stored = await api.post("/accounts/default/market-data/backfill", json={"count": 5})
     assert stored.json() == {
         "stored": {
             "XAUUSD:M1": 5,
@@ -234,9 +242,10 @@ async def test_candles_flow_live_and_db_fallback(api):
     assert spec.contract_size == 100.0
 
     # Gateway loses the session → candles now come from the DB.
-    await api.post("/account/disconnect", json={})
+    await api.post("/accounts/default/account/disconnect", json={})
     fallback = await api.get(
-        "/market-data/candles", params={"symbol": "XAUUSD", "timeframe": "M5", "count": 3}
+        "/accounts/default/market-data/candles",
+        params={"symbol": "XAUUSD", "timeframe": "M5", "count": 3},
     )
     assert fallback.status_code == 200
     assert len(fallback.json()) == 3
@@ -244,11 +253,15 @@ async def test_candles_flow_live_and_db_fallback(api):
 
 async def test_symbol_info_reports_live_spread(api):
     await _connect(api)
-    info = (await api.get("/market-data/symbol-info", params={"symbol": "XAUUSD"})).json()
+    info = (
+        await api.get("/accounts/default/market-data/symbol-info", params={"symbol": "XAUUSD"})
+    ).json()
     assert info["spread_points"] == 25
     assert info["stops_level"] == 10
 
 
 async def test_symbol_info_unavailable_when_not_connected(api):
-    response = await api.get("/market-data/symbol-info", params={"symbol": "XAUUSD"})
+    response = await api.get(
+        "/accounts/default/market-data/symbol-info", params={"symbol": "XAUUSD"}
+    )
     assert response.status_code == 503

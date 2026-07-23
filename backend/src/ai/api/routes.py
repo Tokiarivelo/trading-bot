@@ -8,7 +8,7 @@ never generates code, and code generation only ever produces a `validated`
 
 from __future__ import annotations
 
-from fastapi import APIRouter, File, Form, HTTPException, Path, Request, UploadFile
+from fastapi import APIRouter, File, Form, HTTPException, Path, UploadFile
 
 from src.ai.api.schemas import (
     CreateDraftFromPromptIn,
@@ -20,8 +20,9 @@ from src.ai.api.schemas import (
 from src.ai.application.llm_router import LLMProviderNotConfiguredError
 from src.ai.application.pdf_to_strategy import InvalidDraftStateError, PdfToStrategyService
 from src.ai.ports.llm import LLMCallError
+from src.shared.api.dependencies import AccountRuntimeDep
 
-router = APIRouter(prefix="/ai/pdf-strategy", tags=["ai"])
+router = APIRouter(prefix="/accounts/{account_id}/ai/pdf-strategy", tags=["ai"])
 
 _DRAFT_NOT_FOUND = {404: {"description": "No draft with that id."}}
 _DRAFT_STATE_CONFLICT = {
@@ -42,8 +43,8 @@ _LLM_CALL_FAILED = {
 }
 
 
-def _service(request: Request) -> PdfToStrategyService:
-    return request.app.state.container.pdf_to_strategy
+def _service(account: AccountRuntimeDep) -> PdfToStrategyService:
+    return account.pdf_to_strategy
 
 
 @router.post(
@@ -69,7 +70,7 @@ def _service(request: Request) -> PdfToStrategyService:
     },
 )
 async def upload_pdf(
-    request: Request,
+    account: AccountRuntimeDep,
     file: UploadFile = File(  # noqa: B008 — FastAPI's documented param-default pattern
         description="A PDF describing a manual trading method."
     ),
@@ -83,7 +84,7 @@ async def upload_pdf(
         raise HTTPException(status_code=400, detail="file must be a PDF")
     pdf_bytes = await file.read()
     try:
-        draft = await _service(request).create_draft_from_pdf(
+        draft = await _service(account).create_draft_from_pdf(
             file.filename or "upload.pdf", pdf_bytes, symbol=symbol or None
         )
     except LLMProviderNotConfiguredError as exc:
@@ -112,10 +113,10 @@ async def upload_pdf(
     },
 )
 async def create_draft_from_prompt(
-    request: Request, body: CreateDraftFromPromptIn
+    account: AccountRuntimeDep, body: CreateDraftFromPromptIn
 ) -> StrategyDraftOut:
     try:
-        draft = await _service(request).create_draft_from_text(
+        draft = await _service(account).create_draft_from_text(
             body.description, symbol=body.symbol or None
         )
     except LLMProviderNotConfiguredError as exc:
@@ -142,9 +143,9 @@ async def create_draft_from_prompt(
     ),
 )
 async def create_draft_from_spec_json(
-    request: Request, body: CreateDraftFromSpecIn
+    account: AccountRuntimeDep, body: CreateDraftFromSpecIn
 ) -> StrategyDraftOut:
-    draft = await _service(request).create_draft_from_spec(
+    draft = await _service(account).create_draft_from_spec(
         body.spec.to_domain(), symbol=body.symbol or None
     )
     return StrategyDraftOut.from_domain(draft)
@@ -156,8 +157,8 @@ async def create_draft_from_spec_json(
     summary="List strategy drafts",
     description="Every PDF-derived draft, newest first, regardless of review status.",
 )
-async def list_drafts(request: Request) -> list[StrategyDraftOut]:
-    drafts = await _service(request).list_drafts()
+async def list_drafts(account: AccountRuntimeDep) -> list[StrategyDraftOut]:
+    drafts = await _service(account).list_drafts()
     return [StrategyDraftOut.from_domain(d) for d in drafts]
 
 
@@ -169,10 +170,10 @@ async def list_drafts(request: Request) -> list[StrategyDraftOut]:
     responses=_DRAFT_NOT_FOUND,
 )
 async def get_draft(
-    request: Request,
+    account: AccountRuntimeDep,
     draft_id: str = Path(description="Draft id, as returned by POST .../upload."),
 ) -> StrategyDraftOut:
-    draft = await _service(request).get_draft(draft_id)
+    draft = await _service(account).get_draft(draft_id)
     if draft is None:
         raise HTTPException(status_code=404, detail="draft not found")
     return StrategyDraftOut.from_domain(draft)
@@ -190,12 +191,12 @@ async def get_draft(
     responses={**_DRAFT_NOT_FOUND, **_DRAFT_STATE_CONFLICT},
 )
 async def update_draft_spec(
-    request: Request,
+    account: AccountRuntimeDep,
     body: UpdateDraftSpecIn,
     draft_id: str = Path(description="Draft id to edit."),
 ) -> StrategyDraftOut:
     try:
-        draft = await _service(request).update_draft_spec(draft_id, body.edited_spec.to_domain())
+        draft = await _service(account).update_draft_spec(draft_id, body.edited_spec.to_domain())
     except InvalidDraftStateError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:
@@ -214,10 +215,10 @@ async def update_draft_spec(
     responses={**_DRAFT_NOT_FOUND, **_DRAFT_STATE_CONFLICT},
 )
 async def approve_draft(
-    request: Request, draft_id: str = Path(description="Draft id to approve.")
+    account: AccountRuntimeDep, draft_id: str = Path(description="Draft id to approve.")
 ) -> StrategyDraftOut:
     try:
-        draft = await _service(request).approve_draft(draft_id)
+        draft = await _service(account).approve_draft(draft_id)
     except InvalidDraftStateError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:
@@ -234,10 +235,10 @@ async def approve_draft(
     responses=_DRAFT_NOT_FOUND,
 )
 async def reject_draft(
-    request: Request, draft_id: str = Path(description="Draft id to reject.")
+    account: AccountRuntimeDep, draft_id: str = Path(description="Draft id to reject.")
 ) -> StrategyDraftOut:
     try:
-        draft = await _service(request).reject_draft(draft_id)
+        draft = await _service(account).reject_draft(draft_id)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     return StrategyDraftOut.from_domain(draft)
@@ -265,10 +266,10 @@ async def reject_draft(
     },
 )
 async def generate_code(
-    request: Request, draft_id: str = Path(description="Draft id, must be approved.")
+    account: AccountRuntimeDep, draft_id: str = Path(description="Draft id, must be approved.")
 ) -> GeneratedCodeOut:
     try:
-        result = await _service(request).generate_code(draft_id)
+        result = await _service(account).generate_code(draft_id)
     except InvalidDraftStateError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except LLMProviderNotConfiguredError as exc:

@@ -19,6 +19,7 @@ from sqlalchemy.orm import sessionmaker
 from src.broker.adapters.paper import PaperBroker
 from src.broker.api.routes import router as account_router
 from src.broker.api.trading_routes import router as trading_router
+from src.broker.api.trading_routes import spread_router as broker_spread_router
 from src.broker.application.order_service import OrderService
 from src.broker.application.reconciliation import ReconciliationService
 from src.broker.application.spread_gate import SpreadGate
@@ -199,12 +200,18 @@ class ContainerForTest:
 
         self.event_bus.subscribe(TenTradesCompleted, _capture_review)
 
+        # Resolves `get_account_runtime`'s `container.accounts[account_id]` lookup —
+        # this flat object already carries every AccountRuntime-scoped field the
+        # per-account routes need, so it doubles as its own single-entry registry.
+        self.accounts = {"default": self}
+
 
 def _make_api_client(container: ContainerForTest):
     app = FastAPI()
     app.include_router(account_router)
     app.include_router(market_data_router)
     app.include_router(trading_router)
+    app.include_router(broker_spread_router)
     app.include_router(journal_router)
     app.state.container = container
     transport = httpx.ASGITransport(app=app)
@@ -232,14 +239,14 @@ async def api_capped(tmp_path):
 async def _backfill_market_context(api) -> None:
     # Journal snapshots read from the candle repository — seed it once so
     # "capture" has something to serve.
-    await api.post("/market-data/backfill", json={"count": 5})
+    await api.post("/accounts/default/market-data/backfill", json={"count": 5})
 
 
 async def test_open_position_is_journaled_with_snapshot(api):
     await _backfill_market_context(api)
 
     opened = await api.post(
-        "/broker/orders",
+        "/accounts/default/broker/orders",
         json={"symbol": "XAUUSD", "side": "buy", "volume": 0.1, "sl": 2390.0, "tp": 2420.0},
     )
     assert opened.status_code == 200
@@ -247,11 +254,11 @@ async def test_open_position_is_journaled_with_snapshot(api):
     assert body["price"] == 2400.35
     ticket = body["ticket"]
 
-    positions = (await api.get("/broker/positions")).json()
+    positions = (await api.get("/accounts/default/broker/positions")).json()
     assert len(positions) == 1
     assert positions[0]["ticket"] == ticket
 
-    trades = (await api.get("/journal/trades", params={"symbol": "XAUUSD"})).json()
+    trades = (await api.get("/accounts/default/journal/trades", params={"symbol": "XAUUSD"})).json()
     assert len(trades) == 1
     assert trades[0]["id"] == str(ticket)
     assert trades[0]["close_time"] is None
@@ -262,13 +269,15 @@ async def test_rejected_order_is_not_journaled(api):
 
     # sl/tp both given but too tight for XAUUSD's min_rr=1.5 → fails the RR gate.
     rejected = await api.post(
-        "/broker/orders",
+        "/accounts/default/broker/orders",
         json={"symbol": "XAUUSD", "side": "buy", "volume": 0.1, "sl": 2399.0, "tp": 2400.5},
     )
     assert rejected.status_code == 422
 
-    assert (await api.get("/broker/positions")).json() == []
-    assert (await api.get("/journal/trades", params={"symbol": "XAUUSD"})).json() == []
+    assert (await api.get("/accounts/default/broker/positions")).json() == []
+    assert (
+        await api.get("/accounts/default/journal/trades", params={"symbol": "XAUUSD"})
+    ).json() == []
 
 
 async def test_market_order_without_sl_tp_is_allowed(api):
@@ -277,13 +286,13 @@ async def test_market_order_without_sl_tp_is_allowed(api):
     await _backfill_market_context(api)
 
     opened = await api.post(
-        "/broker/orders", json={"symbol": "XAUUSD", "side": "buy", "volume": 0.1}
+        "/accounts/default/broker/orders", json={"symbol": "XAUUSD", "side": "buy", "volume": 0.1}
     )
     assert opened.status_code == 200
     assert opened.json()["sl"] is None
     assert opened.json()["tp"] is None
 
-    positions = (await api.get("/broker/positions")).json()
+    positions = (await api.get("/accounts/default/broker/positions")).json()
     assert len(positions) == 1
 
 
@@ -291,18 +300,20 @@ async def test_close_position_updates_journal_and_markers(api):
     await _backfill_market_context(api)
 
     opened = await api.post(
-        "/broker/orders",
+        "/accounts/default/broker/orders",
         json={"symbol": "XAUUSD", "side": "buy", "volume": 0.1, "sl": 2390.0, "tp": 2420.0},
     )
     ticket = opened.json()["ticket"]
 
-    closed = await api.post(f"/broker/positions/{ticket}/close")
+    closed = await api.post(f"/accounts/default/broker/positions/{ticket}/close")
     assert closed.status_code == 200
     assert closed.json()["price"] == 2400.10
 
-    assert (await api.get("/broker/positions")).json() == []
+    assert (await api.get("/accounts/default/broker/positions")).json() == []
 
-    markers = (await api.get("/journal/markers", params={"symbol": "XAUUSD"})).json()
+    markers = (
+        await api.get("/accounts/default/journal/markers", params={"symbol": "XAUUSD"})
+    ).json()
     assert len(markers) == 1
     assert markers[0]["close_price"] == 2400.10
     assert markers[0]["close_time"] is not None
@@ -315,21 +326,23 @@ async def test_close_all_positions_closes_every_open_position_on_symbol(api):
     tickets = []
     for _ in range(2):
         opened = await api.post(
-            "/broker/orders",
+            "/accounts/default/broker/orders",
             json={"symbol": "XAUUSD", "side": "buy", "volume": 0.1, "sl": 2390.0, "tp": 2420.0},
         )
         tickets.append(opened.json()["ticket"])
 
-    assert len((await api.get("/broker/positions")).json()) == 2
+    assert len((await api.get("/accounts/default/broker/positions")).json()) == 2
 
-    closed = await api.post("/broker/positions/close-all", params={"symbol": "XAUUSD"})
+    closed = await api.post(
+        "/accounts/default/broker/positions/close-all", params={"symbol": "XAUUSD"}
+    )
     assert closed.status_code == 200
     closed_tickets = [r["ticket"] for r in closed.json()]
     assert sorted(closed_tickets) == sorted(tickets)
 
-    assert (await api.get("/broker/positions")).json() == []
+    assert (await api.get("/accounts/default/broker/positions")).json() == []
 
-    trades = (await api.get("/journal/trades", params={"symbol": "XAUUSD"})).json()
+    trades = (await api.get("/accounts/default/journal/trades", params={"symbol": "XAUUSD"})).json()
     assert len(trades) == 2
     assert all(t["close_time"] is not None for t in trades)
 
@@ -345,13 +358,13 @@ async def test_manually_placed_trades_never_trigger_the_ten_trade_review(api):
 
     for _ in range(2):
         opened = await api.post(
-            "/broker/orders",
+            "/accounts/default/broker/orders",
             json={"symbol": "XAUUSD", "side": "buy", "volume": 0.1, "sl": 2390.0, "tp": 2420.0},
         )
         ticket = opened.json()["ticket"]
-        await api.post(f"/broker/positions/{ticket}/close")
+        await api.post(f"/accounts/default/broker/positions/{ticket}/close")
 
-    trades = (await api.get("/journal/trades", params={"symbol": "XAUUSD"})).json()
+    trades = (await api.get("/accounts/default/journal/trades", params={"symbol": "XAUUSD"})).json()
     assert len(trades) == 2
     assert all(t["close_time"] is not None for t in trades)
     assert all(t["skill"] is None for t in trades)
@@ -363,25 +376,25 @@ async def test_market_order_rejected_at_max_open_positions(api_capped):
     await _backfill_market_context(api_capped)
 
     first = await api_capped.post(
-        "/broker/orders",
+        "/accounts/default/broker/orders",
         json={"symbol": "XAUUSD", "side": "buy", "volume": 0.1, "sl": 2390.0, "tp": 2420.0},
     )
     assert first.status_code == 200
 
     second = await api_capped.post(
-        "/broker/orders",
+        "/accounts/default/broker/orders",
         json={"symbol": "XAUUSD", "side": "buy", "volume": 0.1, "sl": 2390.0, "tp": 2420.0},
     )
     assert second.status_code == 422
     assert "max open positions" in second.json()["detail"]
 
-    positions = (await api_capped.get("/broker/positions")).json()
+    positions = (await api_capped.get("/accounts/default/broker/positions")).json()
     assert len(positions) == 1
 
 
 async def test_place_list_modify_cancel_pending_order(api):
     placed = await api.post(
-        "/broker/orders/pending",
+        "/accounts/default/broker/orders/pending",
         json={
             "symbol": "XAUUSD",
             "side": "buy",
@@ -396,27 +409,30 @@ async def test_place_list_modify_cancel_pending_order(api):
     ticket = placed.json()["ticket"]
     assert placed.json()["order_type"] == "limit"
 
-    listed = (await api.get("/broker/orders/pending", params={"symbol": "XAUUSD"})).json()
+    listed = (
+        await api.get("/accounts/default/broker/orders/pending", params={"symbol": "XAUUSD"})
+    ).json()
     assert len(listed) == 1
     assert listed[0]["ticket"] == ticket
 
     modified = await api.post(
-        f"/broker/orders/pending/{ticket}/modify", json={"price": 2394.0, "sl": None, "tp": None}
+        f"/accounts/default/broker/orders/pending/{ticket}/modify",
+        json={"price": 2394.0, "sl": None, "tp": None},
     )
     assert modified.status_code == 200
-    listed = (await api.get("/broker/orders/pending")).json()
+    listed = (await api.get("/accounts/default/broker/orders/pending")).json()
     assert listed[0]["price"] == 2394.0
 
-    cancelled = await api.delete(f"/broker/orders/pending/{ticket}")
+    cancelled = await api.delete(f"/accounts/default/broker/orders/pending/{ticket}")
     assert cancelled.status_code == 200
-    assert (await api.get("/broker/orders/pending")).json() == []
+    assert (await api.get("/accounts/default/broker/orders/pending")).json() == []
 
 
 async def test_pending_order_above_ask_is_rejected(api):
     # Buy-limit at 2405 is above the current ask (2400.35) — wrong side of
     # market for a limit order, so the paper broker refuses it.
     rejected = await api.post(
-        "/broker/orders/pending",
+        "/accounts/default/broker/orders/pending",
         json={
             "symbol": "XAUUSD",
             "side": "buy",
@@ -432,7 +448,7 @@ async def test_pending_order_fills_when_price_crosses_and_is_journaled(api):
     await _backfill_market_context(api)
 
     placed = await api.post(
-        "/broker/orders/pending",
+        "/accounts/default/broker/orders/pending",
         json={
             "symbol": "XAUUSD",
             "side": "buy",
@@ -447,19 +463,19 @@ async def test_pending_order_fills_when_price_crosses_and_is_journaled(api):
 
     # Price hasn't reached the trigger yet — a candle close should leave it resting.
     await api.container.position_manager.on_candle_closed("XAUUSD")
-    assert (await api.get("/broker/orders/pending")).json()[0]["ticket"] == ticket
-    assert (await api.get("/broker/positions")).json() == []
+    assert (await api.get("/accounts/default/broker/orders/pending")).json()[0]["ticket"] == ticket
+    assert (await api.get("/accounts/default/broker/positions")).json() == []
 
     # Now the ask drops through the buy-limit's trigger price.
     api.container.gateway_state["ask"] = 2394.0
     await api.container.position_manager.on_candle_closed("XAUUSD")
 
-    assert (await api.get("/broker/orders/pending")).json() == []
-    positions = (await api.get("/broker/positions")).json()
+    assert (await api.get("/accounts/default/broker/orders/pending")).json() == []
+    positions = (await api.get("/accounts/default/broker/positions")).json()
     assert len(positions) == 1
     assert positions[0]["open_price"] == 2394.0
 
-    trades = (await api.get("/journal/trades", params={"symbol": "XAUUSD"})).json()
+    trades = (await api.get("/accounts/default/journal/trades", params={"symbol": "XAUUSD"})).json()
     assert len(trades) == 1
 
     assert api.container.risk_manager.status.trades_today == 1

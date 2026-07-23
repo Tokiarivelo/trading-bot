@@ -53,14 +53,16 @@ async def api(service):
     strategy_versions, _ = service
     app = FastAPI()
     app.include_router(router)
-    app.state.container = SimpleNamespace(strategy_versions=strategy_versions)
+    app.state.container = SimpleNamespace(
+        accounts={"default": SimpleNamespace(strategy_versions=strategy_versions)}
+    )
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://backend") as client:
         yield client
 
 
 async def test_list_versions_empty(api):
-    response = await api.get("/strategies/versions")
+    response = await api.get("/accounts/default/strategies/versions")
     assert response.status_code == 200
     assert response.json() == []
 
@@ -71,20 +73,20 @@ async def test_list_and_get_version(api, service):
         name="sample", code=VALID_CODE, source=CodeSource.AI_GENERATED
     )
 
-    list_response = await api.get("/strategies/versions")
+    list_response = await api.get("/accounts/default/strategies/versions")
     assert list_response.status_code == 200
     (summary,) = list_response.json()
     assert summary["id"] == v1.id
     assert summary["status"] == "validated"
 
-    detail_response = await api.get(f"/strategies/versions/{v1.id}")
+    detail_response = await api.get(f"/accounts/default/strategies/versions/{v1.id}")
     assert detail_response.status_code == 200
     detail = detail_response.json()
     assert detail["code"] == VALID_CODE
 
 
 async def test_get_version_not_found(api):
-    response = await api.get("/strategies/versions/does-not-exist")
+    response = await api.get("/accounts/default/strategies/versions/does-not-exist")
     assert response.status_code == 404
 
 
@@ -93,7 +95,7 @@ async def test_activate_registers_and_archives_previous(api, service):
     v1 = strategy_versions.save_generated_code(
         name="sample", code=VALID_CODE, source=CodeSource.AI_GENERATED
     )
-    activate_response = await api.post(f"/strategies/versions/{v1.id}/activate")
+    activate_response = await api.post(f"/accounts/default/strategies/versions/{v1.id}/activate")
     assert activate_response.status_code == 200
     assert activate_response.json()["status"] == "active"
     assert registry.get("sample") is not None
@@ -101,9 +103,9 @@ async def test_activate_registers_and_archives_previous(api, service):
     v2 = strategy_versions.save_generated_code(
         name="sample", code=VALID_CODE, source=CodeSource.AI_GENERATED
     )
-    await api.post(f"/strategies/versions/{v2.id}/activate")
+    await api.post(f"/accounts/default/strategies/versions/{v2.id}/activate")
 
-    v1_after = await api.get(f"/strategies/versions/{v1.id}")
+    v1_after = await api.get(f"/accounts/default/strategies/versions/{v1.id}")
     assert v1_after.json()["status"] == "archived"
 
 
@@ -112,19 +114,19 @@ async def test_activate_is_rollback(api, service):
     v1 = strategy_versions.save_generated_code(
         name="sample", code=VALID_CODE, source=CodeSource.AI_GENERATED
     )
-    await api.post(f"/strategies/versions/{v1.id}/activate")
+    await api.post(f"/accounts/default/strategies/versions/{v1.id}/activate")
     v2 = strategy_versions.save_generated_code(
         name="sample", code=VALID_CODE, source=CodeSource.AI_GENERATED
     )
-    await api.post(f"/strategies/versions/{v2.id}/activate")
+    await api.post(f"/accounts/default/strategies/versions/{v2.id}/activate")
 
-    rollback_response = await api.post(f"/strategies/versions/{v1.id}/activate")
+    rollback_response = await api.post(f"/accounts/default/strategies/versions/{v1.id}/activate")
     assert rollback_response.status_code == 200
     assert rollback_response.json()["status"] == "active"
 
 
 async def test_activate_not_found(api):
-    response = await api.post("/strategies/versions/does-not-exist/activate")
+    response = await api.post("/accounts/default/strategies/versions/does-not-exist/activate")
     assert response.status_code == 404
 
 
@@ -134,7 +136,7 @@ async def test_duplicate_version(api, service):
         name="sample", code=VALID_CODE, source=CodeSource.AI_GENERATED
     )
     response = await api.post(
-        f"/strategies/versions/{v1.id}/duplicate", json={"name": "sample_fork"}
+        f"/accounts/default/strategies/versions/{v1.id}/duplicate", json={"name": "sample_fork"}
     )
     assert response.status_code == 200
     body = response.json()
@@ -148,13 +150,16 @@ async def test_duplicate_version_name_conflict(api, service):
     v1 = strategy_versions.save_generated_code(
         name="sample", code=VALID_CODE, source=CodeSource.AI_GENERATED
     )
-    response = await api.post(f"/strategies/versions/{v1.id}/duplicate", json={"name": "sample"})
+    response = await api.post(
+        f"/accounts/default/strategies/versions/{v1.id}/duplicate", json={"name": "sample"}
+    )
     assert response.status_code == 409
 
 
 async def test_duplicate_version_not_found(api):
     response = await api.post(
-        "/strategies/versions/does-not-exist/duplicate", json={"name": "sample_fork"}
+        "/accounts/default/strategies/versions/does-not-exist/duplicate",
+        json={"name": "sample_fork"},
     )
     assert response.status_code == 404
 
@@ -165,12 +170,12 @@ async def test_rename_version(api, service):
         name="sample", code=VALID_CODE, source=CodeSource.AI_GENERATED
     )
     response = await api.patch(
-        f"/strategies/versions/{v1.id}/rename", json={"name": "renamed_sample"}
+        f"/accounts/default/strategies/versions/{v1.id}/rename", json={"name": "renamed_sample"}
     )
     assert response.status_code == 200
     assert response.json()["name"] == "renamed_sample"
 
-    listed = await api.get("/strategies/versions")
+    listed = await api.get("/accounts/default/strategies/versions")
     (summary,) = listed.json()
     assert summary["name"] == "renamed_sample"
 
@@ -183,13 +188,15 @@ async def test_rename_version_name_conflict(api, service):
     strategy_versions.save_generated_code(
         name="other", code=VALID_CODE, source=CodeSource.AI_GENERATED
     )
-    response = await api.patch(f"/strategies/versions/{v1.id}/rename", json={"name": "other"})
+    response = await api.patch(
+        f"/accounts/default/strategies/versions/{v1.id}/rename", json={"name": "other"}
+    )
     assert response.status_code == 409
 
 
 async def test_rename_version_not_found(api):
     response = await api.patch(
-        "/strategies/versions/does-not-exist/rename", json={"name": "renamed"}
+        "/accounts/default/strategies/versions/does-not-exist/rename", json={"name": "renamed"}
     )
     assert response.status_code == 404
 
@@ -202,9 +209,9 @@ async def test_list_versions_filters_by_status(api, service):
     strategy_versions.save_generated_code(
         name="sample", code=VALID_CODE, source=CodeSource.AI_GENERATED
     )
-    await api.post(f"/strategies/versions/{v1.id}/activate")
+    await api.post(f"/accounts/default/strategies/versions/{v1.id}/activate")
 
-    response = await api.get("/strategies/versions", params={"status": "active"})
+    response = await api.get("/accounts/default/strategies/versions", params={"status": "active"})
     assert response.status_code == 200
     (summary,) = response.json()
     assert summary["id"] == v1.id
@@ -215,14 +222,14 @@ async def test_pause_and_resume_version(api, service):
     v1 = strategy_versions.save_generated_code(
         name="sample", code=VALID_CODE, source=CodeSource.AI_GENERATED
     )
-    await api.post(f"/strategies/versions/{v1.id}/activate")
+    await api.post(f"/accounts/default/strategies/versions/{v1.id}/activate")
 
-    pause_response = await api.post(f"/strategies/versions/{v1.id}/pause")
+    pause_response = await api.post(f"/accounts/default/strategies/versions/{v1.id}/pause")
     assert pause_response.status_code == 200
     assert pause_response.json()["paused"] is True
     assert registry.get("sample") is None
 
-    resume_response = await api.post(f"/strategies/versions/{v1.id}/resume")
+    resume_response = await api.post(f"/accounts/default/strategies/versions/{v1.id}/resume")
     assert resume_response.status_code == 200
     assert resume_response.json()["paused"] is False
     assert registry.get("sample") is not None
@@ -233,12 +240,12 @@ async def test_pause_non_active_version_returns_409(api, service):
     v1 = strategy_versions.save_generated_code(
         name="sample", code=VALID_CODE, source=CodeSource.AI_GENERATED
     )
-    response = await api.post(f"/strategies/versions/{v1.id}/pause")
+    response = await api.post(f"/accounts/default/strategies/versions/{v1.id}/pause")
     assert response.status_code == 409
 
 
 async def test_pause_not_found(api):
-    response = await api.post("/strategies/versions/does-not-exist/pause")
+    response = await api.post("/accounts/default/strategies/versions/does-not-exist/pause")
     assert response.status_code == 404
 
 
@@ -247,9 +254,9 @@ async def test_archive_active_version(api, service):
     v1 = strategy_versions.save_generated_code(
         name="sample", code=VALID_CODE, source=CodeSource.AI_GENERATED
     )
-    await api.post(f"/strategies/versions/{v1.id}/activate")
+    await api.post(f"/accounts/default/strategies/versions/{v1.id}/activate")
 
-    response = await api.post(f"/strategies/versions/{v1.id}/archive")
+    response = await api.post(f"/accounts/default/strategies/versions/{v1.id}/archive")
     assert response.status_code == 200
     assert response.json()["status"] == "archived"
     assert registry.get("sample") is None
@@ -260,14 +267,14 @@ async def test_archive_already_archived_returns_409(api, service):
     v1 = strategy_versions.save_generated_code(
         name="sample", code=VALID_CODE, source=CodeSource.AI_GENERATED
     )
-    await api.post(f"/strategies/versions/{v1.id}/activate")
-    await api.post(f"/strategies/versions/{v1.id}/archive")
-    response = await api.post(f"/strategies/versions/{v1.id}/archive")
+    await api.post(f"/accounts/default/strategies/versions/{v1.id}/activate")
+    await api.post(f"/accounts/default/strategies/versions/{v1.id}/archive")
+    response = await api.post(f"/accounts/default/strategies/versions/{v1.id}/archive")
     assert response.status_code == 409
 
 
 async def test_archive_not_found(api):
-    response = await api.post("/strategies/versions/does-not-exist/archive")
+    response = await api.post("/accounts/default/strategies/versions/does-not-exist/archive")
     assert response.status_code == 404
 
 
@@ -276,10 +283,10 @@ async def test_delete_validated_version(api, service):
     v1 = strategy_versions.save_generated_code(
         name="sample", code=VALID_CODE, source=CodeSource.AI_GENERATED
     )
-    response = await api.delete(f"/strategies/versions/{v1.id}")
+    response = await api.delete(f"/accounts/default/strategies/versions/{v1.id}")
     assert response.status_code == 204
 
-    get_response = await api.get(f"/strategies/versions/{v1.id}")
+    get_response = await api.get(f"/accounts/default/strategies/versions/{v1.id}")
     assert get_response.status_code == 404
 
 
@@ -288,13 +295,13 @@ async def test_delete_active_version_returns_409(api, service):
     v1 = strategy_versions.save_generated_code(
         name="sample", code=VALID_CODE, source=CodeSource.AI_GENERATED
     )
-    await api.post(f"/strategies/versions/{v1.id}/activate")
-    response = await api.delete(f"/strategies/versions/{v1.id}")
+    await api.post(f"/accounts/default/strategies/versions/{v1.id}/activate")
+    response = await api.delete(f"/accounts/default/strategies/versions/{v1.id}")
     assert response.status_code == 409
 
 
 async def test_delete_not_found(api):
-    response = await api.delete("/strategies/versions/does-not-exist")
+    response = await api.delete("/accounts/default/strategies/versions/does-not-exist")
     assert response.status_code == 404
 
 
@@ -308,7 +315,9 @@ async def test_edit_version_code_saves_new_version(api, service):
     v1 = strategy_versions.save_generated_code(
         name="sample", code=VALID_CODE, source=CodeSource.AI_GENERATED
     )
-    response = await api.post(f"/strategies/versions/{v1.id}/edit", json={"code": EDITED_CODE})
+    response = await api.post(
+        f"/accounts/default/strategies/versions/{v1.id}/edit", json={"code": EDITED_CODE}
+    )
     assert response.status_code == 200
     body = response.json()
     assert body["version"] == 2
@@ -323,13 +332,15 @@ async def test_edit_version_code_invalid_returns_422(api, service):
     v1 = strategy_versions.save_generated_code(
         name="sample", code=VALID_CODE, source=CodeSource.AI_GENERATED
     )
-    response = await api.post(f"/strategies/versions/{v1.id}/edit", json={"code": INVALID_CODE})
+    response = await api.post(
+        f"/accounts/default/strategies/versions/{v1.id}/edit", json={"code": INVALID_CODE}
+    )
     assert response.status_code == 422
 
 
 async def test_edit_version_code_not_found(api):
     response = await api.post(
-        "/strategies/versions/does-not-exist/edit", json={"code": VALID_CODE}
+        "/accounts/default/strategies/versions/does-not-exist/edit", json={"code": VALID_CODE}
     )
     assert response.status_code == 404
 
@@ -340,7 +351,7 @@ async def test_edit_version_code_with_new_name_forks(api, service):
         name="sample", code=VALID_CODE, source=CodeSource.AI_GENERATED
     )
     response = await api.post(
-        f"/strategies/versions/{v1.id}/edit",
+        f"/accounts/default/strategies/versions/{v1.id}/edit",
         json={"code": EDITED_CODE, "new_name": "sample_fork"},
     )
     assert response.status_code == 200
@@ -359,7 +370,8 @@ async def test_edit_version_code_new_name_conflict_returns_409(api, service):
         name="other", code=VALID_CODE, source=CodeSource.AI_GENERATED
     )
     response = await api.post(
-        f"/strategies/versions/{v1.id}/edit", json={"code": EDITED_CODE, "new_name": "other"}
+        f"/accounts/default/strategies/versions/{v1.id}/edit",
+        json={"code": EDITED_CODE, "new_name": "other"},
     )
     assert response.status_code == 409
 
@@ -384,7 +396,7 @@ async def test_get_version_with_legacy_string_indicators_still_validates(api, se
         name="sample", code=VALID_CODE, source=CodeSource.AI_GENERATED, spec=legacy_spec
     )
 
-    response = await api.get(f"/strategies/versions/{v1.id}")
+    response = await api.get(f"/accounts/default/strategies/versions/{v1.id}")
     assert response.status_code == 200
     spec = response.json()["spec"]
     assert spec["indicators"] == [

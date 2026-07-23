@@ -3,21 +3,23 @@
 from __future__ import annotations
 
 from dataclasses import asdict
-from typing import Any
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter
 
 from src.engine.api.schemas import EngineStatusOut, RiskCapsOut, UpdateMinLotFallbackIn
+from src.engine.application.risk_manager import RiskManager
+from src.engine.application.trade_loop import TradeEngine
+from src.shared.api.dependencies import AccountRuntimeDep
 
-router = APIRouter(prefix="/engine", tags=["engine"])
+router = APIRouter(prefix="/accounts/{account_id}/engine", tags=["engine"])
 
 
-def _engine(request: Request) -> Any:
-    return request.app.state.container.trade_engine
+def _engine(account: AccountRuntimeDep) -> TradeEngine:
+    return account.trade_engine
 
 
-def _risk_manager(request: Request) -> Any:
-    return request.app.state.container.risk_manager
+def _risk_manager(account: AccountRuntimeDep) -> RiskManager:
+    return account.risk_manager
 
 
 @router.get(
@@ -30,8 +32,8 @@ def _risk_manager(request: Request) -> Any:
         "Polled by the UI's bot-control panel."
     ),
 )
-async def get_status(request: Request) -> EngineStatusOut:
-    return EngineStatusOut(**asdict(_engine(request).status))
+async def get_status(account: AccountRuntimeDep) -> EngineStatusOut:
+    return EngineStatusOut(**asdict(_engine(account).status))
 
 
 @router.post(
@@ -45,9 +47,9 @@ async def get_status(request: Request) -> EngineStatusOut:
         "skipped rather than aborting the sweep."
     ),
 )
-async def kill_switch(request: Request) -> EngineStatusOut:
-    await _engine(request).kill_switch()
-    return EngineStatusOut(**asdict(_engine(request).status))
+async def kill_switch(account: AccountRuntimeDep) -> EngineStatusOut:
+    await _engine(account).kill_switch()
+    return EngineStatusOut(**asdict(_engine(account).status))
 
 
 @router.post(
@@ -60,9 +62,9 @@ async def kill_switch(request: Request) -> EngineStatusOut:
         "entries again on the next candle close."
     ),
 )
-async def resume(request: Request) -> EngineStatusOut:
-    _engine(request).resume()
-    return EngineStatusOut(**asdict(_engine(request).status))
+async def resume(account: AccountRuntimeDep) -> EngineStatusOut:
+    _engine(account).resume()
+    return EngineStatusOut(**asdict(_engine(account).status))
 
 
 @router.get(
@@ -76,8 +78,8 @@ async def resume(request: Request) -> EngineStatusOut:
         "reflect the live override instead."
     ),
 )
-async def get_risk_caps(request: Request) -> RiskCapsOut:
-    return RiskCapsOut(**asdict(_risk_manager(request).caps))
+async def get_risk_caps(account: AccountRuntimeDep) -> RiskCapsOut:
+    return RiskCapsOut(**asdict(_risk_manager(account).caps))
 
 
 @router.put(
@@ -94,8 +96,10 @@ async def get_risk_caps(request: Request) -> RiskCapsOut:
         "to change the default (see CLAUDE.md: risk caps are user-owned)."
     ),
 )
-async def update_min_lot_fallback(body: UpdateMinLotFallbackIn, request: Request) -> RiskCapsOut:
-    _risk_manager(request).set_min_lot_fallback(
+async def update_min_lot_fallback(
+    body: UpdateMinLotFallbackIn, account: AccountRuntimeDep
+) -> RiskCapsOut:
+    _risk_manager(account).set_min_lot_fallback(
         enabled=body.enabled, max_risk_per_trade_pct=body.max_risk_per_trade_pct
     )
-    return RiskCapsOut(**asdict(_risk_manager(request).caps))
+    return RiskCapsOut(**asdict(_risk_manager(account).caps))

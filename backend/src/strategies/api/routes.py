@@ -10,8 +10,9 @@ from __future__ import annotations
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Path, Query, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
+from src.shared.api.dependencies import AccountRuntimeDep
 from src.strategies.api.schemas import (
     DuplicateVersionRequest,
     EditVersionCodeRequest,
@@ -30,7 +31,12 @@ from src.strategies.application.versioning import (
 )
 from src.strategies.domain.versioning import VersionStatus
 
-router = APIRouter(prefix="/strategies", tags=["strategies"])
+router = APIRouter(prefix="/accounts/{account_id}/strategies", tags=["strategies"])
+
+# `evaluate-custom` is a sandbox scratchpad over raw candle history, not tied
+# to any account's own strategy registry — stays global/unprefixed, unlike
+# every other route in this module (MULTI_ACCOUNT_PLAN.md Phase 6).
+sandbox_router = APIRouter(prefix="/strategies", tags=["strategies"])
 
 _VERSION_NOT_FOUND = {404: {"description": "No strategy version with that id."}}
 
@@ -42,8 +48,8 @@ _STATUS_QUERY = Query(
 )
 
 
-def _service(request: Request) -> StrategyVersionService:
-    return request.app.state.container.strategy_versions
+def _service(account: AccountRuntimeDep) -> StrategyVersionService:
+    return account.strategy_versions
 
 
 @router.get(
@@ -55,11 +61,11 @@ def _service(request: Request) -> StrategyVersionService:
     "to fetch only what's currently live, without pulling every historical version).",
 )
 async def list_versions(
-    request: Request,
+    account: AccountRuntimeDep,
     name: str | None = Query(default=None, description="Restrict to this strategy family name."),
     status: VersionStatus | None = _STATUS_QUERY,
 ) -> list[StrategyVersionOut]:
-    versions = _service(request).list_versions(name, status)
+    versions = _service(account).list_versions(name, status)
     return [StrategyVersionOut.from_domain(v) for v in versions]
 
 
@@ -72,10 +78,10 @@ async def list_versions(
     responses=_VERSION_NOT_FOUND,
 )
 async def get_version(
-    request: Request,
+    account: AccountRuntimeDep,
     version_id: str = Path(description="Version id, as returned by GET /strategies/versions."),
 ) -> StrategyVersionDetailOut:
-    service = _service(request)
+    service = _service(account)
     version = service.get_version(version_id)
     if version is None:
         raise HTTPException(status_code=404, detail="strategy version not found")
@@ -100,10 +106,10 @@ async def get_version(
     },
 )
 async def activate_version(
-    request: Request,
+    account: AccountRuntimeDep,
     version_id: str = Path(description="Version id to activate (or reactivate, for rollback)."),
 ) -> StrategyVersionOut:
-    service = _service(request)
+    service = _service(account)
     try:
         version = service.activate_version(version_id)
     except StrategyValidationError as exc:
@@ -138,11 +144,11 @@ async def activate_version(
     },
 )
 async def duplicate_version(
-    request: Request,
+    account: AccountRuntimeDep,
     body: DuplicateVersionRequest,
     version_id: str = Path(description="Version id to duplicate."),
 ) -> StrategyVersionOut:
-    service = _service(request)
+    service = _service(account)
     try:
         duplicated = service.duplicate_version(
             version_id,
@@ -175,11 +181,11 @@ async def duplicate_version(
     },
 )
 async def rename_version(
-    request: Request,
+    account: AccountRuntimeDep,
     body: RenameVersionRequest,
     version_id: str = Path(description="Any version id belonging to the family to rename."),
 ) -> StrategyVersionOut:
-    service = _service(request)
+    service = _service(account)
     try:
         renamed = service.rename_family(version_id, body.name)
     except StrategyNameConflictError as exc:
@@ -207,16 +213,18 @@ async def rename_version(
     responses={
         **_VERSION_NOT_FOUND,
         409: {"description": "`new_name` is already in use by another strategy family."},
-        422: {"description": "The edited code failed sandbox validation (import whitelist, "
-              "AST scan, or the smoke-test evaluate() call)."},
+        422: {
+            "description": "The edited code failed sandbox validation (import whitelist, "
+            "AST scan, or the smoke-test evaluate() call)."
+        },
     },
 )
 async def edit_version_code(
-    request: Request,
+    account: AccountRuntimeDep,
     body: EditVersionCodeRequest,
     version_id: str = Path(description="Version id whose code is being edited."),
 ) -> StrategyVersionDetailOut:
-    service = _service(request)
+    service = _service(account)
     try:
         edited = service.edit_code(version_id, body.code, new_name=body.new_name)
     except StrategyNameConflictError as exc:
@@ -244,11 +252,11 @@ async def edit_version_code(
     responses=_VERSION_NOT_FOUND,
 )
 async def update_version_spec(
-    request: Request,
+    account: AccountRuntimeDep,
     body: UpdateVersionSpecRequest,
     version_id: str = Path(description="Version id whose spec snapshot is being edited."),
 ) -> StrategyVersionOut:
-    service = _service(request)
+    service = _service(account)
     try:
         updated = service.update_spec(version_id, body.model_dump())
     except ValueError as exc:
@@ -273,10 +281,10 @@ async def update_version_spec(
     },
 )
 async def archive_version(
-    request: Request,
+    account: AccountRuntimeDep,
     version_id: str = Path(description="Version id to archive."),
 ) -> StrategyVersionOut:
-    service = _service(request)
+    service = _service(account)
     try:
         archived = service.archive_version(version_id)
     except VersionAlreadyArchivedError as exc:
@@ -302,10 +310,10 @@ async def archive_version(
     },
 )
 async def delete_version(
-    request: Request,
+    account: AccountRuntimeDep,
     version_id: str = Path(description="Version id to delete."),
 ) -> None:
-    service = _service(request)
+    service = _service(account)
     try:
         service.delete_version(version_id)
     except VersionActiveError as exc:
@@ -331,10 +339,10 @@ async def delete_version(
     },
 )
 async def pause_version(
-    request: Request,
+    account: AccountRuntimeDep,
     version_id: str = Path(description="Version id to pause — must be the active version."),
 ) -> StrategyVersionOut:
-    service = _service(request)
+    service = _service(account)
     try:
         paused = service.pause_version(version_id)
     except VersionNotActiveError as exc:
@@ -356,10 +364,10 @@ async def pause_version(
     },
 )
 async def resume_version(
-    request: Request,
+    account: AccountRuntimeDep,
     version_id: str = Path(description="Version id to resume — must be the active version."),
 ) -> StrategyVersionOut:
-    service = _service(request)
+    service = _service(account)
     try:
         resumed = service.resume_version(version_id)
     except VersionNotActiveError as exc:
@@ -370,29 +378,49 @@ async def resume_version(
 
 
 class CustomSignalOut(BaseModel):
-    time: int
-    direction: str
-    sl_points: float
-    tp_points: float
-    confidence: float
-    reason: str
+    """One signal `evaluate()` produced while stepping through history."""
+
+    time: int = Field(description="Candle open time, epoch seconds UTC.")
+    direction: str = Field(description="'buy' or 'sell'.")
+    sl_points: float = Field(description="Stop loss distance, in points.")
+    tp_points: float = Field(description="Take profit distance, in points.")
+    confidence: float = Field(description="Strategy-reported confidence, 0-1.")
+    reason: str = Field(description="Free-text reason the strategy gave for this signal.")
 
 
 class EvaluateCustomCodeRequest(BaseModel):
-    code: str
-    symbol: str
-    timeframe: str = "M5"
-    period: str = "2026-07-01:2026-07-13"
+    """Body for `POST /strategies/evaluate-custom`."""
+
+    code: str = Field(
+        description="Candidate strategy source, validated in the sandbox before running."
+    )
+    symbol: str = Field(description="Trading symbol to evaluate against, e.g. 'XAUUSD'.")
+    timeframe: str = Field(default="M5", description="Entry timeframe, e.g. 'M5'.")
+    period: str = Field(
+        default="2026-07-01:2026-07-13",
+        description="Date range to evaluate over, 'YYYY-MM-DD:YYYY-MM-DD'.",
+    )
 
 
 class EvaluateCustomCodeResponse(BaseModel):
-    signals: list[CustomSignalOut]
-    indicators: dict[str, list[float | None]]
-    candles: list[dict[str, Any]]
-    error: str | None = None
+    """Result of running `code` over `symbol`'s history for `period`."""
+
+    signals: list[CustomSignalOut] = Field(
+        description="Every signal evaluate() produced, in order."
+    )
+    indicators: dict[str, list[float | None]] = Field(
+        description="Named indicator series from the strategy's optional indicators() hook, "
+        "aligned to `candles`."
+    )
+    candles: list[dict[str, Any]] = Field(description="The candle history evaluated against.")
+    error: str | None = Field(
+        default=None,
+        description="Set instead of results if the code failed to load, parse the "
+        "period, or find any candles.",
+    )
 
 
-@router.post(
+@sandbox_router.post(
     "/evaluate-custom",
     response_model=EvaluateCustomCodeResponse,
     summary="Evaluate custom strategy code against symbol history",
@@ -422,10 +450,7 @@ async def evaluate_custom_code(
     strategy, errors = validate_and_load(body.code)
     if not strategy:
         return EvaluateCustomCodeResponse(
-            signals=[],
-            indicators={},
-            candles=[],
-            error="; ".join(errors)
+            signals=[], indicators={}, candles=[], error="; ".join(errors)
         )
 
     # 2. Parse period and set up dates
@@ -433,10 +458,7 @@ async def evaluate_custom_code(
         start, end = parse_period(body.period)
     except Exception as exc:
         return EvaluateCustomCodeResponse(
-            signals=[],
-            indicators={},
-            candles=[],
-            error=f"Invalid period format: {exc}"
+            signals=[], indicators={}, candles=[], error=f"Invalid period format: {exc}"
         )
 
     # Warmup buffer of 30 days
@@ -457,7 +479,7 @@ async def evaluate_custom_code(
             signals=[],
             indicators={},
             candles=[],
-            error=f"No candles found for {body.symbol} in the requested range."
+            error=f"No candles found for {body.symbol} in the requested range.",
         )
 
     candles_by_tf = {body.timeframe: raw_candles}
@@ -477,10 +499,7 @@ async def evaluate_custom_code(
 
     if entry_df.empty:
         return EvaluateCustomCodeResponse(
-            signals=[],
-            indicators={},
-            candles=[],
-            error="Empty candle data set."
+            signals=[], indicators={}, candles=[], error="Empty candle data set."
         )
 
     # 4. Step-by-step evaluation
@@ -491,30 +510,28 @@ async def evaluate_custom_code(
 
     for idx in eval_indices:
         current_time = entry_df.loc[idx, "time"]
-        
+
         # Slice DataFrames up to current_time
         sliced_candles = {}
         for tf, df in dfs.items():
             sliced_df = df[df["time"] <= current_time]
             sliced_candles[tf] = sliced_df
 
-        ctx = MarketContext(
-            symbol=body.symbol,
-            candles=sliced_candles,
-            spread_points=20.0
-        )
+        ctx = MarketContext(symbol=body.symbol, candles=sliced_candles, spread_points=20.0)
 
         try:
             sig = strategy.evaluate(ctx)
             if sig:
-                signals.append(CustomSignalOut(
-                    time=int(current_time.timestamp()),
-                    direction=sig.direction.value,
-                    sl_points=sig.sl_points,
-                    tp_points=sig.tp_points,
-                    confidence=sig.confidence,
-                    reason=sig.reason
-                ))
+                signals.append(
+                    CustomSignalOut(
+                        time=int(current_time.timestamp()),
+                        direction=sig.direction.value,
+                        sl_points=sig.sl_points,
+                        tp_points=sig.tp_points,
+                        confidence=sig.confidence,
+                        reason=sig.reason,
+                    )
+                )
         except Exception:
             # Silently ignore evaluation errors on specific candles
             pass
@@ -549,14 +566,12 @@ async def evaluate_custom_code(
             "high": c.high,
             "low": c.low,
             "close": c.close,
-            "tick_volume": c.tick_volume
+            "tick_volume": c.tick_volume,
         }
         for c in raw_candles
         if c.time >= start
     ]
 
     return EvaluateCustomCodeResponse(
-        signals=signals,
-        indicators=indicators_data,
-        candles=candles_out
+        signals=signals, indicators=indicators_data, candles=candles_out
     )

@@ -2,18 +2,20 @@
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Literal
 
-from fastapi import APIRouter, Query, Request
+from fastapi import APIRouter, Query
 
 from src.journal.api.schemas import TradeHistoryPage, TradeRecordOut
+from src.journal.application.trade_journal import TradeJournalService
 from src.journal.domain.models import TradeRecord
+from src.shared.api.dependencies import AccountRuntimeDep
 
-router = APIRouter(prefix="/journal", tags=["journal"])
+router = APIRouter(prefix="/accounts/{account_id}/journal", tags=["journal"])
 
 
-def _service(request: Request) -> Any:
-    return request.app.state.container.trade_journal
+def _service(account: AccountRuntimeDep) -> TradeJournalService:
+    return account.trade_journal
 
 
 def _trade_out(record: TradeRecord) -> TradeRecordOut:
@@ -51,7 +53,7 @@ def _trade_out(record: TradeRecord) -> TradeRecordOut:
     ),
 )
 async def get_markers(
-    request: Request,
+    account: AccountRuntimeDep,
     symbol: str = Query(description="Trading symbol, e.g. 'XAUUSD'."),
     frm: int | None = Query(
         default=None, alias="from", description="Range start, epoch seconds UTC (inclusive)."
@@ -64,7 +66,7 @@ async def get_markers(
         default=1000, ge=1, le=5000, description="Maximum number of most-recent trades to return."
     ),
 ) -> list[TradeRecordOut]:
-    records = await _service(request).get_markers(symbol, frm, to, skill, limit)
+    records = await _service(account).get_markers(symbol, frm, to, skill, limit)
     return [_trade_out(r) for r in records]
 
 
@@ -75,11 +77,11 @@ async def get_markers(
     description="Returns the most recent `limit` trades for `symbol`, newest first.",
 )
 async def get_trades(
-    request: Request,
+    account: AccountRuntimeDep,
     symbol: str = Query(description="Trading symbol, e.g. 'XAUUSD'."),
     limit: int = Query(default=50, ge=1, le=500, description="Maximum number of trades to return."),
 ) -> list[TradeRecordOut]:
-    records = await _service(request).get_last_n(symbol, limit)
+    records = await _service(account).get_last_n(symbol, limit)
     return [_trade_out(r) for r in records]
 
 
@@ -96,7 +98,7 @@ async def get_trades(
     ),
 )
 async def get_history(
-    request: Request,
+    account: AccountRuntimeDep,
     symbol: str | None = Query(default=None, description="Exact symbol match, e.g. 'XAUUSD'."),
     side: Literal["buy", "sell"] | None = Query(default=None, description="Trade direction."),
     strategy_version: str | None = Query(
@@ -108,8 +110,7 @@ async def get_history(
     outcome: Literal["win", "loss", "breakeven", "open"] | None = Query(
         default=None,
         description=(
-            "'open' = not yet closed; 'win'/'loss'/'breakeven' = closed with "
-            "profit >0 / <0 / ==0."
+            "'open' = not yet closed; 'win'/'loss'/'breakeven' = closed with profit >0 / <0 / ==0."
         ),
     ),
     open_from: int | None = Query(
@@ -131,7 +132,7 @@ async def get_history(
     limit: int = Query(default=50, ge=1, le=500, description="Page size."),
     offset: int = Query(default=0, ge=0, description="Number of matching trades to skip."),
 ) -> TradeHistoryPage:
-    records, total = await _service(request).search_trades(
+    records, total = await _service(account).search_trades(
         symbol=symbol,
         side=side,
         strategy_version=strategy_version,

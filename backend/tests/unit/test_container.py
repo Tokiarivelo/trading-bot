@@ -98,6 +98,84 @@ async def test_account_event_buses_are_isolated(two_account_settings):
         await container.aclose()
 
 
+async def test_account_risk_override_tightens_caps_for_one_account_only(tmp_path: Path):
+    """MULTI_ACCOUNT_PLAN.md Phase 7: an account whose `accounts.yaml` entry
+    sets `risk_override_file` gets a per-account `RiskManager` with the
+    override merged on top of the global `configs/risk.yaml` floor; an
+    account with no override keeps the global caps untouched."""
+    configs_dir = tmp_path / "configs"
+    shutil.copytree(CONFIGS_DIR, configs_dir)
+    (configs_dir / "risk").mkdir()
+    (configs_dir / "risk" / "acct-b.yaml").write_text(
+        "risk_per_trade_pct: 0.1\nmax_open_positions: 1\n"
+    )
+    (configs_dir / "accounts.yaml").write_text(
+        "accounts:\n"
+        "  - id: acct-a\n"
+        "    label: Account A\n"
+        "    gateway_url: http://127.0.0.1:19001\n"
+        "    gateway_shared_secret_env: TB_GATEWAY_SHARED_SECRET\n"
+        "    mode: paper\n"
+        "    enabled: true\n"
+        "  - id: acct-b\n"
+        "    label: Account B\n"
+        "    gateway_url: http://127.0.0.1:19002\n"
+        "    gateway_shared_secret_env: TB_GATEWAY_SHARED_SECRET\n"
+        "    mode: paper\n"
+        "    enabled: true\n"
+        "    risk_override_file: acct-b\n"
+    )
+    db_path = tmp_path / "test.db"
+    Base.metadata.create_all(create_engine(f"sqlite:///{db_path}"))
+    settings = Settings(
+        configs_dir=configs_dir,
+        database_url=f"sqlite+aiosqlite:///{db_path}",
+    )
+
+    container = build_container(settings)
+    try:
+        acct_a = container.accounts["acct-a"]
+        acct_b = container.accounts["acct-b"]
+
+        global_caps = acct_a.risk_manager.caps
+        override_caps = acct_b.risk_manager.caps
+        assert override_caps.risk_per_trade_pct == 0.1
+        assert override_caps.max_open_positions == 1
+        # Untouched fields still inherit the global floor.
+        assert override_caps.daily_loss_limit_pct == global_caps.daily_loss_limit_pct
+    finally:
+        await container.aclose()
+
+
+async def test_account_risk_override_rejects_loosening_at_startup(tmp_path: Path):
+    """A `risk_override_file` that tries to raise a cap above the global
+    floor must fail loudly at container build time, not silently trade with
+    a looser cap than the user configured."""
+    configs_dir = tmp_path / "configs"
+    shutil.copytree(CONFIGS_DIR, configs_dir)
+    (configs_dir / "risk").mkdir()
+    (configs_dir / "risk" / "acct-b.yaml").write_text("max_open_positions: 999999\n")
+    (configs_dir / "accounts.yaml").write_text(
+        "accounts:\n"
+        "  - id: acct-b\n"
+        "    label: Account B\n"
+        "    gateway_url: http://127.0.0.1:19002\n"
+        "    gateway_shared_secret_env: TB_GATEWAY_SHARED_SECRET\n"
+        "    mode: paper\n"
+        "    enabled: true\n"
+        "    risk_override_file: acct-b\n"
+    )
+    db_path = tmp_path / "test.db"
+    Base.metadata.create_all(create_engine(f"sqlite:///{db_path}"))
+    settings = Settings(
+        configs_dir=configs_dir,
+        database_url=f"sqlite+aiosqlite:///{db_path}",
+    )
+
+    with pytest.raises(ValueError, match="cannot loosen"):
+        build_container(settings)
+
+
 async def test_strategy_activation_does_not_cross_accounts(two_account_settings):
     """MULTI_ACCOUNT_PLAN.md Phase 4's own repository tests assert two
     accounts can have different active versions of the same strategy name —

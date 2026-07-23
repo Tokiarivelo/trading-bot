@@ -11,15 +11,16 @@ counterpart.
 
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException, Path, Request
+from fastapi import APIRouter, HTTPException, Path
 
 from src.ai.api.schemas import RegenerateCodeIn, RegeneratedCodeOut
 from src.ai.application.code_regeneration import CodeRegenerationService
 from src.ai.application.llm_router import LLMProviderNotConfiguredError
 from src.ai.ports.llm import LLMCallError
+from src.shared.api.dependencies import AccountRuntimeDep
 from src.strategies.application.versioning import StrategyNameConflictError
 
-router = APIRouter(prefix="/ai/strategies", tags=["ai"])
+router = APIRouter(prefix="/accounts/{account_id}/ai/strategies", tags=["ai"])
 
 _VERSION_NOT_FOUND = {404: {"description": "No strategy version with that id."}}
 _NAME_CONFLICT = {409: {"description": "`new_name` is already in use by another strategy family."}}
@@ -39,8 +40,8 @@ _LLM_CALL_FAILED = {
 }
 
 
-def _service(request: Request) -> CodeRegenerationService:
-    return request.app.state.container.code_regeneration
+def _service(account: AccountRuntimeDep) -> CodeRegenerationService:
+    return account.code_regeneration
 
 
 @router.post(
@@ -72,13 +73,13 @@ def _service(request: Request) -> CodeRegenerationService:
     },
 )
 async def regenerate_version_code(
-    request: Request,
+    account: AccountRuntimeDep,
     body: RegenerateCodeIn,
     version_id: str = Path(description="Version id to regenerate from."),
 ) -> RegeneratedCodeOut:
     spec = body.spec.to_domain().to_dict() if body.spec is not None else None
     try:
-        result = await _service(request).regenerate(
+        result = await _service(account).regenerate(
             version_id, body.instructions, spec=spec, new_name=body.new_name
         )
     except StrategyNameConflictError as exc:

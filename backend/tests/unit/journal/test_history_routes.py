@@ -59,7 +59,9 @@ async def api(repository):
     )
     app = FastAPI()
     app.include_router(router)
-    app.state.container = SimpleNamespace(trade_journal=trade_journal)
+    app.state.container = SimpleNamespace(
+        accounts={"default": SimpleNamespace(trade_journal=trade_journal)}
+    )
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://backend") as client:
         yield client
@@ -96,7 +98,7 @@ def _seed(repository):
 
 
 async def test_returns_all_trades_with_total(api):
-    response = await api.get("/journal/history")
+    response = await api.get("/accounts/default/journal/history")
     assert response.status_code == 200
     body = response.json()
     assert body["total"] == 3
@@ -104,28 +106,28 @@ async def test_returns_all_trades_with_total(api):
 
 
 async def test_filters_by_symbol(api):
-    response = await api.get("/journal/history", params={"symbol": "EURUSD"})
+    response = await api.get("/accounts/default/journal/history", params={"symbol": "EURUSD"})
     body = response.json()
     assert body["total"] == 1
     assert body["items"][0]["id"] == "2"
 
 
 async def test_filters_by_outcome_open(api):
-    response = await api.get("/journal/history", params={"outcome": "open"})
+    response = await api.get("/accounts/default/journal/history", params={"outcome": "open"})
     body = response.json()
     assert body["total"] == 1
     assert body["items"][0]["id"] == "3"
 
 
 async def test_filters_by_outcome_loss(api):
-    response = await api.get("/journal/history", params={"outcome": "loss"})
+    response = await api.get("/accounts/default/journal/history", params={"outcome": "loss"})
     body = response.json()
     assert body["total"] == 1
     assert body["items"][0]["id"] == "2"
 
 
 async def test_pagination_limit_offset(api):
-    response = await api.get("/journal/history", params={"limit": 1, "offset": 1})
+    response = await api.get("/accounts/default/journal/history", params={"limit": 1, "offset": 1})
     body = response.json()
     assert body["total"] == 3
     assert [t["id"] for t in body["items"]] == ["2"]
@@ -136,7 +138,8 @@ async def test_markers_filters_by_skill(api, repository):
     repository.save(make_record("5", symbol="XAUUSD", skill="normal/xauusd/mean_reversion"))
 
     response = await api.get(
-        "/journal/markers", params={"symbol": "XAUUSD", "skill": "normal/xauusd/breakout_v1"}
+        "/accounts/default/journal/markers",
+        params={"symbol": "XAUUSD", "skill": "normal/xauusd/breakout_v1"},
     )
 
     assert response.status_code == 200
@@ -144,7 +147,7 @@ async def test_markers_filters_by_skill(api, repository):
 
 
 async def test_markers_without_skill_returns_every_bot(api):
-    response = await api.get("/journal/markers", params={"symbol": "XAUUSD"})
+    response = await api.get("/accounts/default/journal/markers", params={"symbol": "XAUUSD"})
 
     assert response.status_code == 200
     assert {t["id"] for t in response.json()} == {"1", "3"}

@@ -259,6 +259,11 @@ class ContainerForTest:
         self.event_bus.subscribe(CandleClosed, self.trade_engine.on_candle_closed)
         self.event_bus.subscribe(PositionClosed, self.trade_engine.on_position_closed)
 
+        # Resolves `get_account_runtime`'s `container.accounts[account_id]` lookup —
+        # this flat object already carries every AccountRuntime-scoped field the
+        # per-account routes need, so it doubles as its own single-entry registry.
+        self.accounts = {"default": self}
+
 
 class _FakeAccountGateway:
     async def login(self, credentials):  # pragma: no cover - unused in this test
@@ -315,17 +320,17 @@ async def api(tmp_path):
 async def test_candle_close_drives_full_entry_through_the_engine(api):
     await api.container.trade_engine.on_candle_closed(CandleClosed(symbol="XAUUSD", timeframe="M5"))
 
-    positions = (await api.get("/broker/positions")).json()
+    positions = (await api.get("/accounts/default/broker/positions")).json()
     assert len(positions) == 1
     assert positions[0]["symbol"] == "XAUUSD"
     assert positions[0]["side"] == "buy"
 
-    trades = (await api.get("/journal/trades", params={"symbol": "XAUUSD"})).json()
+    trades = (await api.get("/accounts/default/journal/trades", params={"symbol": "XAUUSD"})).json()
     assert len(trades) == 1
     assert trades[0]["strategy_version"] == "breakout_v1:v1"
     assert trades[0]["skill"] == "normal/xauusd/breakout_v1"
 
-    status = (await api.get("/engine/status")).json()
+    status = (await api.get("/accounts/default/engine/status")).json()
     assert status["trades_today"] == 1
     assert not status["paused"]
 
@@ -336,11 +341,11 @@ async def test_m1_scalp_bot_enters_on_m1_close_through_paper_broker(api):
     # risk sizing, paper order, journal attribution.
     await api.container.trade_engine.on_candle_closed(CandleClosed(symbol="XAUUSD", timeframe="M1"))
 
-    positions = (await api.get("/broker/positions")).json()
+    positions = (await api.get("/accounts/default/broker/positions")).json()
     assert len(positions) == 1
     assert positions[0]["symbol"] == "XAUUSD"
 
-    trades = (await api.get("/journal/trades", params={"symbol": "XAUUSD"})).json()
+    trades = (await api.get("/accounts/default/journal/trades", params={"symbol": "XAUUSD"})).json()
     assert len(trades) == 1
     assert trades[0]["strategy_version"] == "m1_probe:v1"
     assert trades[0]["skill"] == "normal/xauusd/m1_probe"
@@ -348,20 +353,20 @@ async def test_m1_scalp_bot_enters_on_m1_close_through_paper_broker(api):
 
 async def test_kill_switch_endpoint_pauses_and_closes_positions(api):
     await api.container.trade_engine.on_candle_closed(CandleClosed(symbol="XAUUSD", timeframe="M5"))
-    assert len((await api.get("/broker/positions")).json()) == 1
+    assert len((await api.get("/accounts/default/broker/positions")).json()) == 1
 
-    killed = await api.post("/engine/kill")
+    killed = await api.post("/accounts/default/engine/kill")
     assert killed.status_code == 200
     assert killed.json()["paused"] is True
 
-    assert (await api.get("/broker/positions")).json() == []
+    assert (await api.get("/accounts/default/broker/positions")).json() == []
 
-    resumed = await api.post("/engine/resume")
+    resumed = await api.post("/accounts/default/engine/resume")
     assert resumed.json()["paused"] is False
 
 
 async def test_get_risk_caps_reflects_configured_caps(api):
-    caps = (await api.get("/engine/risk-caps")).json()
+    caps = (await api.get("/accounts/default/engine/risk-caps")).json()
     assert caps["risk_per_trade_pct"] == RISK_CAPS.risk_per_trade_pct
     assert caps["min_lot_fallback_enabled"] is False
     assert caps["max_risk_per_trade_pct"] is None
@@ -369,7 +374,7 @@ async def test_get_risk_caps_reflects_configured_caps(api):
 
 async def test_update_min_lot_fallback_takes_effect_live(api):
     updated = await api.put(
-        "/engine/risk-caps/min-lot-fallback",
+        "/accounts/default/engine/risk-caps/min-lot-fallback",
         json={"enabled": True, "max_risk_per_trade_pct": 5.0},
     )
     assert updated.status_code == 200
@@ -383,7 +388,7 @@ async def test_update_min_lot_fallback_takes_effect_live(api):
     # The running RiskManager (not just the API's echo) actually changed.
     assert api.container.risk_manager.caps.min_lot_fallback_enabled is True
 
-    again = (await api.get("/engine/risk-caps")).json()
+    again = (await api.get("/accounts/default/engine/risk-caps")).json()
     assert again["min_lot_fallback_enabled"] is True
 
 
@@ -393,9 +398,9 @@ async def test_engine_does_not_reenter_once_max_open_positions_reached(api):
     # the strategy would signal again, but this asserts the pipe runs
     # end-to-end a second time without error and caps eventually apply.
     await api.container.trade_engine.on_candle_closed(CandleClosed(symbol="XAUUSD", timeframe="M5"))
-    positions = (await api.get("/broker/positions")).json()
+    positions = (await api.get("/accounts/default/broker/positions")).json()
     assert len(positions) == 2  # exactly at the cap, not beyond
 
     await api.container.trade_engine.on_candle_closed(CandleClosed(symbol="XAUUSD", timeframe="M5"))
-    positions = (await api.get("/broker/positions")).json()
+    positions = (await api.get("/accounts/default/broker/positions")).json()
     assert len(positions) == 2  # third attempt blocked by max_open_positions

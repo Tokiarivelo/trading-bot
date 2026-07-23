@@ -372,33 +372,175 @@ No frontend/API-surface change — no route yet exposes a second account
 (that's Phase 6). No live/paper gateway smoke test this phase, per Phase 9's
 rollout order (that milestone lands after Phase 6).
 
-## Phase 6 — API surface: `/accounts/{account_id}/...`
+## Phase 6 — API surface: `/accounts/{account_id}/...` — ✅ Done (2026-07-23)
 
 Path-prefix over header or query param: it's self-documenting in OpenAPI
 (shows as a required path parameter with its own `Field(description=...)`,
 satisfying the CLAUDE.md docs requirement automatically), and it matches
-REST convention. Add a FastAPI dependency `get_account_runtime(account_id,
-request) -> AccountRuntime` (looks up
-`request.app.state.container.accounts[account_id]`, 404s on unknown id);
-every route handler uses it instead of reaching `request.app.state.container`
-directly. Global endpoints (`GET /accounts` list, `/auth/*`) stay unprefixed.
+REST convention. Added `get_account_runtime(account_id, request) ->
+AccountRuntime` (`backend/src/shared/api/dependencies.py`, new package) —
+looks up `request.app.state.container.accounts[account_id]`, 404s on an
+unknown id, and gives `account_id` itself a `Path(description=...)` so the
+one shared dependency documents every route's path param at once. This is
+the first real `Depends()`-injected dependency in the codebase — every
+existing route instead read `request.app.state.container.<field>` through a
+private per-module `_service(request)` helper (confirmed via `grep -rn
+"Depends(" backend/src/*/api/` returning only `main.py`'s router-level
+`Depends(require_session)`); those helpers now take the injected
+`AccountRuntimeDep` instead of `Request` and return `account.<field>`
+directly, keeping every module's existing naming/shape.
 
-**Files:** every `*/api/routes.py` under `backend/src/{broker,engine,journal,
-market_data,activity,...}`, new `backend/src/broker/api/accounts.py` for the
-account list endpoint.
+**Which routes moved, which stayed global:** every route backed by an
+`AccountRuntime` field (Phase 5) moved under `/accounts/{account_id}/...`:
+`journal`, `activity`, `account` (MT5 connect/status), `engine`,
+`market-data`, `strategies` (version CRUD/activate/pause/etc — not
+`evaluate-custom`), and the three `ai` modules (`pdf-strategy`,
+`refinement`, code `regeneration`). Two modules mixed account-scoped and
+genuinely process-wide endpoints in one file and needed splitting into two
+routers, mounted separately in `main.py`:
+- `broker/api/trading_routes.py`: `router` (orders/positions — per account)
+  vs. new `spread_router` (`/broker/symbols/{symbol}/spread-config`,
+  `/broker/symbols/{symbol}/min-rr` — stays global, since `SpreadGate` is a
+  genuine process-wide `Container` field per Phase 5, not per-account).
+- `strategies/api/routes.py`: `router` (version endpoints — per account) vs.
+  new `sandbox_router` (`/strategies/evaluate-custom` — stays global; this
+  handler already built its own ad-hoc `CandleRepository`/`StrategyRegistry`
+  from `container.settings.database_url` rather than any account's real
+  registry, so per-account scoping would have been cosmetic at best).
 
-## Phase 7 — Per-account risk overrides
+Stayed unprefixed, per Phase 5's own global-vs-per-account boundaries
+(unchanged by this phase): `auth`, `ai-settings` (`provider_settings` is
+process-wide AI provider selection), `skills` (`skill_assignment` is
+process-wide bot routing, primary-account-biased per Phase 5's confirmed
+answer), `news` (`news_window_service` fans out to every account's bus via
+`_FanOutEventBus`), `indicators` (`IndicatorService` isn't in `AccountRuntime`
+at all — Phase 4 explicitly left indicator definitions out of the
+`account_id` migration since they carry no such column; left untouched here
+too rather than silently defaulting every compute/preview call to the
+`"default"` account's candles), and `backtest` (candle history/backtesting
+already thread an explicit `account_id` through `CandleRepository`
+independent of any live account — only `POST /backtest/run`'s auto-backfill
+path touches `container.candle_history` today, and that stays as-is).
 
-`configs/risk.yaml` stays the global, user-owned floor — untouched,
-never auto-modified, per existing binding rule. Add an optional
-`configs/risk/{account_id}.yaml` (only used if `accounts.yaml`'s
-`risk_override_file` is set) that `RiskManager` construction merges *on top
-of* the global file. The merge function may only tighten caps, never loosen
-them — enforced in code, not trusted from the file. Both files remain
-hand-authored; AI/refinement code gains no write access to either.
+New: `GET /accounts` (`backend/src/broker/api/accounts.py`, new
+`AccountSummaryOut` schema in `broker/api/schemas.py`) — lists every
+enabled account's `id`/`label`/`mode`/`enabled` from `configs/accounts.yaml`
+for the frontend's future account switcher (Phase 8) and as the source of
+truth for every other route's valid `{account_id}`. Global, unprefixed. New
+`accounts` OpenAPI tag added alongside it; `account`/`broker`/`market-data`/
+`journal`/`activity`/`engine`/`ai`/`strategies` tag descriptions updated to
+note their new per-account scoping.
 
-**Files:** `backend/src/engine/application/risk_manager.py` (merge logic),
-`configs/risk/` (new directory).
+**Done:** all of the above shipped as described. Every affected route test
+updated to the new paths — the existing `SimpleNamespace`-stubbed pattern
+extends unchanged, just one level deeper (`SimpleNamespace(accounts={"default":
+SimpleNamespace(trade_journal=service)})` instead of
+`SimpleNamespace(trade_journal=service)`), and the three hand-wired
+integration `ContainerForTest` classes (`test_phase1_flow.py`,
+`test_phase3_broker_flow.py`, `test_phase4_engine_flow.py`) each gained one
+line, `self.accounts = {"default": self}`, since they already carry every
+`AccountRuntime`-scoped field a flat object needs. `uv run ruff check src
+tests` clean (same one pre-existing unrelated collection failure as
+Phases 1–5); full `uv run pytest` green: 1156 passed. Verified the full
+`/openapi.json` schema directly (no running server needed — the FastAPI
+`app` object builds identically either way): every new/changed path shows
+up under `/accounts/{account_id}/...` as expected, `GET /accounts` has a
+summary+description, and the shared `account_id` path parameter carries a
+description on every single route that uses it (confirmed via a raw schema
+dump — this was the one gap the first pass missed, since
+`get_account_runtime`'s original `account_id: str` signature had no
+`Path(description=...)` and FastAPI doesn't synthesize one).
+
+**Caveat from this pass:** an errant `uv run ruff format src tests` (meant
+to reflow a handful of newly-too-long lines from added `/accounts/{account_id}`
+prefixes) reformatted the entire tree — around 65 files outside this
+phase's scope, including every file under `strategies/generated/` (AI/
+manually-authored strategy code CLAUDE.md says dev tooling must never
+modify without a clear reason). Caught before committing anything; every
+such file was restored via `git checkout --` and formatting was re-run
+scoped to just the files this phase actually touched. Worth remembering for
+future phases: never run repo-wide `ruff format`, always pass explicit file
+paths.
+
+**Files:** `backend/src/shared/api/dependencies.py` (new),
+`backend/src/broker/api/accounts.py` (new), `backend/src/broker/api/schemas.py`
+(new `AccountSummaryOut`), every `*/api/routes.py` under `backend/src/{broker,
+engine,journal,market_data,activity,strategies,ai}`, `backend/src/main.py`
+(router registration + `OPENAPI_TAGS`), plus the route/integration tests
+listed above.
+
+No frontend change (Phase 8's turn, per the plan's rollout order) — every
+`frontend/src/shared/api/client.ts` path is now stale (still hardcodes the
+pre-Phase-6 unprefixed routes), a known, deliberate gap until Phase 8.
+
+## Phase 7 — Per-account risk overrides — ✅ Done (2026-07-23)
+
+`configs/risk.yaml` stays the global, user-owned floor — untouched, never
+auto-modified, per existing binding rule. Added `apply_risk_override(base:
+RiskCaps, override: dict) -> RiskCaps` (`backend/src/engine/application/
+risk_manager.py`): merges only the keys present in a per-account override
+dict on top of the global `RiskCaps`, field by field — every field not
+present in the override keeps the global value. Enforced entirely in code,
+never trusted from the file: each of the five plain numeric caps
+(`risk_per_trade_pct`, `daily_loss_limit_pct`, `max_open_positions`,
+`max_trades_per_day`, `consecutive_loss_pause`) must be `<=` the global
+value or the merge raises `ValueError` naming the offending field;
+`min_lot_fallback_enabled` may only flip `True -> False`, never the reverse;
+`max_risk_per_trade_pct` must be `<=` the global ceiling (`global
+max_risk_per_trade_pct` if set, else `global risk_per_trade_pct`) and an
+explicit `null` override is rejected outright (there is no way to write a
+`null` that "tightens" a ceiling).
+
+`configs/risk/{risk_override_file}.yaml` is optional per account — no such
+directory or file exists in this repo today since the only real account
+(`default`) has `risk_override_file: null` in `configs/accounts.yaml`; the
+directory is created by a human the first time they actually need a
+stricter account (e.g. a prop-firm account with a tighter daily-loss rule
+than the operator's own global floor), read via the existing
+`load_yaml_config(f"risk/{file}", configs_dir)` (subdirectory paths already
+supported — same mechanism as `configs/symbols/{symbol}.yaml`), so no new
+loader function was needed.
+
+Wired into `container.py`'s `build_container()`: a new
+`_resolve_account_risk_caps(global_caps, account_cfg, configs_dir)` helper
+returns `global_caps` unchanged when `risk_override_file` is unset, else the
+merged result; computed once per account into an `account_risk_caps` dict
+*before* the per-account `build_account_runtime()` loop (previously every
+account received the same single `risk_caps` value), and each account's
+`RiskManager` (`AccountRuntime.risk_manager`) now gets its own resolved
+`RiskCaps`. Because `GET /accounts/{account_id}/engine/risk-caps`
+(Phase 6) already reads `_risk_manager(account).caps` — a per-account
+`RiskManager` instance already existed since Phase 5 — no route or schema
+change was needed for the override to become visible over the API.
+Backtesting (`backtest/application/run_backtest.py`) is intentionally
+untouched: it calls `load_risk_caps()` directly against the global file, per
+this phase's original scope note — no account-scoped override concept
+applies to a standalone backtest run.
+
+**Done:** new tests — 9 cases in
+`backend/tests/unit/engine/test_risk_manager.py` covering
+`apply_risk_override` (tightening each field, rejecting a loosened value for
+each of the 5 plain caps via `pytest.mark.parametrize`, the
+`min_lot_fallback_enabled` one-way-flip rule, the `max_risk_per_trade_pct`
+ceiling including the explicit-`null`-is-rejected case, and an empty-dict
+override producing equivalent caps), plus 2 new `build_container()`-level
+tests in `backend/tests/unit/test_container.py`
+(`test_account_risk_override_tightens_caps_for_one_account_only`,
+`test_account_risk_override_rejects_loosening_at_startup`) proving the
+override only affects the one account that sets `risk_override_file` and
+that a loosening override fails loudly at container-build time rather than
+silently trading under a looser cap. `uv run ruff check src tests` clean
+(same one pre-existing unrelated collection failure as Phases 1–6); full
+`uv run pytest` green.
+
+**Files:** `backend/src/engine/application/risk_manager.py`
+(`apply_risk_override`), `backend/src/container.py`
+(`_resolve_account_risk_caps`, per-account `account_risk_caps` dict wired
+into `build_account_runtime()`'s `risk_caps` param), test files listed
+above. `configs/risk/` directory itself was **not** created — no real
+override exists yet in this repo, and an empty speculative directory with a
+placeholder file would just be dead weight; a human creates it the first
+time an account actually needs a tighter cap.
 
 ## Phase 8 — Frontend
 

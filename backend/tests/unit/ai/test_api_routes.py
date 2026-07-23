@@ -112,7 +112,9 @@ def _build_service(tmp_path, code: str = VALID_CODE, codegen=None) -> PdfToStrat
 async def api(tmp_path):
     app = FastAPI()
     app.include_router(router)
-    app.state.container = SimpleNamespace(pdf_to_strategy=_build_service(tmp_path))
+    app.state.container = SimpleNamespace(
+        accounts={"default": SimpleNamespace(pdf_to_strategy=_build_service(tmp_path))}
+    )
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://backend") as client:
         yield client
@@ -120,7 +122,7 @@ async def api(tmp_path):
 
 async def _upload(client) -> dict:
     response = await client.post(
-        "/ai/pdf-strategy/upload",
+        "/accounts/default/ai/pdf-strategy/upload",
         files={"file": ("method.pdf", _fake_pdf_bytes(), "application/pdf")},
     )
     assert response.status_code == 200
@@ -136,7 +138,7 @@ async def test_upload_extracts_draft(api):
 
 async def test_upload_with_symbol_overrides_extraction(api):
     response = await api.post(
-        "/ai/pdf-strategy/upload",
+        "/accounts/default/ai/pdf-strategy/upload",
         files={"file": ("method.pdf", _fake_pdf_bytes(), "application/pdf")},
         data={"symbol": "EURUSD"},
     )
@@ -149,7 +151,8 @@ async def test_upload_with_symbol_overrides_extraction(api):
 
 async def test_upload_rejects_non_pdf(api):
     response = await api.post(
-        "/ai/pdf-strategy/upload", files={"file": ("method.txt", b"not a pdf", "text/plain")}
+        "/accounts/default/ai/pdf-strategy/upload",
+        files={"file": ("method.txt", b"not a pdf", "text/plain")},
     )
     assert response.status_code == 400
 
@@ -161,7 +164,9 @@ STRUCTURED_SPEC = {
 
 
 async def test_from_spec_creates_draft_without_llm_call(api):
-    response = await api.post("/ai/pdf-strategy/from-spec", json={"spec": STRUCTURED_SPEC})
+    response = await api.post(
+        "/accounts/default/ai/pdf-strategy/from-spec", json={"spec": STRUCTURED_SPEC}
+    )
     assert response.status_code == 200
     draft = response.json()
     assert draft["status"] == "pending_review"
@@ -172,7 +177,8 @@ async def test_from_spec_creates_draft_without_llm_call(api):
 
 async def test_from_spec_with_symbol_overrides_spec(api):
     response = await api.post(
-        "/ai/pdf-strategy/from-spec", json={"spec": STRUCTURED_SPEC, "symbol": "EURUSD"}
+        "/accounts/default/ai/pdf-strategy/from-spec",
+        json={"spec": STRUCTURED_SPEC, "symbol": "EURUSD"},
     )
     assert response.status_code == 200
     draft = response.json()
@@ -182,18 +188,20 @@ async def test_from_spec_with_symbol_overrides_spec(api):
 
 
 async def test_from_spec_rejects_malformed_json(api):
-    response = await api.post("/ai/pdf-strategy/from-spec", json={"spec": {"name": "x"}})
+    response = await api.post(
+        "/accounts/default/ai/pdf-strategy/from-spec", json={"spec": {"name": "x"}}
+    )
     assert response.status_code == 422
 
 
 async def test_get_draft_not_found(api):
-    response = await api.get("/ai/pdf-strategy/drafts/does-not-exist")
+    response = await api.get("/accounts/default/ai/pdf-strategy/drafts/does-not-exist")
     assert response.status_code == 404
 
 
 async def test_list_drafts(api):
     await _upload(api)
-    response = await api.get("/ai/pdf-strategy/drafts")
+    response = await api.get("/accounts/default/ai/pdf-strategy/drafts")
     assert response.status_code == 200
     assert len(response.json()) == 1
 
@@ -203,38 +211,44 @@ async def test_edit_then_approve_flow(api):
     edited_spec = {**draft["extracted_spec"], "name": "renamed_strategy"}
 
     patch_response = await api.patch(
-        f"/ai/pdf-strategy/drafts/{draft['id']}", json={"edited_spec": edited_spec}
+        f"/accounts/default/ai/pdf-strategy/drafts/{draft['id']}", json={"edited_spec": edited_spec}
     )
     assert patch_response.status_code == 200
     assert patch_response.json()["effective_spec"]["name"] == "renamed_strategy"
 
-    approve_response = await api.post(f"/ai/pdf-strategy/drafts/{draft['id']}/approve")
+    approve_response = await api.post(
+        f"/accounts/default/ai/pdf-strategy/drafts/{draft['id']}/approve"
+    )
     assert approve_response.status_code == 200
     assert approve_response.json()["status"] == "approved"
 
     # Approving an already-approved draft conflicts.
-    conflict = await api.post(f"/ai/pdf-strategy/drafts/{draft['id']}/approve")
+    conflict = await api.post(f"/accounts/default/ai/pdf-strategy/drafts/{draft['id']}/approve")
     assert conflict.status_code == 409
 
 
 async def test_reject_draft(api):
     draft = await _upload(api)
-    response = await api.post(f"/ai/pdf-strategy/drafts/{draft['id']}/reject")
+    response = await api.post(f"/accounts/default/ai/pdf-strategy/drafts/{draft['id']}/reject")
     assert response.status_code == 200
     assert response.json()["status"] == "rejected"
 
 
 async def test_generate_code_requires_approval(api):
     draft = await _upload(api)
-    response = await api.post(f"/ai/pdf-strategy/drafts/{draft['id']}/generate-code")
+    response = await api.post(
+        f"/accounts/default/ai/pdf-strategy/drafts/{draft['id']}/generate-code"
+    )
     assert response.status_code == 409
 
 
 async def test_generate_code_success(api):
     draft = await _upload(api)
-    await api.post(f"/ai/pdf-strategy/drafts/{draft['id']}/approve")
+    await api.post(f"/accounts/default/ai/pdf-strategy/drafts/{draft['id']}/approve")
 
-    response = await api.post(f"/ai/pdf-strategy/drafts/{draft['id']}/generate-code")
+    response = await api.post(
+        f"/accounts/default/ai/pdf-strategy/drafts/{draft['id']}/generate-code"
+    )
     assert response.status_code == 200
     body = response.json()
     assert body["is_valid"] is True
@@ -246,14 +260,20 @@ async def test_generate_code_llm_call_failure_returns_504(tmp_path):
     app = FastAPI()
     app.include_router(router)
     app.state.container = SimpleNamespace(
-        pdf_to_strategy=_build_service(tmp_path, codegen=FailingLLM())
+        accounts={
+            "default": SimpleNamespace(
+                pdf_to_strategy=_build_service(tmp_path, codegen=FailingLLM())
+            )
+        }
     )
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://backend") as client:
         draft = await _upload(client)
-        await client.post(f"/ai/pdf-strategy/drafts/{draft['id']}/approve")
+        await client.post(f"/accounts/default/ai/pdf-strategy/drafts/{draft['id']}/approve")
 
-        response = await client.post(f"/ai/pdf-strategy/drafts/{draft['id']}/generate-code")
+        response = await client.post(
+            f"/accounts/default/ai/pdf-strategy/drafts/{draft['id']}/generate-code"
+        )
         assert response.status_code == 504
         assert "timeout" in response.json()["detail"]
 
@@ -261,13 +281,19 @@ async def test_generate_code_llm_call_failure_returns_504(tmp_path):
 async def test_generate_code_surfaces_sandbox_errors(tmp_path):
     app = FastAPI()
     app.include_router(router)
-    app.state.container = SimpleNamespace(pdf_to_strategy=_build_service(tmp_path, INVALID_CODE))
+    app.state.container = SimpleNamespace(
+        accounts={
+            "default": SimpleNamespace(pdf_to_strategy=_build_service(tmp_path, INVALID_CODE))
+        }
+    )
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://backend") as client:
         draft = await _upload(client)
-        await client.post(f"/ai/pdf-strategy/drafts/{draft['id']}/approve")
+        await client.post(f"/accounts/default/ai/pdf-strategy/drafts/{draft['id']}/approve")
 
-        response = await client.post(f"/ai/pdf-strategy/drafts/{draft['id']}/generate-code")
+        response = await client.post(
+            f"/accounts/default/ai/pdf-strategy/drafts/{draft['id']}/generate-code"
+        )
         assert response.status_code == 200
         body = response.json()
         assert body["is_valid"] is False
