@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
+import { useActiveAccount } from "@/shared/api/account-context";
 import { getStrategyVersion, getStrategyVersions, type StrategyVersionSummary } from "@/shared/api/client";
 import { downloadJson } from "@/shared/utils/download";
 import { DuplicateVersionForm } from "./DuplicateVersionForm";
@@ -12,15 +13,17 @@ import { VersionLifecycleActions } from "./VersionLifecycleActions";
  * restrict to one strategy family (used on the draft detail page once code
  * has been generated for it). */
 export function StrategyVersionList({ name }: { name?: string }) {
+  const accountId = useActiveAccount();
   const [versions, setVersions] = useState<StrategyVersionSummary[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [filter, setFilter] = useState("");
   const [exportingId, setExportingId] = useState<string | null>(null);
 
   async function handleExport(id: string, name: string, version: number) {
+    if (!accountId) return;
     setExportingId(id);
     try {
-      const detail = await getStrategyVersion(id);
+      const detail = await getStrategyVersion(accountId, id);
       downloadJson(detail, `${name}_v${version}_${id}.json`);
     } catch (err) {
       console.error("Failed to export strategy version:", err);
@@ -30,10 +33,11 @@ export function StrategyVersionList({ name }: { name?: string }) {
   }
 
   const reload = useCallback(() => {
-    getStrategyVersions(name)
+    if (!accountId) return;
+    getStrategyVersions(accountId, name)
       .then(setVersions)
       .catch(() => setError("failed to load strategy versions"));
-  }, [name]);
+  }, [accountId, name]);
 
   useEffect(reload, [reload]);
 

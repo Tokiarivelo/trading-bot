@@ -9,6 +9,7 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useActiveAccount } from "@/shared/api/account-context";
 import {
   cancelPendingOrder,
   closePosition,
@@ -35,19 +36,23 @@ export interface DraftOrder {
 }
 
 export function useTrading(symbol: string) {
+  const accountId = useActiveAccount();
   const [positions, setPositions] = useState<PositionOut[]>([]);
   const [pendingOrders, setPendingOrders] = useState<PendingOrderOut[]>([]);
   const [placementMode, setPlacementMode] = useState<PlacementMode>(null);
   const [draftOrder, setDraftOrder] = useState<DraftOrder | null>(null);
   const symbolRef = useRef(symbol);
   symbolRef.current = symbol;
+  const accountIdRef = useRef(accountId);
+  accountIdRef.current = accountId;
 
   const refresh = useCallback(() => {
-    if (!symbolRef.current) return; // no symbol chosen yet (initial load)
-    getPositions(symbolRef.current)
+    const account = accountIdRef.current;
+    if (!symbolRef.current || !account) return; // no symbol/account resolved yet (initial load)
+    getPositions(account, symbolRef.current)
       .then(setPositions)
       .catch(() => {});
-    getPendingOrders(symbolRef.current)
+    getPendingOrders(account, symbolRef.current)
       .then(setPendingOrders)
       .catch(() => {});
   }, []);
@@ -56,7 +61,7 @@ export function useTrading(symbol: string) {
     refresh();
     const id = setInterval(refresh, POLL_MS);
     return () => clearInterval(id);
-  }, [symbol, refresh]);
+  }, [symbol, accountId, refresh]);
 
   // A chart click while a placement mode is armed populates the draft for
   // confirmation in the ticket, then disarms itself — one click, one draft.
@@ -76,7 +81,9 @@ export function useTrading(symbol: string) {
     sl: number | null,
     tp: number | null,
   ) {
-    await openOrder({ symbol, side, volume, sl, tp });
+    const account = accountIdRef.current;
+    if (!account) return;
+    await openOrder(account, { symbol, side, volume, sl, tp });
     refresh();
   }
 
@@ -88,18 +95,32 @@ export function useTrading(symbol: string) {
     sl: number | null,
     tp: number | null,
   ) {
-    await placePendingOrder({ symbol, side, order_type: orderType, volume, price, sl, tp });
+    const account = accountIdRef.current;
+    if (!account) return;
+    await placePendingOrder(account, {
+      symbol,
+      side,
+      order_type: orderType,
+      volume,
+      price,
+      sl,
+      tp,
+    });
     setDraftOrder(null);
     refresh();
   }
 
   async function close(ticket: number) {
-    await closePosition(ticket);
+    const account = accountIdRef.current;
+    if (!account) return;
+    await closePosition(account, ticket);
     refresh();
   }
 
   async function modifyPositionSlTp(ticket: number, sl: number | null, tp: number | null) {
-    await modifyPosition(ticket, sl, tp);
+    const account = accountIdRef.current;
+    if (!account) return;
+    await modifyPosition(account, ticket, sl, tp);
     refresh();
   }
 
@@ -109,12 +130,16 @@ export function useTrading(symbol: string) {
     sl: number | null,
     tp: number | null,
   ) {
-    await modifyPendingOrder(ticket, price, sl, tp);
+    const account = accountIdRef.current;
+    if (!account) return;
+    await modifyPendingOrder(account, ticket, price, sl, tp);
     refresh();
   }
 
   async function cancelPending(ticket: number) {
-    await cancelPendingOrder(ticket);
+    const account = accountIdRef.current;
+    if (!account) return;
+    await cancelPendingOrder(account, ticket);
     refresh();
   }
 

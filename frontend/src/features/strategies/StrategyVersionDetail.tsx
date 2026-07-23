@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
+import { useActiveAccount } from "@/shared/api/account-context";
 import {
   ApiError,
   activateStrategyVersion,
@@ -21,23 +22,26 @@ import { VersionLifecycleActions } from "./VersionLifecycleActions";
  * — which doubles as rollback when applied to an older version (§6.5). */
 export function StrategyVersionDetail({ versionId }: { versionId: string }) {
   const router = useRouter();
+  const accountId = useActiveAccount();
   const [version, setVersion] = useState<VersionDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
   function load() {
-    getStrategyVersion(versionId)
+    if (!accountId) return;
+    getStrategyVersion(accountId, versionId)
       .then(setVersion)
       .catch(() => setError("version not found"));
   }
 
-  useEffect(load, [versionId]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(load, [versionId, accountId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   async function onActivate() {
+    if (!accountId) return;
     setBusy(true);
     setError(null);
     try {
-      await activateStrategyVersion(versionId);
+      await activateStrategyVersion(accountId, versionId);
       load();
     } catch (e) {
       setError(e instanceof ApiError ? e.message : "activation failed");

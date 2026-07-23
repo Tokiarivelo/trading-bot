@@ -11,9 +11,12 @@
  * receiving `candle_closed` events after any network blip or backend
  * restart until the user changed symbol/timeframe.
  *
- * The server puts each connection into a room per `symbol:timeframe`
- * (`subscribe`/`unsubscribe` events) and only emits events for the rooms a
- * client is in — see `backend/src/market_data/api/ws.py`.
+ * The server puts each connection into a room per
+ * `account_id:symbol:timeframe` (`subscribe`/`unsubscribe` events) and only
+ * emits events for the rooms a client is in — see
+ * `backend/src/market_data/api/ws.py`. The `account_id` segment (Phase 8)
+ * keeps two accounts' candles for the same broker symbol (e.g. `XAUUSD` on
+ * two different brokers) from colliding in the same room.
  */
 
 import { io, type Socket } from "socket.io-client";
@@ -24,10 +27,14 @@ const WS_BASE = process.env.NEXT_PUBLIC_WS_URL ?? "http://127.0.0.1:8000";
 let socket: Socket | null = null;
 // Rooms currently wanted by at least one subscribeRoom() caller, re-sent to
 // the server on every `connect` event (initial connect + every reconnect).
-const activeRooms = new Map<string, { symbol: string; timeframe: string }>();
+const activeRooms = new Map<string, { accountId: string; symbol: string; timeframe: string }>();
 
-function roomKey(room: { symbol: string; timeframe: string }): string {
-  return `${room.symbol}:${room.timeframe}`;
+function roomKey(room: { accountId: string; symbol: string; timeframe: string }): string {
+  return `${room.accountId}:${room.symbol}:${room.timeframe}`;
+}
+
+function subscribePayload(room: { accountId: string; symbol: string; timeframe: string }) {
+  return { account_id: room.accountId, symbol: room.symbol, timeframe: room.timeframe };
 }
 
 function getSocket(): Socket {
@@ -38,7 +45,7 @@ function getSocket(): Socket {
     // the Next.js /api rewrite that attaches the header for REST calls.
     socket = io(WS_BASE, { autoConnect: true, reconnection: true, auth: { token: getToken() } });
     socket.on("connect", () => {
-      for (const room of activeRooms.values()) socket?.emit("subscribe", room);
+      for (const room of activeRooms.values()) socket?.emit("subscribe", subscribePayload(room));
     });
   }
   return socket;
@@ -71,10 +78,11 @@ export function onSocketConnect(handler: () => void): () => void {
   };
 }
 
-/** Subscribe to one symbol/timeframe room for one or more event names; returns an unsubscribe fn. */
+/** Subscribe to one account/symbol/timeframe room for one or more event
+ * names; returns an unsubscribe fn. */
 export function subscribeRoom(
   events: string | string[],
-  room: { symbol: string; timeframe: string },
+  room: { accountId: string; symbol: string; timeframe: string },
   onMessage: WsHandler,
 ): () => void {
   const s = getSocket();
@@ -83,12 +91,12 @@ export function subscribeRoom(
   const key = roomKey(room);
 
   activeRooms.set(key, room);
-  s.emit("subscribe", room);
+  s.emit("subscribe", subscribePayload(room));
   for (const event of eventNames) s.on(event, handler);
 
   return () => {
     for (const event of eventNames) s.off(event, handler);
     activeRooms.delete(key);
-    s.emit("unsubscribe", room);
+    s.emit("unsubscribe", subscribePayload(room));
   };
 }

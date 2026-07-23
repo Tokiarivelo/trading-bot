@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import { useActiveAccount } from "@/shared/api/account-context";
 import {
   ApiError,
   connectAccount,
@@ -11,29 +12,34 @@ import {
 
 const STATUS_POLL_MS = 5000;
 
-/** MT5 account connection (F11): login form, live status, disconnect. */
+/** MT5 account connection (F11): login form, live status, disconnect — for
+ * whichever account is currently selected in the top-nav switcher. */
 export function AccountPanel() {
+  const accountId = useActiveAccount();
   const [status, setStatus] = useState<AccountStatus | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const refresh = useCallback(() => {
-    getAccountStatus()
+    if (!accountId) return;
+    getAccountStatus(accountId)
       .then(setStatus)
       .catch(() => setStatus(null));
-  }, []);
+  }, [accountId]);
 
   useEffect(() => {
+    setStatus(null);
     refresh();
     const timer = setInterval(refresh, STATUS_POLL_MS);
     return () => clearInterval(timer);
   }, [refresh]);
 
   async function onConnect(form: FormData) {
+    if (!accountId) return;
     setBusy(true);
     setError(null);
     try {
-      await connectAccount({
+      await connectAccount(accountId, {
         login: Number(form.get("login")),
         password: String(form.get("password")),
         server: String(form.get("server")),
@@ -48,10 +54,11 @@ export function AccountPanel() {
   }
 
   async function onDisconnect() {
+    if (!accountId) return;
     setBusy(true);
     setError(null);
     try {
-      await disconnectAccount();
+      await disconnectAccount(accountId);
       refresh();
     } catch (e) {
       setError(e instanceof Error ? e.message : "disconnect failed");
@@ -110,7 +117,7 @@ export function AccountPanel() {
           </label>
           <button
             className="cursor-pointer rounded border border-accent px-3 py-1 text-accent hover:bg-accent hover:text-bg disabled:opacity-50"
-            disabled={busy || status?.gateway_up === false}
+            disabled={busy || !accountId || status?.gateway_up === false}
             type="submit"
           >
             {busy ? "Connecting…" : "Connect"}

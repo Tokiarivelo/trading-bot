@@ -188,7 +188,7 @@ class ContainerForTest:
         self.gateway_client = gateway_client
         self.market_data = GatewayMarketData(gateway_client)
         candle_repository = CandleRepository(session_factory)
-        self.ws_broadcaster = WsBroadcaster()
+        self.ws_broadcaster = WsBroadcaster("default")
         self.candle_history = CandleHistoryService(self.market_data, candle_repository)
         self.candle_stream = CandleStreamService(
             market_data=self.market_data,

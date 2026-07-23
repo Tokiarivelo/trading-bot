@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useEffect, useState } from "react";
+import { useActiveAccount } from "@/shared/api/account-context";
 import {
   ApiError,
   getRefinementProposal,
@@ -18,23 +19,26 @@ import { StatTile } from "@/features/backtest/StatTile";
  * via the strategy version it produced — see the link below — so there is
  * exactly one activation code path in the whole app. */
 export function RefinementProposalDetail({ proposalId }: { proposalId: string }) {
+  const accountId = useActiveAccount();
   const [proposal, setProposal] = useState<ProposalDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
   function load() {
-    getRefinementProposal(proposalId)
+    if (!accountId) return;
+    getRefinementProposal(accountId, proposalId)
       .then(setProposal)
       .catch(() => setError("proposal not found"));
   }
 
-  useEffect(load, [proposalId]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(load, [accountId, proposalId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   async function onReject() {
+    if (!accountId) return;
     setBusy(true);
     setError(null);
     try {
-      await rejectRefinementProposal(proposalId);
+      await rejectRefinementProposal(accountId, proposalId);
       load();
     } catch (e) {
       setError(e instanceof ApiError ? e.message : "reject failed");

@@ -19,6 +19,7 @@ import {
   type NormalSkillAssignment,
   type PositionOut,
 } from "@/shared/api/client";
+import { useActiveAccount } from "@/shared/api/account-context";
 import { useAllPositions } from "@/features/trading/useAllPositions";
 
 interface BotWithPositions {
@@ -28,6 +29,7 @@ interface BotWithPositions {
 }
 
 async function closeBotAndPositions(
+  accountId: string,
   symbol: string,
   botWithPositions: BotWithPositions,
   onError: (message: string) => void,
@@ -35,7 +37,7 @@ async function closeBotAndPositions(
   let allClosed = true;
   for (const position of botWithPositions.positions) {
     try {
-      await closePosition(position.ticket);
+      await closePosition(accountId, position.ticket);
     } catch (e) {
       allClosed = false;
       onError(
@@ -63,6 +65,7 @@ async function closeBotAndPositions(
 }
 
 export function BotsBySymbolPanel() {
+  const accountId = useActiveAccount();
   const allPositions = useAllPositions();
   const [assignments, setAssignments] = useState<NormalSkillAssignment[] | null>(null);
   const [filter, setFilter] = useState("");
@@ -129,6 +132,7 @@ export function BotsBySymbolPanel() {
   }
 
   async function closeOne(symbol: string, entry: BotWithPositions) {
+    if (!accountId) return;
     if (
       !window.confirm(
         `Close bot "${entry.bot.bot_name}" on ${symbol}? This stops it trading and closes ` +
@@ -139,7 +143,9 @@ export function BotsBySymbolPanel() {
     }
     setBusyKey(`${symbol}:${entry.bot.bot_name}`);
     try {
-      await closeBotAndPositions(symbol, entry, (msg) => setErrors((prev) => [...prev, msg]));
+      await closeBotAndPositions(accountId, symbol, entry, (msg) =>
+        setErrors((prev) => [...prev, msg]),
+      );
       afterAction();
     } finally {
       setBusyKey(null);
@@ -147,12 +153,14 @@ export function BotsBySymbolPanel() {
   }
 
   async function closeMany(symbol: string, entries: BotWithPositions[], confirmMessage: string) {
-    if (entries.length === 0) return;
+    if (entries.length === 0 || !accountId) return;
     if (!window.confirm(confirmMessage)) return;
     setBusyKey(symbol);
     try {
       for (const entry of entries) {
-        await closeBotAndPositions(symbol, entry, (msg) => setErrors((prev) => [...prev, msg]));
+        await closeBotAndPositions(accountId, symbol, entry, (msg) =>
+          setErrors((prev) => [...prev, msg]),
+        );
       }
       setSelected((prev) => ({ ...prev, [symbol]: new Set() }));
       afterAction();

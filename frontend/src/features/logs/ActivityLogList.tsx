@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import { useActiveAccount } from "@/shared/api/account-context";
 import { ActivityLogFilters, EMPTY_FILTERS, type ActivityLogFilterState } from "./ActivityLogFilters";
 import { ActivityLogTable } from "./ActivityLogTable";
 import { PAGE_SIZE, useActivityLog } from "./useActivityLog";
@@ -24,6 +25,7 @@ function toApiFilters(f: ActivityLogFilterState): Omit<LogHistoryFilters, "limit
  * breakers — filterable by level/module/text and optionally live-polling
  * for a "what is the bot doing right now" view. */
 export function ActivityLogList() {
+  const accountId = useActiveAccount();
   const [filters, setFilters] = useState<ActivityLogFilterState>(EMPTY_FILTERS);
   const [autoRefresh, setAutoRefresh] = useState(false);
   const apiFilters = useMemo(() => toApiFilters(filters), [filters]);
@@ -69,25 +71,28 @@ export function ActivityLogList() {
   }
 
   function handleDeleteOne(id: number) {
+    if (!accountId) return;
     if (!window.confirm("Delete this log entry? This cannot be undone.")) return;
-    void runDelete(() => deleteActivityLogByIds([id]));
+    void runDelete(() => deleteActivityLogByIds(accountId, [id]));
   }
 
   function handleDeleteSelected() {
+    if (!accountId) return;
     const ids = [...selectedIds];
     if (ids.length === 0) return;
     if (!window.confirm(`Delete ${ids.length} selected log entries? This cannot be undone.`)) return;
-    void runDelete(() => deleteActivityLogByIds(ids));
+    void runDelete(() => deleteActivityLogByIds(accountId, ids));
   }
 
   function handleDeleteAllMatching() {
+    if (!accountId) return;
     if (
       !window.confirm(
         `Delete all ${total} log entries matching the current filters? This cannot be undone.`
       )
     )
       return;
-    void runDelete(() => deleteActivityLogByFilter(apiFilters));
+    void runDelete(() => deleteActivityLogByFilter(accountId, apiFilters));
   }
 
   return (

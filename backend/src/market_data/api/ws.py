@@ -1,17 +1,23 @@
 """Socket.IO fan-out for live market events (implements MarketBroadcastPort).
 
-Clients join a room per `symbol:timeframe` (`subscribe`/`unsubscribe` events)
-and receive only `candle_closed` events for the rooms they're in — filtering
-happens server-side instead of on every client. Mounted into the ASGI app
-alongside FastAPI in `src.main` (Next rewrites don't proxy WS, so the
-frontend still connects to the backend directly — see
-`frontend/src/shared/api/ws.ts`).
+Clients join a room per `account_id:symbol:timeframe` (`subscribe`/
+`unsubscribe` events) and receive only `candle_closed` events for the rooms
+they're in — filtering happens server-side instead of on every client. The
+`account_id` segment (MULTI_ACCOUNT_PLAN.md Phase 8) keeps two accounts'
+candles for the same broker symbol (e.g. `XAUUSD` on two different brokers)
+from colliding in the same room — each account has its own
+`CandleStreamService`/`LiveCandleService`/`WsBroadcaster` (see
+`container.py`'s `build_account_runtime`), so the room key has to carry the
+account through too. Mounted into the ASGI app alongside FastAPI in
+`src.main` (Next rewrites don't proxy WS, so the frontend still connects to
+the backend directly — see `frontend/src/shared/api/ws.ts`).
 
-Subscribing also tells the `CandleStreamService` (via `bind_candle_stream`,
-called once at startup in `src.main`) to start polling that symbol if it
-isn't already part of the engine's configured universe — otherwise a chart
-browsing an ad-hoc symbol (see `SymbolPicker`) would load history once and
-then sit frozen, never receiving `candle_closed` events. It also tells the
+Subscribing also tells that account's `CandleStreamService` (via
+`bind_candle_stream`, called once per account at startup in `src.main`) to
+start polling that symbol if it isn't already part of the engine's
+configured universe — otherwise a chart browsing an ad-hoc symbol (see
+`SymbolPicker`) would load history once and then sit frozen, never
+receiving `candle_closed` events. It also tells that account's
 `LiveCandleService` (via `bind_live_candle`) to start streaming that room's
 in-progress bar every ~1.5s as `candle_update` events, so the rightmost
 candle moves continuously like MT5 instead of waiting for the whole bar to
@@ -39,31 +45,32 @@ logger = logging.getLogger(__name__)
 
 sio = socketio.AsyncServer(async_mode="asgi", cors_allowed_origins="*")
 
-_candle_stream: CandleStreamService | None = None
-_live_candle: LiveCandleService | None = None
+# Keyed by account_id — one candle stream / live-candle service per account
+# (see `container.py`'s per-account `AccountRuntime`).
+_candle_streams: dict[str, CandleStreamService] = {}
+_live_candles: dict[str, LiveCandleService] = {}
 _session_issuer: SessionTokenIssuer | None = None
 _password_getter: Callable[[], str] | None = None
 # Rooms each connected client currently has open — needed to unwatch the
 # right symbols/rooms on disconnect, since Socket.IO leaves rooms
 # automatically but doesn't tell us what to release on our side.
-_sid_symbols: dict[str, set[str]] = {}
-_sid_rooms: dict[str, set[tuple[str, Timeframe]]] = {}
+_sid_symbols: dict[str, set[tuple[str, str]]] = {}
+_sid_rooms: dict[str, set[tuple[str, str, Timeframe]]] = {}
 
 
-def bind_candle_stream(candle_stream: CandleStreamService) -> None:
-    """Wire the candle stream service so subscribe/unsubscribe can extend its
-    active symbol set. Called once from `src.main`'s lifespan, after the
-    container is built."""
-    global _candle_stream
-    _candle_stream = candle_stream
-
-
-def bind_live_candle(live_candle: LiveCandleService) -> None:
-    """Wire the live-candle preview service so subscribe/unsubscribe can
-    start/stop streaming a room's in-progress bar. Called once from
+def bind_candle_stream(account_id: str, candle_stream: CandleStreamService) -> None:
+    """Wire one account's candle stream service so subscribe/unsubscribe can
+    extend its active symbol set. Called once per enabled account from
     `src.main`'s lifespan, after the container is built."""
-    global _live_candle
-    _live_candle = live_candle
+    _candle_streams[account_id] = candle_stream
+
+
+def bind_live_candle(account_id: str, live_candle: LiveCandleService) -> None:
+    """Wire one account's live-candle preview service so subscribe/
+    unsubscribe can start/stop streaming a room's in-progress bar. Called
+    once per enabled account from `src.main`'s lifespan, after the container
+    is built."""
+    _live_candles[account_id] = live_candle
 
 
 def bind_auth(session_issuer: SessionTokenIssuer, password_getter: Callable[[], str]) -> None:
@@ -75,8 +82,8 @@ def bind_auth(session_issuer: SessionTokenIssuer, password_getter: Callable[[], 
     _password_getter = password_getter
 
 
-def _room(symbol: str, timeframe: str) -> str:
-    return f"{symbol}:{timeframe}"
+def _room(account_id: str, symbol: str, timeframe: str) -> str:
+    return f"{account_id}:{symbol}:{timeframe}"
 
 
 @sio.event
@@ -108,87 +115,109 @@ async def disconnect(sid: str) -> None:
     to release explicitly."""
     logger.info("ws client disconnected sid=%s", sid)
     symbols = _sid_symbols.pop(sid, None)
-    if symbols and _candle_stream is not None:
-        for symbol in symbols:
-            _candle_stream.unwatch(symbol)
+    if symbols:
+        for account_id, symbol in symbols:
+            candle_stream = _candle_streams.get(account_id)
+            if candle_stream is not None:
+                candle_stream.unwatch(symbol)
     rooms = _sid_rooms.pop(sid, None)
-    if rooms and _live_candle is not None:
-        for symbol, timeframe in rooms:
-            _live_candle.unwatch(symbol, timeframe)
+    if rooms:
+        for account_id, symbol, timeframe in rooms:
+            live_candle = _live_candles.get(account_id)
+            if live_candle is not None:
+                live_candle.unwatch(symbol, timeframe)
 
 
 @sio.on("subscribe")
 async def subscribe(sid: str, data: dict[str, str]) -> None:
     """Client -> server event `subscribe`.
 
-    Payload: `{"symbol": str, "timeframe": "M1" | "M5" | "M15" | "M30" | "H1" |
-    "H4" | "D1" | "W1" | "MN"}`.
-    Joins the `<symbol>:<timeframe>` room; the client starts receiving that
-    room's `candle_closed` and `candle_update` events. Also starts the
-    candle stream polling `symbol` if it wasn't already covered by
-    `configs/app.yaml: symbols`, and starts the live-candle preview
-    streaming this room's in-progress bar every ~1.5s. No acknowledgement is
-    emitted.
+    Payload: `{"account_id": str, "symbol": str, "timeframe": "M1" | "M5" |
+    "M15" | "M30" | "H1" | "H4" | "D1" | "W1" | "MN"}`.
+    Joins the `<account_id>:<symbol>:<timeframe>` room; the client starts
+    receiving that room's `candle_closed` and `candle_update` events. Also
+    starts that account's candle stream polling `symbol` if it wasn't
+    already covered by `configs/app.yaml: symbols`, and starts that
+    account's live-candle preview streaming this room's in-progress bar
+    every ~1.5s. An unknown `account_id` (not in `configs/accounts.yaml`, or
+    disabled) joins the room harmlessly but never receives events, since no
+    candle stream ever broadcasts into it. No acknowledgement is emitted.
     """
+    account_id = data["account_id"]
     symbol = data["symbol"]
     timeframe = Timeframe(data["timeframe"])
-    room = _room(symbol, timeframe.value)
+    room = _room(account_id, symbol, timeframe.value)
     await sio.enter_room(sid, room)
 
     sid_symbols = _sid_symbols.setdefault(sid, set())
-    if symbol not in sid_symbols:
-        sid_symbols.add(symbol)
-        if _candle_stream is not None:
-            _candle_stream.watch(symbol)
+    symbol_key = (account_id, symbol)
+    if symbol_key not in sid_symbols:
+        sid_symbols.add(symbol_key)
+        candle_stream = _candle_streams.get(account_id)
+        if candle_stream is not None:
+            candle_stream.watch(symbol)
 
     sid_rooms = _sid_rooms.setdefault(sid, set())
-    room_key = (symbol, timeframe)
+    room_key = (account_id, symbol, timeframe)
     if room_key not in sid_rooms:
         sid_rooms.add(room_key)
-        if _live_candle is not None:
-            _live_candle.watch(symbol, timeframe)
+        live_candle = _live_candles.get(account_id)
+        if live_candle is not None:
+            live_candle.watch(symbol, timeframe)
 
 
 @sio.on("unsubscribe")
 async def unsubscribe(sid: str, data: dict[str, str]) -> None:
     """Client -> server event `unsubscribe`.
 
-    Payload: `{"symbol": str, "timeframe": "M1" | "M5" | "M15" | "M30" | "H1" |
-    "H4" | "D1" | "W1" | "MN"}`.
-    Leaves the `<symbol>:<timeframe>` room, stops the live-candle preview
-    for it, and stops the candle stream from polling `symbol` once no
-    client has any room open for it anymore (unless it's part of the
-    engine's configured universe, which always stays live).
+    Payload: `{"account_id": str, "symbol": str, "timeframe": "M1" | "M5" |
+    "M15" | "M30" | "H1" | "H4" | "D1" | "W1" | "MN"}`.
+    Leaves the `<account_id>:<symbol>:<timeframe>` room, stops that
+    account's live-candle preview for it, and stops that account's candle
+    stream from polling `symbol` once no client has any room open for it
+    anymore (unless it's part of the engine's configured universe, which
+    always stays live).
     """
+    account_id = data["account_id"]
     symbol = data["symbol"]
     timeframe = Timeframe(data["timeframe"])
-    room = _room(symbol, timeframe.value)
+    room = _room(account_id, symbol, timeframe.value)
     await sio.leave_room(sid, room)
 
     sid_symbols = _sid_symbols.get(sid)
-    if sid_symbols and symbol in sid_symbols:
-        sid_symbols.discard(symbol)
-        if _candle_stream is not None:
-            _candle_stream.unwatch(symbol)
+    symbol_key = (account_id, symbol)
+    if sid_symbols and symbol_key in sid_symbols:
+        sid_symbols.discard(symbol_key)
+        candle_stream = _candle_streams.get(account_id)
+        if candle_stream is not None:
+            candle_stream.unwatch(symbol)
 
     sid_rooms = _sid_rooms.get(sid)
-    room_key = (symbol, timeframe)
+    room_key = (account_id, symbol, timeframe)
     if sid_rooms and room_key in sid_rooms:
         sid_rooms.discard(room_key)
-        if _live_candle is not None:
-            _live_candle.unwatch(symbol, timeframe)
+        live_candle = _live_candles.get(account_id)
+        if live_candle is not None:
+            live_candle.unwatch(symbol, timeframe)
 
 
 class WsBroadcaster:
-    """Implements `market_data.ports.MarketBroadcastPort` over Socket.IO."""
+    """Implements `market_data.ports.MarketBroadcastPort` over Socket.IO.
+
+    One instance per account (see `container.py`'s `build_account_runtime`)
+    — `account_id` scopes every emit to that account's own room so two
+    accounts' candles for the same broker symbol never collide."""
+
+    def __init__(self, account_id: str) -> None:
+        self._account_id = account_id
 
     async def broadcast(self, message: dict[str, Any]) -> None:
         """Server -> client event `candle_closed`, emitted to the
-        `<symbol>:<timeframe>` room only.
+        `<account_id>:<symbol>:<timeframe>` room only.
 
         `message` shape: `{"type": "candle_closed", "candle": CandleOut}` —
         see `market_data.api.schemas.CandleOut` for the candle fields.
         """
         candle = message["candle"]
-        room = _room(candle["symbol"], candle["timeframe"])
+        room = _room(self._account_id, candle["symbol"], candle["timeframe"])
         await sio.emit(message["type"], message, room=room)

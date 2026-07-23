@@ -126,7 +126,7 @@ class ContainerForTest:
         self.market_data = GatewayMarketData(gateway_client)
         repository = CandleRepository(session_factory)
         self.symbol_spec_repository = SymbolSpecRepository(session_factory)
-        self.ws_broadcaster = WsBroadcaster()
+        self.ws_broadcaster = WsBroadcaster("default")
         self.candle_history = CandleHistoryService(
             self.market_data, repository, self.symbol_spec_repository
         )

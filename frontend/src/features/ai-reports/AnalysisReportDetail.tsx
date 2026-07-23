@@ -2,20 +2,23 @@
 
 import Link from "next/link";
 import { useEffect, useState } from "react";
+import { useActiveAccount } from "@/shared/api/account-context";
 import { getAnalysisReport, type AnalysisReport } from "@/shared/api/client";
 import { StatusBadge } from "@/features/strategies/StatusBadge";
 
 /** Full review detail: findings, verdict, and — if the AI proposed a
  * refinement — a link to that proposal's diff/backtest comparison. */
 export function AnalysisReportDetail({ reportId }: { reportId: string }) {
+  const accountId = useActiveAccount();
   const [report, setReport] = useState<AnalysisReport | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    getAnalysisReport(reportId)
+    if (!accountId) return;
+    getAnalysisReport(accountId, reportId)
       .then(setReport)
       .catch(() => setError("report not found"));
-  }, [reportId]);
+  }, [accountId, reportId]);
 
   if (error) return <p className="p-4 text-sm text-err">{error}</p>;
   if (report === null) return <p className="p-4 text-sm text-ink-muted">Loading…</p>;

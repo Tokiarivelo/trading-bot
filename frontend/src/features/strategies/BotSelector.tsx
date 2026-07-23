@@ -23,6 +23,7 @@
 import Link from "next/link";
 import { Eye, EyeOff } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
+import { useActiveAccount } from "@/shared/api/account-context";
 import {
   ApiError,
   activateStrategyVersion,
@@ -69,6 +70,7 @@ export function BotSelector({
    * into an ambiguous state. */
   signalsDisabled?: boolean;
 }) {
+  const accountId = useActiveAccount();
   const [candidates, setCandidates] = useState<StrategyVersionSummary[] | null>(null);
   const [activeBots, setActiveBots] = useState<NormalSkillAssignment[] | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -78,7 +80,8 @@ export function BotSelector({
   const [filter, setFilter] = useState("");
 
   const refresh = useCallback(() => {
-    Promise.all([getStrategyVersions(), getSkillAssignments()])
+    if (!accountId) return;
+    Promise.all([getStrategyVersions(accountId), getSkillAssignments()])
       .then(([versions, assignments]) => {
         setCandidates(
           versions
@@ -88,7 +91,7 @@ export function BotSelector({
         setActiveBots(assignments.filter((a) => a.symbol === symbol));
       })
       .catch(() => setError("failed to load bots for this symbol"));
-  }, [symbol]);
+  }, [accountId, symbol]);
 
   useEffect(() => {
     setCandidates(null);
@@ -112,11 +115,14 @@ export function BotSelector({
   // A failure for one bot (e.g. no signals persisted yet) shouldn't blank
   // out every other bot's counts, so each bot's fetch is caught on its own.
   useEffect(() => {
-    if (!activeBots || activeBots.length === 0) return;
+    if (!activeBots || activeBots.length === 0 || !accountId) return;
     let cancelled = false;
     Promise.all(
       activeBots.map((bot) =>
-        Promise.all([getTradeMarkers(symbol, bot.name), getLiveBotSignals(bot.name)])
+        Promise.all([
+          getTradeMarkers(accountId, symbol, bot.name),
+          getLiveBotSignals(accountId, bot.name),
+        ])
           .then(([markers, signals]): [string, BotCounts] => [
             bot.name,
             {
@@ -138,15 +144,16 @@ export function BotSelector({
     return () => {
       cancelled = true;
     };
-  }, [symbol, activeBots]);
+  }, [accountId, symbol, activeBots]);
 
   async function activate(v: StrategyVersionSummary) {
+    if (!accountId) return;
     setBusyKey(v.id);
     setError(null);
     setJustActivated(null);
     try {
       if (v.status !== "active") {
-        await activateStrategyVersion(v.id);
+        await activateStrategyVersion(accountId, v.id);
       }
       const result = await addBotToSymbol(symbol, v.name);
       if (result.newly_activated) {

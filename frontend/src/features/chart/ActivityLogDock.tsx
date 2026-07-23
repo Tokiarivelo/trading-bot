@@ -15,6 +15,7 @@
 
 import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
+import { useActiveAccount } from "@/shared/api/account-context";
 import { ApiError, getActivityLog, type LogEntry } from "@/shared/api/client";
 
 const POLL_INTERVAL_MS = 5000;
@@ -32,6 +33,7 @@ export function ActivityLogDock({
    * the normal live/global poll below. */
   replayEntries?: LogEntry[] | null;
 }) {
+  const accountId = useActiveAccount();
   const [entries, setEntries] = useState<LogEntry[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [live, setLive] = useState(true);
@@ -40,11 +42,12 @@ export function ActivityLogDock({
   const replaying = replayEntries !== undefined;
 
   useEffect(() => {
-    if (replaying) return;
+    if (replaying || !accountId) return;
+    const account = accountId;
     let cancelled = false;
 
     function fetchOnce() {
-      getActivityLog({ q: symbol, level: levelFilter || undefined, limit: PAGE_SIZE })
+      getActivityLog(account, { q: symbol, level: levelFilter || undefined, limit: PAGE_SIZE })
         .then(({ items }) => {
           if (cancelled) return;
           setEntries(items);
@@ -66,7 +69,7 @@ export function ActivityLogDock({
       cancelled = true;
       clearInterval(id);
     };
-  }, [symbol, levelFilter, live, replaying]);
+  }, [accountId, symbol, levelFilter, live, replaying]);
 
   // Keep the newest replayed entry in view as the replay cursor advances —
   // the whole point of showing the log during replay is to read it as it

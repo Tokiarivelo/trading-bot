@@ -51,7 +51,7 @@ async function errorMessage(res: Response): Promise<string> {
 }
 
 function handleUnauthorized(path: string, status: number): void {
-  if (status !== 401 || path.startsWith("/auth/") || path === "/account/connect") return;
+  if (status !== 401 || path.startsWith("/auth/") || path.endsWith("/account/connect")) return;
   clearToken();
   if (typeof window !== "undefined") {
     window.dispatchEvent(new CustomEvent(UNAUTHORIZED_EVENT));
@@ -126,6 +126,24 @@ export interface AppConfig {
 export const getHealth = () => api.get<{ status: string }>("/health");
 export const getAppConfig = () => api.get<AppConfig>("/config/app");
 
+// ── Accounts (multi-account switcher, Phase 8) ──────────────────────────────
+
+export interface AccountSummary {
+  id: string;
+  label: string;
+  mode: "paper" | "live";
+  enabled: boolean;
+}
+
+/** Every enabled account from `configs/accounts.yaml` — the source of every
+ * other call's `accountId` param and the account switcher's own list. Global,
+ * unprefixed — called before any account is known. */
+export const getAccounts = () => api.get<AccountSummary[]>("/accounts");
+
+function acctPath(accountId: string, path: string): string {
+  return `/accounts/${encodeURIComponent(accountId)}${path}`;
+}
+
 // ── Account (MT5 login, F11) ────────────────────────────────────────────────
 
 export interface AccountInfo {
@@ -145,15 +163,18 @@ export interface AccountStatus {
   has_saved_credentials: boolean;
 }
 
-export const getAccountStatus = () => api.get<AccountStatus>("/account/status");
-export const connectAccount = (body: {
-  login: number;
-  password: string;
-  server: string;
-  remember: boolean;
-}) => api.post<{ connected: boolean; account: AccountInfo }>("/account/connect", body);
-export const disconnectAccount = (forget = false) =>
-  api.post<{ connected: boolean }>("/account/disconnect", { forget });
+export const getAccountStatus = (accountId: string) =>
+  api.get<AccountStatus>(acctPath(accountId, "/account/status"));
+export const connectAccount = (
+  accountId: string,
+  body: { login: number; password: string; server: string; remember: boolean },
+) =>
+  api.post<{ connected: boolean; account: AccountInfo }>(
+    acctPath(accountId, "/account/connect"),
+    body,
+  );
+export const disconnectAccount = (accountId: string, forget = false) =>
+  api.post<{ connected: boolean }>(acctPath(accountId, "/account/disconnect"), { forget });
 
 // ── Market data ─────────────────────────────────────────────────────────────
 
@@ -172,6 +193,7 @@ export interface Candle {
 /** `before` (epoch seconds) pages further back than the most recent `count`
  * bars — pass the oldest loaded candle's `time` to fetch older history. */
 export const getCandles = (
+  accountId: string,
   symbol: string,
   timeframe: Candle["timeframe"],
   count = 300,
@@ -180,7 +202,7 @@ export const getCandles = (
 ) => {
   const params = new URLSearchParams({ symbol, timeframe, count: String(count) });
   if (before !== undefined) params.set("before", String(before));
-  return api.get<Candle[]>(`/market-data/candles?${params}`, signal);
+  return api.get<Candle[]>(acctPath(accountId, `/market-data/candles?${params}`), signal);
 };
 
 export interface SymbolInfo {
@@ -197,8 +219,10 @@ export interface SymbolInfo {
   volume_step: number;
 }
 
-export const getSymbolInfo = (symbol: string) =>
-  api.get<SymbolInfo>(`/market-data/symbol-info?symbol=${encodeURIComponent(symbol)}`);
+export const getSymbolInfo = (accountId: string, symbol: string) =>
+  api.get<SymbolInfo>(
+    acctPath(accountId, `/market-data/symbol-info?symbol=${encodeURIComponent(symbol)}`),
+  );
 
 export interface BrokerSymbol {
   name: string;
@@ -215,10 +239,10 @@ export interface BrokerSymbolPage {
 /** Browse the connected broker's full symbol catalog (chart/watchlist only —
  * does not configure the engine; see configs/app.yaml: symbols for that).
  * Pass `offset` to page through the full catalog when `search` is omitted. */
-export const getBrokerSymbols = (search?: string, limit = 50, offset = 0) => {
+export const getBrokerSymbols = (accountId: string, search?: string, limit = 50, offset = 0) => {
   const params = new URLSearchParams({ limit: String(limit), offset: String(offset) });
   if (search) params.set("search", search);
-  return api.get<BrokerSymbolPage>(`/market-data/broker-symbols?${params}`);
+  return api.get<BrokerSymbolPage>(acctPath(accountId, `/market-data/broker-symbols?${params}`));
 };
 
 // ── Journal (trade markers, F7) ─────────────────────────────────────────────
@@ -242,10 +266,10 @@ export interface TradeMarker {
  * 'normal/xauusd/breakout_v1'), when given, scopes markers to just that
  * bot's own trades instead of every trade (any bot, or manual) on the
  * symbol — used by the chart's per-bot "eye" overlay. */
-export const getTradeMarkers = (symbol: string, skill?: string) => {
+export const getTradeMarkers = (accountId: string, symbol: string, skill?: string) => {
   const params = new URLSearchParams({ symbol });
   if (skill) params.set("skill", skill);
-  return api.get<TradeMarker[]>(`/journal/markers?${params}`);
+  return api.get<TradeMarker[]>(acctPath(accountId, `/journal/markers?${params}`));
 };
 
 // ── Journal (trade history, filterable/paginated) ───────────────────────────
@@ -295,13 +319,13 @@ export interface TradeHistoryFilters {
 /** Filtered, paginated trade history across any symbol — backs the trade
  * history page's filter and group-by controls. Unlike `getTradeMarkers`
  * (single symbol, chart overlay only), this supports the full filter set. */
-export const getTradeHistory = (filters: TradeHistoryFilters = {}) => {
+export const getTradeHistory = (accountId: string, filters: TradeHistoryFilters = {}) => {
   const params = new URLSearchParams();
   for (const [key, value] of Object.entries(filters)) {
     if (value !== undefined && value !== "") params.set(key, String(value));
   }
   const qs = params.toString();
-  return api.get<TradeHistoryPage>(`/journal/history${qs ? `?${qs}` : ""}`);
+  return api.get<TradeHistoryPage>(acctPath(accountId, `/journal/history${qs ? `?${qs}` : ""}`));
 };
 
 // ── Activity log (persisted "what is the bot doing and why") ───────────────
@@ -332,13 +356,13 @@ export interface LogHistoryFilters {
 /** Filtered, paginated activity log across every backend module — the
  * durable record of signals, vetoes, fills, and circuit breakers, beyond
  * what scrolls past in stdout. */
-export const getActivityLog = (filters: LogHistoryFilters = {}) => {
+export const getActivityLog = (accountId: string, filters: LogHistoryFilters = {}) => {
   const params = new URLSearchParams();
   for (const [key, value] of Object.entries(filters)) {
     if (value !== undefined && value !== "") params.set(key, String(value));
   }
   const qs = params.toString();
-  return api.get<LogHistoryPage>(`/activity/history${qs ? `?${qs}` : ""}`);
+  return api.get<LogHistoryPage>(acctPath(accountId, `/activity/history${qs ? `?${qs}` : ""}`));
 };
 
 export interface LogDeleteResult {
@@ -347,15 +371,16 @@ export interface LogDeleteResult {
 
 /** Deletes specific activity log rows by id — backs single-row delete and
  * multi-select bulk delete in the activity log UI. */
-export const deleteActivityLogByIds = (ids: number[]) =>
-  api.post<LogDeleteResult>("/activity/history/delete-by-ids", { ids });
+export const deleteActivityLogByIds = (accountId: string, ids: number[]) =>
+  api.post<LogDeleteResult>(acctPath(accountId, "/activity/history/delete-by-ids"), { ids });
 
 /** Deletes every activity log row matching the given filters — backs
  * "delete all matching" in the activity log UI. Mirrors `LogHistoryFilters`
  * (minus pagination); omitting all fields deletes every row. */
 export const deleteActivityLogByFilter = (
-  filters: Omit<LogHistoryFilters, "limit" | "offset"> = {}
-) => api.post<LogDeleteResult>("/activity/history/delete-by-filter", filters);
+  accountId: string,
+  filters: Omit<LogHistoryFilters, "limit" | "offset"> = {},
+) => api.post<LogDeleteResult>(acctPath(accountId, "/activity/history/delete-by-filter"), filters);
 
 // ── Backtest (Phase 5 reports) ──────────────────────────────────────────────
 
@@ -425,11 +450,11 @@ export interface BacktestSignal {
  * `getSkillAssignments` (e.g. 'normal/xauusd/breakout_v1') and already
  * fully identifies the symbol, so no separate `symbol` param is needed.
  * Defaults to the last 14 days server-side if `from` is omitted. */
-export const getLiveBotSignals = (skill: string, from?: number, to?: number) => {
+export const getLiveBotSignals = (accountId: string, skill: string, from?: number, to?: number) => {
   const params = new URLSearchParams({ skill });
   if (from !== undefined) params.set("from", String(from));
   if (to !== undefined) params.set("to", String(to));
-  return api.get<BacktestSignal[]>(`/activity/signals?${params}`);
+  return api.get<BacktestSignal[]>(acctPath(accountId, `/activity/signals?${params}`));
 };
 
 export interface BacktestReportSummary {
@@ -605,37 +630,56 @@ export interface GeneratedCode {
   backtest_report_id: string | null;
 }
 
-export const uploadStrategyPdf = (file: File, symbol?: string) => {
+export const uploadStrategyPdf = (accountId: string, file: File, symbol?: string) => {
   const form = new FormData();
   form.append("file", file);
   if (symbol) form.append("symbol", symbol);
-  return api.postForm<StrategyDraft>("/ai/pdf-strategy/upload", form);
+  return api.postForm<StrategyDraft>(acctPath(accountId, "/ai/pdf-strategy/upload"), form);
 };
 
 /** Same draft pipeline as uploadStrategyPdf, but from a typed description —
  * no PDF required. Lands on the same review/approve/generate-code flow. */
-export const createStrategyDraftFromText = (description: string, symbol?: string) =>
-  api.post<StrategyDraft>("/ai/pdf-strategy/from-prompt", { description, symbol });
+export const createStrategyDraftFromText = (
+  accountId: string,
+  description: string,
+  symbol?: string,
+) => api.post<StrategyDraft>(acctPath(accountId, "/ai/pdf-strategy/from-prompt"), { description, symbol });
 
 /** Same draft pipeline, but `spec` is already structured JSON (e.g. a file
  * upload) — skips LLM extraction entirely, `spec` becomes the draft's
  * extracted_spec as-is. Lands on the same review/approve/generate flow. */
-export const createStrategyDraftFromJson = (spec: ExtractedStrategySpec, symbol?: string) =>
-  api.post<StrategyDraft>("/ai/pdf-strategy/from-spec", { spec, symbol });
+export const createStrategyDraftFromJson = (
+  accountId: string,
+  spec: ExtractedStrategySpec,
+  symbol?: string,
+) => api.post<StrategyDraft>(acctPath(accountId, "/ai/pdf-strategy/from-spec"), { spec, symbol });
 
-export const getStrategyDrafts = () => api.get<StrategyDraft[]>("/ai/pdf-strategy/drafts");
-export const getStrategyDraft = (id: string) =>
-  api.get<StrategyDraft>(`/ai/pdf-strategy/drafts/${encodeURIComponent(id)}`);
-export const updateStrategyDraftSpec = (id: string, editedSpec: ExtractedStrategySpec) =>
-  api.patch<StrategyDraft>(`/ai/pdf-strategy/drafts/${encodeURIComponent(id)}`, {
+export const getStrategyDrafts = (accountId: string) =>
+  api.get<StrategyDraft[]>(acctPath(accountId, "/ai/pdf-strategy/drafts"));
+export const getStrategyDraft = (accountId: string, id: string) =>
+  api.get<StrategyDraft>(
+    acctPath(accountId, `/ai/pdf-strategy/drafts/${encodeURIComponent(id)}`),
+  );
+export const updateStrategyDraftSpec = (
+  accountId: string,
+  id: string,
+  editedSpec: ExtractedStrategySpec,
+) =>
+  api.patch<StrategyDraft>(acctPath(accountId, `/ai/pdf-strategy/drafts/${encodeURIComponent(id)}`), {
     edited_spec: editedSpec,
   });
-export const approveStrategyDraft = (id: string) =>
-  api.post<StrategyDraft>(`/ai/pdf-strategy/drafts/${encodeURIComponent(id)}/approve`);
-export const rejectStrategyDraft = (id: string) =>
-  api.post<StrategyDraft>(`/ai/pdf-strategy/drafts/${encodeURIComponent(id)}/reject`);
-export const generateStrategyCode = (id: string) =>
-  api.post<GeneratedCode>(`/ai/pdf-strategy/drafts/${encodeURIComponent(id)}/generate-code`);
+export const approveStrategyDraft = (accountId: string, id: string) =>
+  api.post<StrategyDraft>(
+    acctPath(accountId, `/ai/pdf-strategy/drafts/${encodeURIComponent(id)}/approve`),
+  );
+export const rejectStrategyDraft = (accountId: string, id: string) =>
+  api.post<StrategyDraft>(
+    acctPath(accountId, `/ai/pdf-strategy/drafts/${encodeURIComponent(id)}/reject`),
+  );
+export const generateStrategyCode = (accountId: string, id: string) =>
+  api.post<GeneratedCode>(
+    acctPath(accountId, `/ai/pdf-strategy/drafts/${encodeURIComponent(id)}/generate-code`),
+  );
 
 // ── Strategy versions & activation (Phase 6, §6.5) ──────────────────────────
 
@@ -664,48 +708,69 @@ export interface StrategyVersionDetail extends StrategyVersionSummary {
   code: string;
 }
 
-export const getStrategyVersions = (name?: string, status?: StrategyVersionStatus) => {
+export const getStrategyVersions = (
+  accountId: string,
+  name?: string,
+  status?: StrategyVersionStatus,
+) => {
   const params = new URLSearchParams();
   if (name) params.set("name", name);
   if (status) params.set("status", status);
   const query = params.toString();
-  return api.get<StrategyVersionSummary[]>(`/strategies/versions${query ? `?${query}` : ""}`);
+  return api.get<StrategyVersionSummary[]>(
+    acctPath(accountId, `/strategies/versions${query ? `?${query}` : ""}`),
+  );
 };
-export const getStrategyVersion = (id: string) =>
-  api.get<StrategyVersionDetail>(`/strategies/versions/${encodeURIComponent(id)}`);
-export const activateStrategyVersion = (id: string) =>
-  api.post<StrategyVersionSummary>(`/strategies/versions/${encodeURIComponent(id)}/activate`);
+export const getStrategyVersion = (accountId: string, id: string) =>
+  api.get<StrategyVersionDetail>(
+    acctPath(accountId, `/strategies/versions/${encodeURIComponent(id)}`),
+  );
+export const activateStrategyVersion = (accountId: string, id: string) =>
+  api.post<StrategyVersionSummary>(
+    acctPath(accountId, `/strategies/versions/${encodeURIComponent(id)}/activate`),
+  );
 /** Clones a version's code into a new, independent strategy family (fork,
  * not a new version of the same family). Pass `symbols` to also retarget
  * the clone — rewrites the generated code's `StrategySpec(symbols=...)` and
  * re-validates it in the sandbox; omit to keep the source's symbols. */
-export const duplicateStrategyVersion = (id: string, body: { name: string; symbols?: string[] }) =>
+export const duplicateStrategyVersion = (
+  accountId: string,
+  id: string,
+  body: { name: string; symbols?: string[] },
+) =>
   api.post<StrategyVersionSummary>(
-    `/strategies/versions/${encodeURIComponent(id)}/duplicate`,
+    acctPath(accountId, `/strategies/versions/${encodeURIComponent(id)}/duplicate`),
     body,
   );
 /** Renames the display name shared by every version of this strategy
  * family, not just this one. */
-export const renameStrategyVersion = (id: string, name: string) =>
-  api.patch<StrategyVersionSummary>(`/strategies/versions/${encodeURIComponent(id)}/rename`, {
-    name,
-  });
+export const renameStrategyVersion = (accountId: string, id: string, name: string) =>
+  api.patch<StrategyVersionSummary>(
+    acctPath(accountId, `/strategies/versions/${encodeURIComponent(id)}/rename`),
+    { name },
+  );
 /** Retires this version: marks it archived and, if it was the live version,
  * stops the engine from evaluating it. No replacement version is required —
  * the strategy family can end up with nothing active. */
-export const archiveStrategyVersion = (id: string) =>
-  api.post<StrategyVersionSummary>(`/strategies/versions/${encodeURIComponent(id)}/archive`);
+export const archiveStrategyVersion = (accountId: string, id: string) =>
+  api.post<StrategyVersionSummary>(
+    acctPath(accountId, `/strategies/versions/${encodeURIComponent(id)}/archive`),
+  );
 /** Hard-deletes this version's record and generated file. Rejected with a
  * 409 if the version is currently active — archive it first. */
-export const deleteStrategyVersion = (id: string) =>
-  api.delete<void>(`/strategies/versions/${encodeURIComponent(id)}`);
+export const deleteStrategyVersion = (accountId: string, id: string) =>
+  api.delete<void>(acctPath(accountId, `/strategies/versions/${encodeURIComponent(id)}`));
 /** Suspends live trading for this active version without deactivating it —
  * distinct from the engine-wide kill switch, which pauses every strategy. */
-export const pauseStrategyVersion = (id: string) =>
-  api.post<StrategyVersionSummary>(`/strategies/versions/${encodeURIComponent(id)}/pause`);
+export const pauseStrategyVersion = (accountId: string, id: string) =>
+  api.post<StrategyVersionSummary>(
+    acctPath(accountId, `/strategies/versions/${encodeURIComponent(id)}/pause`),
+  );
 /** Reverses pauseStrategyVersion. */
-export const resumeStrategyVersion = (id: string) =>
-  api.post<StrategyVersionSummary>(`/strategies/versions/${encodeURIComponent(id)}/resume`);
+export const resumeStrategyVersion = (accountId: string, id: string) =>
+  api.post<StrategyVersionSummary>(
+    acctPath(accountId, `/strategies/versions/${encodeURIComponent(id)}/resume`),
+  );
 /** Saves a hand-edited source. Leave `newName` unset to save as the next
  * version of this version's own strategy family, parented on `id` itself
  * (not necessarily the active version). Pass `newName` to fork the edit
@@ -713,16 +778,28 @@ export const resumeStrategyVersion = (id: string) =>
  * ApiError(409) if that name is already in use by another family.
  * Re-validated in the sandbox either way — throws ApiError(422) if that
  * fails. The new version's status is "validated", never "active". */
-export const editStrategyVersionCode = (id: string, code: string, newName?: string) =>
-  api.post<StrategyVersionDetail>(`/strategies/versions/${encodeURIComponent(id)}/edit`, {
-    code,
-    new_name: newName,
-  });
+export const editStrategyVersionCode = (
+  accountId: string,
+  id: string,
+  code: string,
+  newName?: string,
+) =>
+  api.post<StrategyVersionDetail>(
+    acctPath(accountId, `/strategies/versions/${encodeURIComponent(id)}/edit`),
+    { code, new_name: newName },
+  );
 /** Overwrites this version's spec snapshot in place — annotation only, never
  * touches the generated code or creates a new version (the same way
  * renameStrategyVersion mutates in place rather than forking). */
-export const updateStrategyVersionSpec = (id: string, spec: ExtractedStrategySpec) =>
-  api.patch<StrategyVersionSummary>(`/strategies/versions/${encodeURIComponent(id)}/spec`, spec);
+export const updateStrategyVersionSpec = (
+  accountId: string,
+  id: string,
+  spec: ExtractedStrategySpec,
+) =>
+  api.patch<StrategyVersionSummary>(
+    acctPath(accountId, `/strategies/versions/${encodeURIComponent(id)}/spec`),
+    spec,
+  );
 
 // ── AI: user-triggered code regeneration (§6.5 code editor) ────────────────
 
@@ -749,16 +826,16 @@ export interface RegeneratedCode {
  * created — the caller can still show `code` for manual fixup via
  * `editStrategyVersionCode`. */
 export const regenerateStrategyVersionCode = (
+  accountId: string,
   id: string,
   instructions: string,
   spec?: ExtractedStrategySpec,
   newName?: string,
 ) =>
-  api.post<RegeneratedCode>(`/ai/strategies/versions/${encodeURIComponent(id)}/regenerate`, {
-    instructions,
-    spec,
-    new_name: newName,
-  });
+  api.post<RegeneratedCode>(
+    acctPath(accountId, `/ai/strategies/versions/${encodeURIComponent(id)}/regenerate`),
+    { instructions, spec, new_name: newName },
+  );
 
 export interface CustomSignal {
   time: number;
@@ -1001,16 +1078,25 @@ export interface RefinementProposalDetail {
   candidate_backtest: BacktestReportSummary | null;
 }
 
-export const getAnalysisReports = (symbol?: string) =>
+export const getAnalysisReports = (accountId: string, symbol?: string) =>
   api.get<AnalysisReport[]>(
-    `/ai/refinement/reports${symbol ? `?symbol=${encodeURIComponent(symbol)}` : ""}`,
+    acctPath(
+      accountId,
+      `/ai/refinement/reports${symbol ? `?symbol=${encodeURIComponent(symbol)}` : ""}`,
+    ),
   );
-export const getAnalysisReport = (id: string) =>
-  api.get<AnalysisReport>(`/ai/refinement/reports/${encodeURIComponent(id)}`);
-export const getRefinementProposal = (id: string) =>
-  api.get<RefinementProposalDetail>(`/ai/refinement/proposals/${encodeURIComponent(id)}`);
-export const rejectRefinementProposal = (id: string) =>
-  api.post<RefinementProposalDetail>(`/ai/refinement/proposals/${encodeURIComponent(id)}/reject`);
+export const getAnalysisReport = (accountId: string, id: string) =>
+  api.get<AnalysisReport>(
+    acctPath(accountId, `/ai/refinement/reports/${encodeURIComponent(id)}`),
+  );
+export const getRefinementProposal = (accountId: string, id: string) =>
+  api.get<RefinementProposalDetail>(
+    acctPath(accountId, `/ai/refinement/proposals/${encodeURIComponent(id)}`),
+  );
+export const rejectRefinementProposal = (accountId: string, id: string) =>
+  api.post<RefinementProposalDetail>(
+    acctPath(accountId, `/ai/refinement/proposals/${encodeURIComponent(id)}/reject`),
+  );
 
 // ── News: economic calendar & active windows (Phase 8, F8) ─────────────────
 
@@ -1051,9 +1137,12 @@ export interface EngineStatus {
   daily_pnl: number;
 }
 
-export const getEngineStatus = () => api.get<EngineStatus>("/engine/status");
-export const killSwitch = () => api.post<EngineStatus>("/engine/kill");
-export const resumeEngine = () => api.post<EngineStatus>("/engine/resume");
+export const getEngineStatus = (accountId: string) =>
+  api.get<EngineStatus>(acctPath(accountId, "/engine/status"));
+export const killSwitch = (accountId: string) =>
+  api.post<EngineStatus>(acctPath(accountId, "/engine/kill"));
+export const resumeEngine = (accountId: string) =>
+  api.post<EngineStatus>(acctPath(accountId, "/engine/resume"));
 
 export interface RiskCaps {
   risk_per_trade_pct: number;
@@ -1067,11 +1156,16 @@ export interface RiskCaps {
   max_risk_per_trade_pct: number | null;
 }
 
-export const getRiskCaps = () => api.get<RiskCaps>("/engine/risk-caps");
+export const getRiskCaps = (accountId: string) =>
+  api.get<RiskCaps>(acctPath(accountId, "/engine/risk-caps"));
 /** Live-updates the min-lot fallback on the running engine. Not persisted —
  * a backend restart reverts to configs/risk.yaml. */
-export const putMinLotFallback = (enabled: boolean, maxRiskPerTradePct: number | null) =>
-  api.put<RiskCaps>("/engine/risk-caps/min-lot-fallback", {
+export const putMinLotFallback = (
+  accountId: string,
+  enabled: boolean,
+  maxRiskPerTradePct: number | null,
+) =>
+  api.put<RiskCaps>(acctPath(accountId, "/engine/risk-caps/min-lot-fallback"), {
     enabled,
     max_risk_per_trade_pct: maxRiskPerTradePct,
   });
@@ -1141,34 +1235,52 @@ export interface PendingOrderOut {
   comment: string;
 }
 
-export const openOrder = (body: OpenOrderRequest) =>
-  api.post<ExecutionResultOut>("/broker/orders", body);
-export const closePosition = (ticket: number, volume?: number) =>
-  api.post<ExecutionResultOut>(`/broker/positions/${ticket}/close`, volume ? { volume } : undefined);
-export const closeAllPositions = (symbol: string) =>
+export const openOrder = (accountId: string, body: OpenOrderRequest) =>
+  api.post<ExecutionResultOut>(acctPath(accountId, "/broker/orders"), body);
+export const closePosition = (accountId: string, ticket: number, volume?: number) =>
+  api.post<ExecutionResultOut>(
+    acctPath(accountId, `/broker/positions/${ticket}/close`),
+    volume ? { volume } : undefined,
+  );
+export const closeAllPositions = (accountId: string, symbol: string) =>
   api.post<ExecutionResultOut[]>(
-    `/broker/positions/close-all?symbol=${encodeURIComponent(symbol)}`,
+    acctPath(accountId, `/broker/positions/close-all?symbol=${encodeURIComponent(symbol)}`),
     undefined,
   );
-export const modifyPosition = (ticket: number, sl: number | null, tp: number | null) =>
-  api.post<{ status: string }>(`/broker/positions/${ticket}/modify`, { sl, tp });
-export const getPositions = (symbol?: string) =>
-  api.get<PositionOut[]>(`/broker/positions${symbol ? `?symbol=${encodeURIComponent(symbol)}` : ""}`);
+export const modifyPosition = (
+  accountId: string,
+  ticket: number,
+  sl: number | null,
+  tp: number | null,
+) => api.post<{ status: string }>(acctPath(accountId, `/broker/positions/${ticket}/modify`), { sl, tp });
+export const getPositions = (accountId: string, symbol?: string) =>
+  api.get<PositionOut[]>(
+    acctPath(accountId, `/broker/positions${symbol ? `?symbol=${encodeURIComponent(symbol)}` : ""}`),
+  );
 
-export const placePendingOrder = (body: PlacePendingOrderRequest) =>
-  api.post<PendingOrderOut>("/broker/orders/pending", body);
-export const getPendingOrders = (symbol?: string) =>
+export const placePendingOrder = (accountId: string, body: PlacePendingOrderRequest) =>
+  api.post<PendingOrderOut>(acctPath(accountId, "/broker/orders/pending"), body);
+export const getPendingOrders = (accountId: string, symbol?: string) =>
   api.get<PendingOrderOut[]>(
-    `/broker/orders/pending${symbol ? `?symbol=${encodeURIComponent(symbol)}` : ""}`,
+    acctPath(
+      accountId,
+      `/broker/orders/pending${symbol ? `?symbol=${encodeURIComponent(symbol)}` : ""}`,
+    ),
   );
 export const modifyPendingOrder = (
+  accountId: string,
   ticket: number,
   price: number | null,
   sl: number | null,
   tp: number | null,
-) => api.post<{ status: string }>(`/broker/orders/pending/${ticket}/modify`, { price, sl, tp });
-export const cancelPendingOrder = (ticket: number) =>
-  api.delete<{ status: string }>(`/broker/orders/pending/${ticket}`);
+) =>
+  api.post<{ status: string }>(acctPath(accountId, `/broker/orders/pending/${ticket}/modify`), {
+    price,
+    sl,
+    tp,
+  });
+export const cancelPendingOrder = (accountId: string, ticket: number) =>
+  api.delete<{ status: string }>(acctPath(accountId, `/broker/orders/pending/${ticket}`));
 
 export interface SymbolSpreadConfig {
   symbol: string;

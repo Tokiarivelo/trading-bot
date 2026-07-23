@@ -8,6 +8,7 @@
  * and is rejected by the API while the version is active. */
 
 import { useState } from "react";
+import { useActiveAccount } from "@/shared/api/account-context";
 import {
   ApiError,
   archiveStrategyVersion,
@@ -28,6 +29,7 @@ export function VersionLifecycleActions({
   /** Called after a successful delete — the version no longer exists. */
   onDeleted: () => void;
 }) {
+  const accountId = useActiveAccount();
   const [busy, setBusy] = useState<"pause" | "archive" | "delete" | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -46,24 +48,29 @@ export function VersionLifecycleActions({
   }
 
   function onTogglePause() {
+    if (!accountId) return;
     void run("pause", () =>
-      version.paused ? resumeStrategyVersion(version.id) : pauseStrategyVersion(version.id),
+      version.paused
+        ? resumeStrategyVersion(accountId, version.id)
+        : pauseStrategyVersion(accountId, version.id),
     );
   }
 
   function onArchive() {
+    if (!accountId) return;
     if (!window.confirm(`Archive ${version.name} v${version.version}?`)) return;
-    void run("archive", () => archiveStrategyVersion(version.id));
+    void run("archive", () => archiveStrategyVersion(accountId, version.id));
   }
 
   function onDelete() {
+    if (!accountId) return;
     if (
       !window.confirm(
         `Permanently delete ${version.name} v${version.version}? This cannot be undone.`,
       )
     )
       return;
-    void run("delete", () => deleteStrategyVersion(version.id));
+    void run("delete", () => deleteStrategyVersion(accountId, version.id));
   }
 
   const isActive = version.status === "active";

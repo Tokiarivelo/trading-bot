@@ -542,25 +542,103 @@ override exists yet in this repo, and an empty speculative directory with a
 placeholder file would just be dead weight; a human creates it the first
 time an account actually needs a tighter cap.
 
-## Phase 8 — Frontend
+## Phase 8 — Frontend — ✅ Done (2026-07-23)
 
-Add `AccountContext` (`frontend/src/shared/api/account-context.tsx`) — React
+Added `AccountContext` (`frontend/src/shared/api/account-context.tsx`) — React
 context + `localStorage`-persisted active `account_id`, loaded from a new
-`GET /accounts` call. Account switcher lives in the top nav/header, next to
-where `AccountPanel.tsx` currently sits (that stays as the connect/disconnect
-form for the *currently selected* account, not a list).
+`GET /accounts` call, `AccountProvider` mounted in `app/layout.tsx` inside
+`LoginGate` (so it only fetches post-auth) and outside `NavigationProvider`.
+Exposes `useAccounts()` (full switcher state) and `useActiveAccount()`
+(`accountId: string | null` — null until `GET /accounts` first resolves;
+every hook/component gates on it exactly like existing code already gates on
+an empty `symbol`, so there's no new fallback-to-a-guessed-id failure mode).
 
-`client.ts` request helpers gain an `accountId` param interpolated into the
-`/accounts/{id}/...` path. `ws.ts`'s `roomKey` extends to
-`${accountId}:${symbol}:${timeframe}`, `subscribeRoom` takes an `accountId`.
-Feature hooks (`useAllPositions`, `useTradeHistory`, `useActivityLog`,
-`useTrading`, etc.) read `accountId` via a new `useActiveAccount()` hook
-rather than each taking it as an explicit prop, to minimize call-site churn.
+**Deviation from this section's original text:** the switcher itself isn't
+in a single shared header — every page hand-rolls its own `<header>` with
+`<MenuButton />` as the one common element (confirmed via `grep -rl
+"MenuButton" src/app`, 15 call sites, no shared header component exists).
+Rather than touch all 15 page headers, `MenuButton` itself
+(`shared/ui/NavigationDrawer.tsx`) now renders the hamburger icon plus a new
+`AccountSwitcher` (a `<select>`, or a static label when only one account is
+configured, or nothing while the list is still loading) — one file change
+puts the switcher in every page's top nav instead of 15. `AccountPanel.tsx`
+(the connect/disconnect form) now reads `useActiveAccount()` and operates on
+whichever account is selected, unchanged otherwise.
+
+`client.ts`'s ~35 per-account request helpers each gained an `accountId:
+string` first parameter, building `/accounts/{id}/...` paths via a new
+`acctPath()` helper — mechanical, matched 1:1 against Phase 6's router
+prefixes (`grep -rn "APIRouter(" src/*/api/*.py`) to get the global/
+per-account split exactly right: `auth`, `ai-settings`, `skills`, `news`,
+`indicators`, `backtest`, the broker `spread_router`, and the strategies
+`sandbox_router` stayed unprefixed/global, matching Phase 6/7's own
+boundaries; everything else gained the param. New `getAccounts()` (`GET
+/accounts`, global, unprefixed — called before any `account_id` is known).
+`ws.ts`'s `roomKey`/`subscribeRoom` extended to `{accountId, symbol,
+timeframe}`, emitting `account_id` in the `subscribe`/`unsubscribe` payload.
+
+**Deviation found during implementation, not in this section's original
+text:** the backend's WS layer (`market_data/api/ws.py`) had no account
+concept at all — one global `sio` server, rooms keyed only by
+`symbol:timeframe`, bound once at startup to only the *primary* account's
+`CandleStreamService`/`LiveCandleService` (a comment in `main.py` said as
+much: "Phase 6/8 of MULTI_ACCOUNT_PLAN.md own real multi-account WS room
+routing"). Left as-is, the frontend's new `accountId` in `ws.ts` would have
+been cosmetic — worse, two accounts holding the same symbol (e.g. `XAUUSD`
+on two different brokers) would broadcast into the *same* room and a chart
+would silently receive candles from the wrong account. Fixed as part of this
+phase, since the frontend change is meaningless without it: rooms are now
+`account_id:symbol:timeframe`; `bind_candle_stream`/`bind_live_candle`
+became `dict[str, ...]` maps keyed by account, populated by looping
+`container.accounts.items()` in `main.py`'s `lifespan()` instead of a single
+`container.candle_stream`/`container.live_candle` call; `WsBroadcaster`
+(`container.py`, already constructed once per account per Phase 5) now takes
+`account_id` in its constructor and scopes every `emit` to that account's
+room. An unknown/disabled `account_id` in a `subscribe` payload joins the
+room harmlessly but never receives events, since no broadcaster ever emits
+into it — no new 404/error path needed on the WS side.
+
+Every hook that already existed (`useTrading`, `useAllPositions`,
+`useTradeHistory`, `useActivityLog`, `useActiveStrategyForSymbol`) now calls
+`useActiveAccount()` internally and gates its fetch/mutate on a non-null id,
+per the plan's "minimize call-site churn" goal — `page.tsx` and every other
+caller of these hooks needed zero changes. Components that call `client.ts`
+directly (not through a hook) — roughly 30 files across
+`features/{strategies,chart,trading,engine,settings,ai-reports,backtest,
+bot-control,logs,account}/` plus `app/bots/page.tsx` — each gained one
+`useActiveAccount()` call and an `if (!accountId) return;`/early-null guard
+at their call sites; found exhaustively via `grep` for every per-account
+function name against the codebase, not by eyeballing individual features.
 
 **Files:** `frontend/src/shared/api/client.ts`, `frontend/src/shared/api/ws.ts`,
-`frontend/src/shared/api/account-context.tsx` (new),
-`frontend/src/features/account/AccountPanel.tsx`, one small edit per feature
-hook that currently assumes a single account.
+`frontend/src/shared/api/account-context.tsx` (new), `frontend/src/app/layout.tsx`,
+`frontend/src/shared/ui/NavigationDrawer.tsx`,
+`frontend/src/features/account/AccountPanel.tsx`, the 5 hooks listed above,
+~30 feature components/pages (one `useActiveAccount()` call + guard each) —
+`backend/src/market_data/api/ws.py`, `backend/src/main.py`,
+`backend/src/container.py` (WS multi-account fix), plus the 3 hand-wired
+`ContainerForTest` integration test classes (`WsBroadcaster("default")`).
+
+**Done:** `pnpm exec tsc --noEmit`, `pnpm lint` (oxlint), and `pnpm build`
+all clean. Backend: `uv run ruff check src tests` clean (same one
+pre-existing unrelated collection failure as Phases 1–7); full `uv run
+pytest` green — 1190 passed (up from 1153 at Phase 4/7's last count; the
+gap is other work landed on `main` since, not this phase — this phase added
+no new backend tests of its own beyond the 3 updated `WsBroadcaster(...)`
+call sites, since Phase 8's own scope is frontend-plus-the-WS-fix and the
+existing per-account isolation tests from Phases 4/5/7 already cover the
+underlying `AccountRuntime`/repository behavior this phase's UI reads).
+
+**Not done this phase, per Phase 9's rollout order:** no live/paper gateway
+smoke test with two real MT5 accounts — that's explicitly Phase 9's
+end-to-end milestone, run manually against `configs/accounts.yaml` once a
+second real account exists. The account switcher itself was exercised only
+against the one real `default` account in this repo (renders as the static
+single-account label, per `AccountSwitcher`'s `accounts.length === 1`
+branch) — its multi-account `<select>` branch and the WS per-account
+isolation fix are logic-verified (types, build, existing test suite) but not
+visually verified against two live accounts side by side, since no second
+account is configured on this machine.
 
 ## Phase 9 — Testing & rollout order
 

@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { useActiveAccount } from "@/shared/api/account-context";
 import {
   type EngineStatus,
   getEngineStatus,
@@ -11,34 +12,39 @@ import {
 const POLL_MS = 5000;
 
 export function EngineControlPanel() {
+  const accountId = useActiveAccount();
   const [status, setStatus] = useState<EngineStatus | null>(null);
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
+    if (!accountId) return;
     let cancelled = false;
-    const poll = () => getEngineStatus().then((s) => !cancelled && setStatus(s)).catch(() => {});
+    const poll = () =>
+      getEngineStatus(accountId).then((s) => !cancelled && setStatus(s)).catch(() => {});
     poll();
     const id = setInterval(poll, POLL_MS);
     return () => {
       cancelled = true;
       clearInterval(id);
     };
-  }, []);
+  }, [accountId]);
 
   async function handleKill() {
+    if (!accountId) return;
     if (!window.confirm("Close all open positions and pause the engine?")) return;
     setBusy(true);
     try {
-      setStatus(await killSwitch());
+      setStatus(await killSwitch(accountId));
     } finally {
       setBusy(false);
     }
   }
 
   async function handleResume() {
+    if (!accountId) return;
     setBusy(true);
     try {
-      setStatus(await resumeEngine());
+      setStatus(await resumeEngine(accountId));
     } finally {
       setBusy(false);
     }

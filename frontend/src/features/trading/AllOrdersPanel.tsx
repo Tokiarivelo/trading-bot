@@ -21,6 +21,7 @@ import {
   type PositionOut,
 } from "@/shared/api/client";
 import { TradeHistoryList } from "@/features/history/TradeHistoryList";
+import { useActiveAccount } from "@/shared/api/account-context";
 import { useSortableRows } from "@/shared/hooks/useSortableRows";
 import { SortTh } from "@/shared/ui/SortTh";
 import type { AllPositions } from "./useAllPositions";
@@ -127,6 +128,7 @@ function ActiveOrdersTables({
   selectedTicket?: string | number | null;
   onSelectTicket?: (ticket: string | number, symbol: string) => void;
 }) {
+  const accountId = useActiveAccount();
   const { positions, pendingOrders, skillByTicket, refresh } = allPositions;
   const [busyTicket, setBusyTicket] = useState<number | null>(null);
   const [closingSymbol, setClosingSymbol] = useState<string | null>(null);
@@ -169,11 +171,12 @@ function ActiveOrdersTables({
   }, [positions]);
 
   async function handleClose(ticket: number) {
+    if (!accountId) return;
     if (!window.confirm(`Close position #${ticket}?`)) return;
     setBusyTicket(ticket);
     setError(null);
     try {
-      await closePosition(ticket);
+      await closePosition(accountId, ticket);
       refresh();
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "close failed");
@@ -183,11 +186,12 @@ function ActiveOrdersTables({
   }
 
   async function handleCloseAll(symbol: string, count: number) {
+    if (!accountId) return;
     if (!window.confirm(`Close all ${count} ${symbol} position${count === 1 ? "" : "s"}?`)) return;
     setClosingSymbol(symbol);
     setError(null);
     try {
-      await closeAllPositions(symbol);
+      await closeAllPositions(accountId, symbol);
       refresh();
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "close-all failed");
@@ -197,10 +201,11 @@ function ActiveOrdersTables({
   }
 
   async function handleCancel(ticket: number) {
+    if (!accountId) return;
     setBusyTicket(ticket);
     setError(null);
     try {
-      await cancelPendingOrder(ticket);
+      await cancelPendingOrder(accountId, ticket);
       refresh();
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "cancel failed");

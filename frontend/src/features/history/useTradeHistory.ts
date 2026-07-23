@@ -6,6 +6,7 @@
  * only `page` changes (Prev/Next). */
 
 import { useEffect, useState } from "react";
+import { useActiveAccount } from "@/shared/api/account-context";
 import {
   ApiError,
   getTradeHistory,
@@ -16,6 +17,7 @@ import {
 export const PAGE_SIZE = 50;
 
 export function useTradeHistory(filters: Omit<TradeHistoryFilters, "limit" | "offset">) {
+  const accountId = useActiveAccount();
   const [page, setPage] = useState(0);
   const [items, setItems] = useState<TradeHistoryItem[] | null>(null);
   const [total, setTotal] = useState(0);
@@ -27,9 +29,10 @@ export function useTradeHistory(filters: Omit<TradeHistoryFilters, "limit" | "of
   }, [filtersKey]);
 
   useEffect(() => {
+    if (!accountId) return;
     let cancelled = false;
     setItems(null);
-    getTradeHistory({ ...filters, limit: PAGE_SIZE, offset: page * PAGE_SIZE })
+    getTradeHistory(accountId, { ...filters, limit: PAGE_SIZE, offset: page * PAGE_SIZE })
       .then(({ items, total }) => {
         if (cancelled) return;
         setItems(items);
@@ -48,7 +51,7 @@ export function useTradeHistory(filters: Omit<TradeHistoryFilters, "limit" | "of
     // filters is re-created every render by the caller; filtersKey is the
     // real dependency so this only re-fetches when it actually changes.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [filtersKey, page]);
+  }, [accountId, filtersKey, page]);
 
   return { items, total, error, page, setPage, pageSize: PAGE_SIZE };
 }

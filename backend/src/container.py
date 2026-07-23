@@ -610,7 +610,7 @@ def build_account_runtime(
     )
 
     market_data = GatewayMarketData(gateway_client)
-    ws_broadcaster = WsBroadcaster()
+    ws_broadcaster = WsBroadcaster(account_id)
     candle_history = CandleHistoryService(
         market_data, candle_repository, symbol_spec_repository, account_id=account_id
     )

@@ -200,12 +200,13 @@ async def lifespan(app: FastAPI):
     log_listener = configure_logging(database_url=settings.database_url)
     container = build_container(settings)
     app.state.container = container
-    # Bound to the primary account only, same as every other route today —
-    # Phase 6/8 of MULTI_ACCOUNT_PLAN.md own real multi-account WS room
-    # routing; the other accounts' candle streams still run, just aren't
-    # reachable over this socket yet.
-    bind_candle_stream(container.candle_stream)
-    bind_live_candle(container.live_candle)
+    # One candle-stream/live-candle binding per enabled account (Phase 8 of
+    # MULTI_ACCOUNT_PLAN.md) — `ws.py`'s subscribe/unsubscribe handlers key
+    # off the client-supplied `account_id` to route watch/unwatch calls to
+    # the right account's services.
+    for account_id, runtime in container.accounts.items():
+        bind_candle_stream(account_id, runtime.candle_stream)
+        bind_live_candle(account_id, runtime.live_candle)
     bind_auth(container.session_issuer, lambda: container.settings.app_password)
     for runtime in container.accounts.values():
         # Reconnect with stored credentials if the gateway is already up,

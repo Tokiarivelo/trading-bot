@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useEffect, useState } from "react";
+import { useActiveAccount } from "@/shared/api/account-context";
 import { getStrategyDrafts, type StrategyDraft } from "@/shared/api/client";
 import { downloadJson } from "@/shared/utils/download";
 import { StatusBadge } from "./StatusBadge";
@@ -11,14 +12,16 @@ import { StrategyUploadForm } from "./StrategyUploadForm";
  * pass `showUploadForm={false}` when an embedding page (e.g. the Bots hub)
  * already renders its own generation form above this list. */
 export function StrategyDraftList({ showUploadForm = true }: { showUploadForm?: boolean } = {}) {
+  const accountId = useActiveAccount();
   const [drafts, setDrafts] = useState<StrategyDraft[] | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    getStrategyDrafts()
+    if (!accountId) return;
+    getStrategyDrafts(accountId)
       .then(setDrafts)
       .catch(() => setError("failed to load strategy drafts"));
-  }, []);
+  }, [accountId]);
 
   return (
     <div className="flex flex-col gap-4 p-4">

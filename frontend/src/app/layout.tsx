@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { LoginGate } from "@/features/auth/LoginGate";
+import { AccountProvider } from "@/shared/api/account-context";
 import { NavigationProvider, NavigationDrawer } from "@/shared/ui/NavigationDrawer";
 import "./globals.css";
 
@@ -13,10 +14,12 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
     <html lang="en">
       <body className="bg-bg font-sans text-ink antialiased">
         <LoginGate>
-          <NavigationProvider>
-            <NavigationDrawer />
-            {children}
-          </NavigationProvider>
+          <AccountProvider>
+            <NavigationProvider>
+              <NavigationDrawer />
+              {children}
+            </NavigationProvider>
+          </AccountProvider>
         </LoginGate>
       </body>
     </html>

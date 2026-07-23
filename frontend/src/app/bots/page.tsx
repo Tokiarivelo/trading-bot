@@ -6,6 +6,7 @@ import { GenerateBotForm } from "@/features/strategies/GenerateBotForm";
 import { StrategyDraftList } from "@/features/strategies/StrategyDraftList";
 import { StrategyVersionList } from "@/features/strategies/StrategyVersionList";
 import { SymbolAssignmentPanel } from "@/features/strategies/SymbolAssignmentPanel";
+import { useActiveAccount } from "@/shared/api/account-context";
 import { MenuButton } from "@/shared/ui/NavigationDrawer";
 import {
   getSkillAssignments,
@@ -19,7 +20,8 @@ export default function BotsPage() {
   const searchParams = useSearchParams();
   const initialTab = searchParams.get("tab") || "deployments";
   const [activeTab, setActiveTab] = useState<string>(initialTab);
-  
+  const accountId = useActiveAccount();
+
   const [stats, setStats] = useState({
     activeBots: 0,
     liveSymbols: 0,
@@ -30,12 +32,13 @@ export default function BotsPage() {
   const [loadingStats, setLoadingStats] = useState(true);
 
   const fetchStats = () => {
+    if (!accountId) return;
     setLoadingStats(true);
     Promise.all([
       getSkillAssignments(),
-      getStrategyDrafts(),
-      getStrategyVersions(),
-      getEngineStatus(),
+      getStrategyDrafts(accountId),
+      getStrategyVersions(accountId),
+      getEngineStatus(accountId),
     ])
       .then(([skills, drafts, versions, eng]) => {
         const uniqueActive = new Set(
@@ -60,7 +63,7 @@ export default function BotsPage() {
   useEffect(() => {
     fetchStats();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [accountId]);
 
   // Tabs structure
   const tabs = [

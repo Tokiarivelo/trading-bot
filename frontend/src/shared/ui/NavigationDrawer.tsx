@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useState, useEffect, createContext, useContext } from "react";
+import { useAccounts } from "@/shared/api/account-context";
 
 // Context for managing the drawer state globally
 const NavigationContext = createContext<{
@@ -26,20 +27,61 @@ export function useNavigationDrawer() {
   return useContext(NavigationContext);
 }
 
-// Hamburger menu toggle button component
+// Hamburger menu toggle button, paired with the account switcher — every
+// page's header renders just `<MenuButton />`, so bundling the switcher here
+// (rather than a separate component each page would need to add) puts
+// account selection in the top nav everywhere with a single-file change.
 export function MenuButton() {
   const { setIsOpen } = useNavigationDrawer();
   return (
-    <button
-      onClick={() => setIsOpen(true)}
-      className="mr-1 cursor-pointer rounded p-1.5 hover:bg-line text-ink-muted hover:text-ink transition-colors focus:outline-none"
-      title="Open Menu"
-      type="button"
+    <div className="flex items-center gap-2">
+      <button
+        onClick={() => setIsOpen(true)}
+        className="cursor-pointer rounded p-1.5 hover:bg-line text-ink-muted hover:text-ink transition-colors focus:outline-none"
+        title="Open Menu"
+        type="button"
+      >
+        <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+          <path strokeLinecap="round" strokeLinejoin="round" d="M4 6h16M4 12h16M4 18h16" />
+        </svg>
+      </button>
+      <AccountSwitcher />
+    </div>
+  );
+}
+
+/** Active-account dropdown — reads/writes `AccountContext` (see
+ * `shared/api/account-context.tsx`). Renders nothing until the account list
+ * loads, and nothing at all if only one account is configured (today's
+ * single-account setups see no UI change). */
+function AccountSwitcher() {
+  const { accounts, activeAccountId, setActiveAccountId, loading } = useAccounts();
+
+  if (loading || accounts.length === 0) return null;
+  if (accounts.length === 1) {
+    return (
+      <span
+        className="rounded border border-line px-2 py-1 text-xs text-ink-muted"
+        title="Only one account is configured (configs/accounts.yaml)"
+      >
+        {accounts[0].label}
+      </span>
+    );
+  }
+
+  return (
+    <select
+      className="cursor-pointer rounded border border-line bg-panel px-2 py-1 text-xs text-ink focus:border-accent focus:outline-none"
+      value={activeAccountId ?? ""}
+      onChange={(e) => setActiveAccountId(e.target.value)}
+      title="Active MT5 account"
     >
-      <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-        <path strokeLinecap="round" strokeLinejoin="round" d="M4 6h16M4 12h16M4 18h16" />
-      </svg>
-    </button>
+      {accounts.map((a) => (
+        <option key={a.id} value={a.id}>
+          {a.label} ({a.mode})
+        </option>
+      ))}
+    </select>
   );
 }
 

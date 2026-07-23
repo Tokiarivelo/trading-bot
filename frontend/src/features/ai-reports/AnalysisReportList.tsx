@@ -2,20 +2,23 @@
 
 import Link from "next/link";
 import { useEffect, useState } from "react";
+import { useActiveAccount } from "@/shared/api/account-context";
 import { getAnalysisReports, type AnalysisReport } from "@/shared/api/client";
 import { StatusBadge } from "@/features/strategies/StatusBadge";
 
 /** Every 10-trade AI review, newest first — including reviews that found
  * nothing worth changing, kept for audit (§8.2). */
 export function AnalysisReportList() {
+  const accountId = useActiveAccount();
   const [reports, setReports] = useState<AnalysisReport[] | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    getAnalysisReports()
+    if (!accountId) return;
+    getAnalysisReports(accountId)
       .then(setReports)
       .catch(() => setError("failed to load analysis reports"));
-  }, []);
+  }, [accountId]);
 
   return (
     <div className="flex flex-col gap-3 p-4">

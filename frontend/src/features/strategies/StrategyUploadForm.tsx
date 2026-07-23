@@ -2,6 +2,7 @@
 
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
+import { useActiveAccount } from "@/shared/api/account-context";
 import { ApiError, uploadStrategyPdf } from "@/shared/api/client";
 import { SymbolMultiSelect } from "./SymbolMultiSelect";
 
@@ -17,6 +18,7 @@ const LAST_SYMBOL_KEY = "tb.lastSymbol";
  */
 export function StrategyUploadForm() {
   const router = useRouter();
+  const accountId = useActiveAccount();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [symbol, setSymbol] = useState<string | null>(null);
@@ -40,10 +42,11 @@ export function StrategyUploadForm() {
       setError("Please choose a PDF file first");
       return;
     }
+    if (!accountId) return;
     setBusy(true);
     setError(null);
     try {
-      const draft = await uploadStrategyPdf(file, symbol ?? undefined);
+      const draft = await uploadStrategyPdf(accountId, file, symbol ?? undefined);
       router.push(`/strategies/drafts/${draft.id}`);
     } catch (e) {
       setError(e instanceof ApiError ? e.message : "upload failed");

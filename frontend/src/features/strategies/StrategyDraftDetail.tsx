@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useEffect, useState } from "react";
+import { useActiveAccount } from "@/shared/api/account-context";
 import {
   ApiError,
   approveStrategyDraft,
@@ -47,6 +48,7 @@ interface SpecFormState {
  * never skippable: editing resets status to pending_review, and "Generate
  * strategy code" only appears once the spec is approved. */
 export function StrategyDraftDetail({ draftId }: { draftId: string }) {
+  const accountId = useActiveAccount();
   const [draft, setDraft] = useState<StrategyDraft | null>(null);
   const [form, setForm] = useState<SpecFormState | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -58,22 +60,23 @@ export function StrategyDraftDetail({ draftId }: { draftId: string }) {
   const [latestVersion, setLatestVersion] = useState<{ id: string; name: string } | null>(null);
 
   useEffect(() => {
-    getStrategyDraft(draftId)
+    if (!accountId) return;
+    getStrategyDraft(accountId, draftId)
       .then((d) => {
         setDraft(d);
         setForm(toFormState(d.effective_spec));
       })
       .catch(() => setError("draft not found"));
-  }, [draftId]);
+  }, [accountId, draftId]);
 
   useEffect(() => {
-    if (draft?.status !== "code_generated") return;
-    getStrategyVersions(draft.effective_spec.name)
+    if (draft?.status !== "code_generated" || !accountId) return;
+    getStrategyVersions(accountId, draft.effective_spec.name)
       .then((versions) => {
         if (versions.length > 0) setLatestVersion({ id: versions[0].id, name: versions[0].name });
       })
       .catch(() => {});
-  }, [draft?.status, draft?.effective_spec.name]);
+  }, [accountId, draft?.status, draft?.effective_spec.name]);
 
   if (error && draft === null) return <p className="p-4 text-sm text-err">{error}</p>;
   if (draft === null || form === null) {
@@ -96,12 +99,13 @@ export function StrategyDraftDetail({ draftId }: { draftId: string }) {
   }
 
   async function onSave() {
+    if (!accountId) return;
     const spec = fromFormState(form!);
     if (spec === null) {
       setError("params must be valid JSON");
       return;
     }
-    const updated = await run(() => updateStrategyDraftSpec(draftId, spec));
+    const updated = await run(() => updateStrategyDraftSpec(accountId, draftId, spec));
     if (updated) {
       setDraft(updated);
       setForm(toFormState(updated.effective_spec));
@@ -109,20 +113,23 @@ export function StrategyDraftDetail({ draftId }: { draftId: string }) {
   }
 
   async function onApprove() {
-    const updated = await run(() => approveStrategyDraft(draftId));
+    if (!accountId) return;
+    const updated = await run(() => approveStrategyDraft(accountId, draftId));
     if (updated) setDraft(updated);
   }
 
   async function onReject() {
-    const updated = await run(() => rejectStrategyDraft(draftId));
+    if (!accountId) return;
+    const updated = await run(() => rejectStrategyDraft(accountId, draftId));
     if (updated) setDraft(updated);
   }
 
   async function onGenerate() {
-    const result = await run(() => generateStrategyCode(draftId));
+    if (!accountId) return;
+    const result = await run(() => generateStrategyCode(accountId, draftId));
     if (result) {
       setGenerated(result);
-      const updated = await getStrategyDraft(draftId);
+      const updated = await getStrategyDraft(accountId, draftId);
       setDraft(updated);
     }
   }

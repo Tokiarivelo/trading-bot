@@ -11,6 +11,7 @@
  */
 
 import { useEffect, useRef, useState } from "react";
+import { useActiveAccount } from "@/shared/api/account-context";
 import { ApiError, getBrokerSymbols, type BrokerSymbol } from "@/shared/api/client";
 
 const DEBOUNCE_MS = 250;
@@ -26,6 +27,7 @@ export function SymbolPicker({
   favorites: string[];
   onToggleFavorite: (symbol: string) => void;
 }) {
+  const accountId = useActiveAccount();
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [page, setPage] = useState(0);
@@ -43,7 +45,7 @@ export function SymbolPicker({
   }, [query, open]);
 
   useEffect(() => {
-    if (!open) return;
+    if (!open || !accountId) return;
     if (query.trim().length > 0 && !searching) {
       // Between 1 char and MIN_QUERY_LENGTH: too short to search, not empty
       // enough to mean "browse everything" — just show the hint below.
@@ -53,7 +55,7 @@ export function SymbolPicker({
     }
     let cancelled = false;
     const runFetch = () =>
-      getBrokerSymbols(searching ? query.trim() : undefined, PAGE_SIZE, page * PAGE_SIZE)
+      getBrokerSymbols(accountId, searching ? query.trim() : undefined, PAGE_SIZE, page * PAGE_SIZE)
         .then(({ items, total: matchCount }) => {
           if (cancelled) return;
           setResults(items);
@@ -83,7 +85,7 @@ export function SymbolPicker({
     return () => {
       cancelled = true;
     };
-  }, [open, query, page, searching]);
+  }, [accountId, open, query, page, searching]);
 
   useEffect(() => {
     if (!open) return;

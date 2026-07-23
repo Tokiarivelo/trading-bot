@@ -8,6 +8,7 @@
  */
 
 import { useEffect, useRef, useState } from "react";
+import { useActiveAccount } from "@/shared/api/account-context";
 import { getStrategyVersions, type StrategyVersionSummary } from "@/shared/api/client";
 
 const POLL_MS = 5000;
@@ -32,15 +33,17 @@ function sameStrategyVersion(
 }
 
 export function useActiveStrategyForSymbol(symbol: string): StrategyVersionSummary | null {
+  const accountId = useActiveAccount();
   const [activeStrategy, setActiveStrategy] = useState<StrategyVersionSummary | null>(null);
   const symbolRef = useRef(symbol);
   symbolRef.current = symbol;
 
   useEffect(() => {
+    if (!accountId) return;
     let cancelled = false;
 
     const refresh = () => {
-      getStrategyVersions(undefined, "active")
+      getStrategyVersions(accountId, undefined, "active")
         .then((versions) => {
           if (cancelled) return;
           const match =
@@ -63,7 +66,7 @@ export function useActiveStrategyForSymbol(symbol: string): StrategyVersionSumma
       cancelled = true;
       clearInterval(id);
     };
-  }, [symbol]);
+  }, [accountId, symbol]);
 
   return activeStrategy;
 }

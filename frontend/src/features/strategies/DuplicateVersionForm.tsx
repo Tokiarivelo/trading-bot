@@ -6,6 +6,7 @@
 
 import { useRouter } from "next/navigation";
 import { useState } from "react";
+import { useActiveAccount } from "@/shared/api/account-context";
 import { ApiError, duplicateStrategyVersion } from "@/shared/api/client";
 import { SymbolMultiSelect } from "./SymbolMultiSelect";
 
@@ -17,6 +18,7 @@ export function DuplicateVersionForm({
   sourceSymbols: string[];
 }) {
   const router = useRouter();
+  const accountId = useActiveAccount();
   const [open, setOpen] = useState(false);
   const [name, setName] = useState("");
   const [retarget, setRetarget] = useState(false);
@@ -32,10 +34,11 @@ export function DuplicateVersionForm({
       setError("name is required");
       return;
     }
+    if (!accountId) return;
     setBusy(true);
     setError(null);
     try {
-      const result = await duplicateStrategyVersion(versionId, {
+      const result = await duplicateStrategyVersion(accountId, versionId, {
         name: trimmed,
         symbols: retarget ? symbols : undefined,
       });

@@ -5,6 +5,7 @@
  * `page` changes (Prev/Next). Mirrors `features/history/useTradeHistory.ts`. */
 
 import { useEffect, useState } from "react";
+import { useActiveAccount } from "@/shared/api/account-context";
 import {
   ApiError,
   getActivityLog,
@@ -20,6 +21,7 @@ export function useActivityLog(
   filters: Omit<LogHistoryFilters, "limit" | "offset">,
   autoRefresh: boolean = false
 ) {
+  const accountId = useActiveAccount();
   const [page, setPage] = useState(0);
   const [items, setItems] = useState<LogEntry[] | null>(null);
   const [total, setTotal] = useState(0);
@@ -42,9 +44,10 @@ export function useActivityLog(
   }, [autoRefresh, page]);
 
   useEffect(() => {
+    if (!accountId) return;
     let cancelled = false;
     if (tick === 0) setItems(null);
-    getActivityLog({ ...filters, limit: PAGE_SIZE, offset: page * PAGE_SIZE })
+    getActivityLog(accountId, { ...filters, limit: PAGE_SIZE, offset: page * PAGE_SIZE })
       .then(({ items, total }) => {
         if (cancelled) return;
         setItems(items);
@@ -63,7 +66,7 @@ export function useActivityLog(
     // filters is re-created every render by the caller; filtersKey is the
     // real dependency so this only re-fetches when it actually changes.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [filtersKey, page, tick, manualRefresh]);
+  }, [accountId, filtersKey, page, tick, manualRefresh]);
 
   return {
     items,

@@ -13,6 +13,7 @@ import { githubDarkInit } from "@uiw/codemirror-theme-github";
 import CodeMirror from "@uiw/react-codemirror";
 import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
+import { useActiveAccount } from "@/shared/api/account-context";
 import {
   ApiError,
   editStrategyVersionCode,
@@ -70,6 +71,7 @@ export function BacktestStrategyEditor({
   onResetPreview?: () => void;
 }) {
   const router = useRouter();
+  const accountId = useActiveAccount();
   const [baseVersion, setBaseVersion] = useState<StrategyVersionSummary | null>(null);
   const [loadErr, setLoadErr] = useState<string | null>(null);
   const [editing, setEditing] = useState(false);
@@ -91,8 +93,8 @@ export function BacktestStrategyEditor({
     setBaseVersion(null);
     setLoadErr(null);
     setEditing(false);
-    if (strategyName === "breakout_v1") return;
-    getStrategyVersions(strategyName)
+    if (strategyName === "breakout_v1" || !accountId) return;
+    getStrategyVersions(accountId, strategyName)
       .then((versions) => {
         // Newest first per name; prefer whichever's active so edits build on
         // the version actually driving live trading, not a stale draft.
@@ -101,14 +103,14 @@ export function BacktestStrategyEditor({
         if (pick === null) setLoadErr("no editable version found for this strategy");
       })
       .catch(() => setLoadErr("failed to load strategy version"));
-  }, [strategyName]);
+  }, [accountId, strategyName]);
 
   async function startEditing() {
-    if (!baseVersion) return;
+    if (!baseVersion || !accountId) return;
     setError(null);
     setSandboxErrors([]);
     try {
-      const detail = await getStrategyVersion(baseVersion.id);
+      const detail = await getStrategyVersion(accountId, baseVersion.id);
       setDraft(detail.code);
       setEditing(true);
     } catch {
@@ -117,12 +119,12 @@ export function BacktestStrategyEditor({
   }
 
   async function onSave() {
-    if (!baseVersion) return;
+    if (!baseVersion || !accountId) return;
     setError(null);
     setSandboxErrors([]);
     setPhase("saving");
     try {
-      const saved = await editStrategyVersionCode(baseVersion.id, draft);
+      const saved = await editStrategyVersionCode(accountId, baseVersion.id, draft);
       setPhase("backtesting");
       const job = await startBacktest(saved.id, symbol, period);
       await pollUntilDone(job.job_id);

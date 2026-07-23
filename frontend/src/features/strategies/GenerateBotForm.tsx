@@ -9,6 +9,7 @@
 
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
+import { useActiveAccount } from "@/shared/api/account-context";
 import { ApiError, createStrategyDraftFromText } from "@/shared/api/client";
 import { StrategyJsonUploadForm } from "./StrategyJsonUploadForm";
 import { StrategyUploadForm } from "./StrategyUploadForm";
@@ -34,6 +35,7 @@ const PROMPT_TEMPLATES = [
 
 function PromptTab() {
   const router = useRouter();
+  const accountId = useActiveAccount();
   const [description, setDescription] = useState("");
   const [symbol, setSymbol] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -57,10 +59,15 @@ function PromptTab() {
       setError("Please describe the trading method first");
       return;
     }
+    if (!accountId) return;
     setBusy(true);
     setError(null);
     try {
-      const draft = await createStrategyDraftFromText(description.trim(), symbol ?? undefined);
+      const draft = await createStrategyDraftFromText(
+        accountId,
+        description.trim(),
+        symbol ?? undefined,
+      );
       router.push(`/strategies/drafts/${draft.id}`);
     } catch (e) {
       setError(e instanceof ApiError ? e.message : "generation failed");

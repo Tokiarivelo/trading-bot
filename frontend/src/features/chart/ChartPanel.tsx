@@ -89,6 +89,7 @@ import { python } from '@codemirror/lang-python';
 import { githubDarkInit } from '@uiw/codemirror-theme-github';
 import CodeMirror from '@uiw/react-codemirror';
 import { onSocketConnect, subscribeRoom } from '@/shared/api/ws';
+import { useActiveAccount } from '@/shared/api/account-context';
 import type { Trading } from '@/features/trading/useTrading';
 import { BacktestStrategyEditor } from '@/features/backtest/BacktestStrategyEditor';
 import { SIGNAL_OUTCOME_META } from '@/features/backtest/signalOutcome';
@@ -263,6 +264,7 @@ const SESSION_REPLAY_MAX_PAGES =
  * pattern as the chart's own "load more") until the range is covered.
  * `onPage` reports progress for the picker/banner UI. */
 async function fetchCandlesForPeriod(
+  accountId: string,
   symbol: string,
   timeframe: Candle['timeframe'],
   fromSec: number,
@@ -281,6 +283,7 @@ async function fetchCandlesForPeriod(
   let cursor = toSec + TIMEFRAME_SECONDS[timeframe];
   for (let page = 1; page <= SESSION_REPLAY_MAX_PAGES; page++) {
     const batch = await getCandles(
+      accountId,
       symbol,
       timeframe,
       SESSION_REPLAY_CHUNK_SIZE,
@@ -2011,6 +2014,13 @@ export function ChartPanel({
   // closures inside the chart-creation useEffect.
   const symbolRef = useRef(symbol);
   symbolRef.current = symbol;
+  // Active account (Phase 8) — every candle/marker/signal fetch and the WS
+  // room subscription below need it. Mirrors symbolRef: a ref so effects
+  // that only fire on a symbol/timeframe change still read the latest
+  // account id without re-running.
+  const accountId = useActiveAccount();
+  const accountIdRef = useRef(accountId);
+  accountIdRef.current = accountId;
   const isSwitchingSymbolRef = useRef(false);
   const drawingToolRef = useRef(drawingTool);
   drawingToolRef.current = drawingTool;
@@ -3193,6 +3203,10 @@ export function ChartPanel({
   // changes — or, in backtest view, whenever the report being inspected
   // changes (§F: "test the bot in chart for candle history").
   useEffect(() => {
+    // Not resolved yet (GET /accounts still in flight) — wait for it rather
+    // than firing a request with no valid account id.
+    if (!accountId) return;
+    const account = accountId;
     let cancelled = false;
     // Cancels the initial-history fetch (and, since it's the one
     // `AbortController` shared for this symbol/timeframe/report's whole
@@ -3307,6 +3321,7 @@ export function ChartPanel({
       const oldest = candlesRef.current[0];
       try {
         const older = await getCandles(
+          account,
           symbol,
           timeframe,
           CANDLE_COUNT,
@@ -3369,6 +3384,7 @@ export function ChartPanel({
       if (sessionReplayPeriod) {
         setSessionReplayLoadingPage({ page: 0, loaded: 0 });
         return fetchCandlesForPeriod(
+          account,
           symbol,
           timeframe,
           sessionReplayPeriod.from,
@@ -3380,7 +3396,14 @@ export function ChartPanel({
         );
       }
       if (!backtestReportId)
-        return getCandles(symbol, timeframe, CANDLE_COUNT, undefined, initialLoadController.signal);
+        return getCandles(
+          account,
+          symbol,
+          timeframe,
+          CANDLE_COUNT,
+          undefined,
+          initialLoadController.signal,
+        );
       const report = await getBacktestReport(backtestReportId);
       if (cancelled) return [];
       setBacktestTrades(report.trades);
@@ -3404,7 +3427,14 @@ export function ChartPanel({
         lastClose > 0
           ? lastClose + 2 * TIMEFRAME_SECONDS[timeframe]
           : undefined;
-      return getCandles(symbol, timeframe, CANDLE_COUNT, anchor, initialLoadController.signal);
+      return getCandles(
+        account,
+        symbol,
+        timeframe,
+        CANDLE_COUNT,
+        anchor,
+        initialLoadController.signal,
+      );
     }
 
     renderRef.current = render;
@@ -3488,7 +3518,7 @@ export function ChartPanel({
     // in place when the timestamp matches, or appends a new one otherwise.
     const unsubscribe = subscribeRoom(
       ['candle_closed', 'candle_update'],
-      { symbol, timeframe },
+      { accountId, symbol, timeframe },
       (message) => {
         if (!isCandleMessage(message)) return;
         if (!historyLoadedRef.current) return;
@@ -3544,7 +3574,7 @@ export function ChartPanel({
       if (!historyLoadedRef.current || patchingReconnect) return;
       patchingReconnect = true;
       try {
-        const latest = await getCandles(symbol, timeframe, CANDLE_COUNT);
+        const latest = await getCandles(account, symbol, timeframe, CANDLE_COUNT);
         if (cancelled || latest.length === 0) return;
         const cutoff = latest[0].time;
         candlesRef.current = [
@@ -3574,7 +3604,7 @@ export function ChartPanel({
       unsubscribe();
       unsubscribeReconnect();
     };
-  }, [symbol, timeframe, backtestReportId, sessionReplayPeriod]);
+  }, [accountId, symbol, timeframe, backtestReportId, sessionReplayPeriod]);
 
   // Recompute overlays when the active strategy changes (activated,
   // deactivated, or a different one picked up for this symbol), when the user
@@ -3842,10 +3872,11 @@ export function ChartPanel({
 
   // Poll live spread and symbol info for header indicator and spread line.
   useEffect(() => {
+    if (!accountId) return;
     let cancelled = false;
 
     const poll = () => {
-      getSymbolInfo(symbol)
+      getSymbolInfo(accountId, symbol)
         .then((info) => {
           if (!cancelled) {
             setSymbolInfo(info);
@@ -3866,7 +3897,7 @@ export function ChartPanel({
       cancelled = true;
       clearInterval(timer);
     };
-  }, [symbol]);
+  }, [accountId, symbol]);
 
   // Poll trade markers (F7): entry arrows + exit circles from the journal,
   // plus an entry->exit oblique line (LIVE_TRADE_DRAWING_PREFIX) for each
@@ -3879,7 +3910,7 @@ export function ChartPanel({
   // replacing this unscoped "every trade on the symbol" view rather than
   // layering on top of it.
   useEffect(() => {
-    if (backtestReportId || liveBotSkill) {
+    if (backtestReportId || liveBotSkill || !accountId) {
       setClosedTrades([]);
       return;
     }
@@ -3906,7 +3937,7 @@ export function ChartPanel({
     let cancelled = false;
 
     const poll = () => {
-      getTradeMarkers(symbol)
+      getTradeMarkers(accountId, symbol)
         .then((trades) => {
           if (cancelled) return;
           seriesMarkersRef.current?.setMarkers(
@@ -3938,6 +3969,7 @@ export function ChartPanel({
       clearInterval(timer);
     };
   }, [
+    accountId,
     symbol,
     backtestReportId,
     liveBotSkill,
@@ -3979,13 +4011,13 @@ export function ChartPanel({
   // into the dock/marker list — an open position has no profit to show yet
   // (it still appears as a live position via the broker/orders UI).
   useEffect(() => {
-    if (!liveBotSkill) return;
+    if (!liveBotSkill || !accountId) return;
     let cancelled = false;
 
     const poll = () => {
       Promise.all([
-        getLiveBotSignals(liveBotSkill),
-        getTradeMarkers(symbol, liveBotSkill),
+        getLiveBotSignals(accountId, liveBotSkill),
+        getTradeMarkers(accountId, symbol, liveBotSkill),
       ])
         .then(([signals, markers]) => {
           if (cancelled) return;
@@ -4024,7 +4056,7 @@ export function ChartPanel({
       cancelled = true;
       clearInterval(timer);
     };
-  }, [symbol, liveBotSkill]);
+  }, [accountId, symbol, liveBotSkill]);
 
   // Resolves the eyed bot's own indicator list: its skill assignment names
   // the strategy family, whose active version's spec carries `indicators`.
@@ -4037,14 +4069,14 @@ export function ChartPanel({
   // to a different bot), so the chip only stays lit while its bot is being
   // watched. It won't touch a chip the user added manually themselves.
   useEffect(() => {
-    if (!liveBotSkill) {
+    if (!liveBotSkill || !accountId) {
       setLiveBotIndicators(null);
       return;
     }
     setShowSignalsDock(true);
     let cancelled = false;
     let addedIndicatorId: string | null = null;
-    Promise.all([getSkillAssignments(), getStrategyVersions()])
+    Promise.all([getSkillAssignments(), getStrategyVersions(accountId)])
       .then(([assignments, versions]) => {
         if (cancelled) return;
         const assignment = assignments.find((a) => a.name === liveBotSkill);
@@ -4086,7 +4118,7 @@ export function ChartPanel({
         });
       }
     };
-  }, [liveBotSkill, symbol]);
+  }, [accountId, liveBotSkill, symbol]);
 
   // Clears the live-bot overlay's data when the eye turns off, so a stale
   // bot's signals/trades don't linger after switching away.

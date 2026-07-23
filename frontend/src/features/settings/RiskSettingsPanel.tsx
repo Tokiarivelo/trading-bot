@@ -1,12 +1,14 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { useActiveAccount } from "@/shared/api/account-context";
 import { getRiskCaps, putMinLotFallback, type RiskCaps } from "@/shared/api/client";
 
 const inputCls =
   "rounded border border-line bg-bg px-2 py-1 text-sm text-ink placeholder:text-ink-muted focus:border-accent focus:outline-none";
 
 export function RiskSettingsPanel() {
+  const accountId = useActiveAccount();
   const [caps, setCaps] = useState<RiskCaps | null>(null);
   const [enabled, setEnabled] = useState(false);
   const [ceiling, setCeiling] = useState("");
@@ -15,14 +17,15 @@ export function RiskSettingsPanel() {
   const [saved, setSaved] = useState(false);
 
   useEffect(() => {
-    getRiskCaps()
+    if (!accountId) return;
+    getRiskCaps(accountId)
       .then((c) => {
         setCaps(c);
         setEnabled(c.min_lot_fallback_enabled);
         setCeiling(c.max_risk_per_trade_pct != null ? String(c.max_risk_per_trade_pct) : "");
       })
       .catch(() => setError("Failed to load risk caps."));
-  }, []);
+  }, [accountId]);
 
   const parsedCeiling = ceiling.trim() === "" ? null : Number(ceiling);
   const isCeilingValid =
@@ -32,12 +35,12 @@ export function RiskSettingsPanel() {
     (enabled !== caps.min_lot_fallback_enabled || parsedCeiling !== caps.max_risk_per_trade_pct);
 
   async function save() {
-    if (!isCeilingValid) return;
+    if (!isCeilingValid || !accountId) return;
     setSaving(true);
     setError(null);
     setSaved(false);
     try {
-      const updated = await putMinLotFallback(enabled, parsedCeiling);
+      const updated = await putMinLotFallback(accountId, enabled, parsedCeiling);
       setCaps(updated);
       setSaved(true);
     } catch {

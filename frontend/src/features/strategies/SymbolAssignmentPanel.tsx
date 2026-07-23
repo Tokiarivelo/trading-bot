@@ -13,6 +13,7 @@
  */
 
 import { useCallback, useEffect, useState } from "react";
+import { useActiveAccount } from "@/shared/api/account-context";
 import {
   ApiError,
   addBotToSymbol,
@@ -51,6 +52,7 @@ function summarizeSignals(signals: BacktestSignal[]): BotSignalCounts {
 }
 
 export function SymbolAssignmentPanel() {
+  const accountId = useActiveAccount();
   const [assignments, setAssignments] = useState<NormalSkillAssignment[] | null>(null);
   const [activeBots, setActiveBots] = useState<string[] | null>(null);
   const [busyKey, setBusyKey] = useState<string | null>(null);
@@ -60,20 +62,21 @@ export function SymbolAssignmentPanel() {
   const [configuringKey, setConfiguringKey] = useState<string | null>(null);
 
   const refresh = useCallback(() => {
-    Promise.all([getSkillAssignments(), getStrategyVersions(undefined, "active")])
+    if (!accountId) return;
+    Promise.all([getSkillAssignments(), getStrategyVersions(accountId, undefined, "active")])
       .then(([skills, versions]) => {
         setAssignments(skills);
         setActiveBots(Array.from(new Set(versions.map((v) => v.name))).sort());
         Promise.all(
           skills.map((a) =>
-            getLiveBotSignals(a.name)
+            getLiveBotSignals(accountId, a.name)
               .then((signals): [string, BotSignalCounts] => [a.name, summarizeSignals(signals)])
               .catch((): [string, BotSignalCounts] => [a.name, { confirmed: 0, opened: 0, rejected: 0 }]),
           ),
         ).then((entries) => setSignalCounts(new Map(entries)));
       })
       .catch(() => setError("failed to load symbol assignments"));
-  }, []);
+  }, [accountId]);
 
   useEffect(refresh, [refresh]);
 

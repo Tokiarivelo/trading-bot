@@ -4,6 +4,7 @@
  * that shares the current name, not just the one shown (§5). */
 
 import { useState } from "react";
+import { useActiveAccount } from "@/shared/api/account-context";
 import { ApiError, renameStrategyVersion } from "@/shared/api/client";
 
 export function RenameVersionInline({
@@ -15,6 +16,7 @@ export function RenameVersionInline({
   name: string;
   onRenamed: (newName: string) => void;
 }) {
+  const accountId = useActiveAccount();
   const [editing, setEditing] = useState(false);
   const [value, setValue] = useState(name);
   const [busy, setBusy] = useState(false);
@@ -27,10 +29,11 @@ export function RenameVersionInline({
       setValue(name);
       return;
     }
+    if (!accountId) return;
     setBusy(true);
     setError(null);
     try {
-      const renamed = await renameStrategyVersion(versionId, trimmed);
+      const renamed = await renameStrategyVersion(accountId, versionId, trimmed);
       onRenamed(renamed.name);
       setEditing(false);
     } catch (e) {

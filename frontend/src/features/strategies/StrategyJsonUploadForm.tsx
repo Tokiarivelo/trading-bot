@@ -2,6 +2,7 @@
 
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
+import { useActiveAccount } from "@/shared/api/account-context";
 import { ApiError, createStrategyDraftFromJson } from "@/shared/api/client";
 import { SymbolMultiSelect } from "./SymbolMultiSelect";
 
@@ -26,6 +27,7 @@ const EXAMPLE_SPEC = `{
  * automatically (§8.1). */
 export function StrategyJsonUploadForm() {
   const router = useRouter();
+  const accountId = useActiveAccount();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [symbol, setSymbol] = useState<string | null>(null);
@@ -49,6 +51,7 @@ export function StrategyJsonUploadForm() {
       setError("Please choose a JSON file first");
       return;
     }
+    if (!accountId) return;
     setBusy(true);
     setError(null);
     try {
@@ -70,7 +73,8 @@ export function StrategyJsonUploadForm() {
         );
       }
       const draft = await createStrategyDraftFromJson(
-        parsed as Parameters<typeof createStrategyDraftFromJson>[0],
+        accountId,
+        parsed as Parameters<typeof createStrategyDraftFromJson>[1],
         symbol ?? undefined,
       );
       router.push(`/strategies/drafts/${draft.id}`);

@@ -19,6 +19,7 @@ import { githubDarkInit } from "@uiw/codemirror-theme-github";
 import CodeMirror from "@uiw/react-codemirror";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
+import { useActiveAccount } from "@/shared/api/account-context";
 import {
   ApiError,
   editStrategyVersionCode,
@@ -75,6 +76,7 @@ export function CodeEditorPanel({
   spec: ExtractedStrategySpec | null;
 }) {
   const router = useRouter();
+  const accountId = useActiveAccount();
   const [mode, setMode] = useState<Mode>("view");
   const [draft, setDraft] = useState(code);
   const [instructions, setInstructions] = useState("");
@@ -157,11 +159,12 @@ export function CodeEditorPanel({
       setError("enter a name for the new strategy");
       return;
     }
+    if (!accountId) return;
     setBusy(true);
     setError(null);
     setSandboxErrors([]);
     try {
-      const saved = await editStrategyVersionCode(versionId, draft, resolveNewName());
+      const saved = await editStrategyVersionCode(accountId, versionId, draft, resolveNewName());
       router.push(`/strategies/versions/${saved.id}`);
     } catch (e) {
       setError(e instanceof ApiError ? e.message : "save failed");
@@ -187,11 +190,13 @@ export function CodeEditorPanel({
       setError(e instanceof Error ? e.message : "invalid spec");
       return;
     }
+    if (!accountId) return;
     setBusy(true);
     setError(null);
     setSandboxErrors([]);
     try {
       const result = await regenerateStrategyVersionCode(
+        accountId,
         versionId,
         trimmed,
         specOverride,

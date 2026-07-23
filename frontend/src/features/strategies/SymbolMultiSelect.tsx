@@ -8,6 +8,7 @@
  */
 
 import { useEffect, useRef, useState } from "react";
+import { useActiveAccount } from "@/shared/api/account-context";
 import { ApiError, getBrokerSymbols, type BrokerSymbol } from "@/shared/api/client";
 
 const DEBOUNCE_MS = 250;
@@ -23,6 +24,7 @@ export function SymbolMultiSelect({
   onChange: (symbols: string[]) => void;
   disabled?: boolean;
 }) {
+  const accountId = useActiveAccount();
   const [query, setQuery] = useState("");
   const [open, setOpen] = useState(false);
   const [results, setResults] = useState<BrokerSymbol[] | null>(null);
@@ -30,14 +32,14 @@ export function SymbolMultiSelect({
   const containerRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    if (!open || query.trim().length < MIN_QUERY_LENGTH) {
+    if (!open || !accountId || query.trim().length < MIN_QUERY_LENGTH) {
       setResults(null);
       setError(null);
       return;
     }
     let cancelled = false;
     const timer = setTimeout(() => {
-      getBrokerSymbols(query.trim(), PAGE_SIZE, 0)
+      getBrokerSymbols(accountId, query.trim(), PAGE_SIZE, 0)
         .then(({ items }) => {
           if (cancelled) return;
           setResults(items);
@@ -55,7 +57,7 @@ export function SymbolMultiSelect({
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [open, query]);
+  }, [accountId, open, query]);
 
   useEffect(() => {
     if (!open) return;

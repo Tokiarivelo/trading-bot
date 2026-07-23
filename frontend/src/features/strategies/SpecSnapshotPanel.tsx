@@ -6,6 +6,7 @@
  * touches the generated Python or creates a new version. */
 
 import { useState } from "react";
+import { useActiveAccount } from "@/shared/api/account-context";
 import {
   ApiError,
   updateStrategyVersionSpec,
@@ -101,6 +102,7 @@ export function SpecSnapshotPanel({
   spec: ExtractedStrategySpec;
   onSaved: () => void;
 }) {
+  const accountId = useActiveAccount();
   const [editing, setEditing] = useState(false);
   const [form, setForm] = useState<SpecFormState>(() => toFormState(spec));
   const [busy, setBusy] = useState(false);
@@ -125,10 +127,11 @@ export function SpecSnapshotPanel({
       setError(e instanceof Error ? e.message : "invalid spec");
       return;
     }
+    if (!accountId) return;
     setBusy(true);
     setError(null);
     try {
-      await updateStrategyVersionSpec(versionId, payload);
+      await updateStrategyVersionSpec(accountId, versionId, payload);
       setEditing(false);
       onSaved();
     } catch (e) {

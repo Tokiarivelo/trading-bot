@@ -9,6 +9,7 @@
  */
 
 import { useCallback, useEffect, useState } from "react";
+import { useActiveAccount } from "@/shared/api/account-context";
 import {
   getPendingOrders,
   getPositions,
@@ -20,6 +21,7 @@ import {
 const POLL_MS = 3000;
 
 export function useAllPositions() {
+  const accountId = useActiveAccount();
   const [positions, setPositions] = useState<PositionOut[]>([]);
   const [pendingOrders, setPendingOrders] = useState<PendingOrderOut[]>([]);
   // Ticket (as string, matching TradeHistoryItem.id) -> bot skill id, e.g.
@@ -27,16 +29,17 @@ export function useAllPositions() {
   const [skillByTicket, setSkillByTicket] = useState<Map<string, string | null>>(new Map());
 
   const refresh = useCallback(() => {
-    getPositions().then(setPositions).catch(() => {});
-    getPendingOrders().then(setPendingOrders).catch(() => {});
+    if (!accountId) return; // account list not resolved yet (initial load)
+    getPositions(accountId).then(setPositions).catch(() => {});
+    getPendingOrders(accountId).then(setPendingOrders).catch(() => {});
     // outcome="open" scopes this to currently-open trades — 500 is the
     // endpoint's max page size, far above any realistic open-position count.
-    getTradeHistory({ outcome: "open", limit: 500 })
+    getTradeHistory(accountId, { outcome: "open", limit: 500 })
       .then((page) => {
         setSkillByTicket(new Map(page.items.map((item) => [item.id, item.skill])));
       })
       .catch(() => {});
-  }, []);
+  }, [accountId]);
 
   useEffect(() => {
     refresh();
