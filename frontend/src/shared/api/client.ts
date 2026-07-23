@@ -83,7 +83,7 @@ async function requestForm<T>(path: string, method: string, form: FormData): Pro
 }
 
 export const api = {
-  get: <T>(path: string) => request<T>(path),
+  get: <T>(path: string, signal?: AbortSignal) => request<T>(path, signal ? { signal } : undefined),
   post: <T>(path: string, body?: unknown) =>
     request<T>(path, { method: "POST", body: body ? JSON.stringify(body) : undefined }),
   patch: <T>(path: string, body: unknown) =>
@@ -176,10 +176,11 @@ export const getCandles = (
   timeframe: Candle["timeframe"],
   count = 300,
   before?: number,
+  signal?: AbortSignal,
 ) => {
   const params = new URLSearchParams({ symbol, timeframe, count: String(count) });
   if (before !== undefined) params.set("before", String(before));
-  return api.get<Candle[]>(`/market-data/candles?${params}`);
+  return api.get<Candle[]>(`/market-data/candles?${params}`, signal);
 };
 
 export interface SymbolInfo {

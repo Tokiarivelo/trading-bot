@@ -30,6 +30,24 @@ class GatewayHealth:
     account: AccountInfo | None = None
 
 
+@dataclass(frozen=True, kw_only=True)
+class AccountConfig:
+    """One entry from `configs/accounts.yaml` — a broker account this
+    backend can run against, reached through its own gateway process.
+
+    `id` is a short slug, not the MT5 login number — it's the identity used
+    downstream in API paths, DB rows, and credential file names.
+    """
+
+    id: str
+    label: str
+    gateway_url: str
+    gateway_shared_secret_env: str
+    mode: str  # "paper" | "live"
+    enabled: bool = True
+    risk_override_file: str | None = None
+
+
 class BrokerUnavailable(Exception):
     """Gateway unreachable or the terminal rejected the request."""
 

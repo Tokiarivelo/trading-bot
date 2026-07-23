@@ -17,8 +17,9 @@ class SymbolSpecRepository:
     def __init__(self, session_factory: sessionmaker[Session]) -> None:
         self._session_factory = session_factory
 
-    def upsert(self, symbol: str, spec: SymbolSpec) -> None:
+    def upsert(self, symbol: str, spec: SymbolSpec, account_id: str = "default") -> None:
         row = {
+            "account_id": account_id,
             "symbol": symbol,
             "point": spec.point,
             "digits": spec.digits,
@@ -32,7 +33,7 @@ class SymbolSpecRepository:
         # SQLite-dialect upsert; swap for postgresql.insert when the DB moves.
         statement = insert(SymbolSpecRow)
         statement = statement.on_conflict_do_update(
-            index_elements=["symbol"],
+            index_elements=["account_id", "symbol"],
             set_={
                 col: statement.excluded[col]
                 for col in (
@@ -51,8 +52,10 @@ class SymbolSpecRepository:
             session.execute(statement, [row])
             session.commit()
 
-    def get(self, symbol: str) -> SymbolSpec | None:
-        query = select(SymbolSpecRow).where(SymbolSpecRow.symbol == symbol)
+    def get(self, symbol: str, account_id: str = "default") -> SymbolSpec | None:
+        query = select(SymbolSpecRow).where(
+            SymbolSpecRow.symbol == symbol, SymbolSpecRow.account_id == account_id
+        )
         with self._session_factory() as session:
             row = session.scalars(query).one_or_none()
         if row is None:

@@ -12,6 +12,7 @@ class StrategyVersionRow(Base):
     __tablename__ = "strategy_versions"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    account_id: Mapped[str] = mapped_column(String(64), index=True)
     name: Mapped[str] = mapped_column(String(128), index=True)
     version: Mapped[int] = mapped_column(Integer)
     file_path: Mapped[str] = mapped_column(String(255))

@@ -56,6 +56,21 @@ export function refreshWsAuth(): void {
 
 export type WsHandler = (message: unknown) => void;
 
+/** Fires `handler` on every Socket.IO `connect` event, including reconnects
+ * after a network blip or backend restart (not just the initial connect) —
+ * `subscribeRoom`'s own `connect` handler above only restores room
+ * membership, so callers that need to know "we just reconnected, our data
+ * may now have a hole" (e.g. to refetch/patch chart history) hook this
+ * instead of re-deriving reconnect detection themselves. Returns an
+ * unsubscribe fn. */
+export function onSocketConnect(handler: () => void): () => void {
+  const s = getSocket();
+  s.on('connect', handler);
+  return () => {
+    s.off('connect', handler);
+  };
+}
+
 /** Subscribe to one symbol/timeframe room for one or more event names; returns an unsubscribe fn. */
 export function subscribeRoom(
   events: string | string[],

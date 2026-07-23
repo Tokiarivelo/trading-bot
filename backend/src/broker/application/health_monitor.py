@@ -23,6 +23,7 @@ from src.broker.application.reconciliation import ReconciliationService
 from src.broker.domain.account import BrokerUnavailable
 from src.shared.events.bus import EventBus
 from src.shared.events.definitions import GatewayHealthChanged
+from src.shared.logging.account_context import current_account_id
 
 logger = logging.getLogger(__name__)
 
@@ -36,11 +37,13 @@ class GatewayHealthMonitor:
         reconciliation: ReconciliationService,
         event_bus: EventBus,
         poll_interval_s: float = _DEFAULT_POLL_INTERVAL_S,
+        account_id: str = "default",
     ) -> None:
         self._account = account
         self._reconciliation = reconciliation
         self._event_bus = event_bus
         self._poll_interval_s = poll_interval_s
+        self._account_id = account_id
         self._task: asyncio.Task[None] | None = None
         self._last_gateway_up: bool | None = None
         self._last_terminal_connected: bool | None = None
@@ -56,6 +59,7 @@ class GatewayHealthMonitor:
             self._task = None
 
     async def _run(self) -> None:
+        current_account_id.set(self._account_id)
         while True:
             await self._check_once()
             await asyncio.sleep(self._poll_interval_s)

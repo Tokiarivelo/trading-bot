@@ -1,9 +1,10 @@
 import stat
+from pathlib import Path
 
 import pytest
 from cryptography.fernet import Fernet
 
-from src.broker.adapters.credential_store import FernetCredentialStore
+from src.broker.adapters.credential_store import FernetCredentialStore, credentials_path_for
 from src.broker.domain.account import Mt5Credentials
 
 CREDS = Mt5Credentials(login=123456, password="s3cret-pw", server="Demo-Server")
@@ -52,3 +53,8 @@ def test_wrong_key_treated_as_absent(tmp_path):
 
 def test_password_never_in_repr():
     assert "s3cret-pw" not in repr(CREDS)
+
+
+def test_credentials_path_for_is_per_account():
+    assert credentials_path_for("ftmo-1") == Path("data/credentials/ftmo-1.enc")
+    assert credentials_path_for("default") != credentials_path_for("ftmo-1")

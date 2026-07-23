@@ -3,16 +3,30 @@
 The only place where concrete adapters are chosen and wired to ports.
 Modules receive their dependencies from here — they never construct
 adapters themselves.
+
+MULTI_ACCOUNT_PLAN.md Phase 5: one `AccountRuntime` per enabled entry in
+`configs/accounts.yaml` — its own gateway connection, event bus, trade
+engine, journal, and strategy registry, so N accounts trade concurrently and
+in isolation. `Container` keeps the genuinely process-wide singletons plus
+the `accounts` registry, and exposes every field the old single-account
+`Container` had as a read-only property delegating to the *primary* account
+(the first enabled `accounts.yaml` entry) — this is what keeps every
+existing route/test working unchanged until Phase 6 rewires routes to
+`get_account_runtime(account_id)` and deletes these properties one at a
+time.
 """
 
 from __future__ import annotations
 
+import os
 import shutil
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import httpx
 import yaml
+from dotenv import dotenv_values
 
 from src.activity.adapters.repository import ActivityLogRepository
 from src.activity.application.activity_log_service import ActivityLogService
@@ -38,7 +52,7 @@ from src.alerting.adapters.noop import NoopAlertAdapter
 from src.alerting.adapters.telegram import TelegramAlertAdapter
 from src.alerting.application.alert_service import AlertService
 from src.alerting.ports.alert import AlertPort
-from src.broker.adapters.credential_store import FernetCredentialStore
+from src.broker.adapters.credential_store import FernetCredentialStore, credentials_path_for
 from src.broker.adapters.mt5_gateway import GatewayAccount, GatewayBroker
 from src.broker.adapters.paper import PaperBroker
 from src.broker.application.account_service import AccountService
@@ -46,6 +60,7 @@ from src.broker.application.health_monitor import GatewayHealthMonitor
 from src.broker.application.order_service import OrderService
 from src.broker.application.reconciliation import ReconciliationService
 from src.broker.application.spread_gate import SpreadGate
+from src.broker.domain.account import AccountConfig
 from src.broker.ports.trading import BrokerPort
 from src.engine.application.manual_trading import ManualTradeGate
 from src.engine.application.position_manager import PositionManager
@@ -63,7 +78,7 @@ from src.market_data.api.ws import WsBroadcaster
 from src.market_data.application.candle_stream import CandleStreamService
 from src.market_data.application.history import CandleHistoryService
 from src.market_data.application.live_candle import LiveCandleService
-from src.market_data.domain.models import Timeframe
+from src.market_data.domain.models import Candle, Timeframe
 from src.news.adapters.finnhub import FinnhubCalendar
 from src.news.adapters.forexfactory import ForexFactoryCalendar
 from src.news.application.news_window_service import NewsWindowService
@@ -71,6 +86,7 @@ from src.news.domain.models import WindowSpec
 from src.news.ports.calendar import NewsCalendarPort
 from src.shared.auth.session import SessionTokenIssuer
 from src.shared.config.loaders import (
+    load_accounts_config,
     load_alerting_config,
     load_llm_provider_config,
     load_news_config,
@@ -78,12 +94,13 @@ from src.shared.config.loaders import (
     load_risk_caps,
     load_symbol_trading_config,
 )
-from src.shared.config.settings import Settings, load_yaml_config
+from src.shared.config.settings import REPO_ROOT, Settings, load_yaml_config
 from src.shared.db.base import make_session_factory
 from src.shared.events.bus import EventBus
 from src.shared.events.definitions import (
     CandleClosed,
     CircuitBreakerTripped,
+    Event,
     GatewayHealthChanged,
     NewsWindowEntered,
     PositionClosed,
@@ -105,6 +122,7 @@ from src.skills.domain.models import (
 from src.skills.ports.skill_selector import SkillSelectorPort
 from src.strategies.adapters.repository import StrategyVersionRepository
 from src.strategies.application.versioning import StrategyVersionService
+from src.strategies.domain.models import Strategy
 from src.strategies.generated.breakout_v1 import BreakoutV1
 from src.strategies.generated.breakout_v2 import BreakoutV2
 from src.strategies.generated.mean_reversion_v1 import MeanReversionV1
@@ -117,13 +135,66 @@ _NEWS_SKILLS_DIR = Path(__file__).resolve().parent / "skills" / "news"
 _STRATEGIES_GENERATED_DIR = Path(__file__).resolve().parent / "strategies" / "generated"
 
 
+class _FanOutEventBus:
+    """Duck-typed `EventBus.publish` fan-out to every account's own bus.
+
+    `NewsWindowService` is one process-wide instance (calendar polling has
+    no account dimension), but each account's `TradeEngine` subscribes to
+    `NewsWindowEntered` on its *own* bus (Phase 5: buses are per-account).
+    Passing this instead of a real `EventBus` lets `NewsWindowService` stay
+    unchanged — it only ever calls `.publish()`, never `.subscribe()`.
+    """
+
+    def __init__(self, buses: Sequence[EventBus]) -> None:
+        self._buses = buses
+
+    async def publish(self, event: Event) -> None:
+        for bus in self._buses:
+            await bus.publish(event)
+
+
+def _resolve_gateway_secret(env_var: str) -> str:
+    """Looks up `env_var` (an `accounts.yaml` entry's
+    `gateway_shared_secret_env`) the same way `Settings` resolves its own
+    fields: a real environment variable wins, falling back to `.env` — so
+    each account's gateway can name a differently-secreted `.env` variable
+    without needing its own `Settings` field."""
+    if env_var in os.environ:
+        return os.environ[env_var]
+    return dotenv_values(REPO_ROOT / ".env").get(env_var) or ""
+
+
+def _baseline_strategies() -> list[tuple[str, Strategy]]:
+    """Same baseline instances registered into every account's own
+    `StrategyRegistry` — stateless (`evaluate()` is a pure function), so
+    sharing one instance across N registries is safe; only the registry
+    bookkeeping (active/paused) is per-account."""
+    breakout_v1 = BreakoutV1()
+    breakout_v2 = BreakoutV2()
+    trend_structure_v1 = TrendStructureV1()
+    trend_structure_v2 = TrendStructureV2()
+    mean_reversion_v1 = MeanReversionV1()
+    return [
+        (breakout_v1.spec.name, breakout_v1),
+        (breakout_v2.spec.name, breakout_v2),
+        (trend_structure_v1.spec.name, trend_structure_v1),
+        (trend_structure_v2.spec.name, trend_structure_v2),
+        (mean_reversion_v1.spec.name, mean_reversion_v1),
+    ]
+
+
 @dataclass
-class Container:
-    settings: Settings
-    event_bus: EventBus
-    session_issuer: SessionTokenIssuer
+class AccountRuntime:
+    """Everything scoped to one `configs/accounts.yaml` entry — its own
+    gateway connection, event bus, trade engine, and strategy registry, so
+    an AI refinement promoted on this account never affects another's
+    active code (MULTI_ACCOUNT_PLAN.md Phase 5)."""
+
+    id: str
+    config: AccountConfig
     symbols: list[str]
     gateway_client: httpx.AsyncClient
+    event_bus: EventBus
     market_data: GatewayMarketData
     candle_history: CandleHistoryService
     candle_stream: CandleStreamService
@@ -135,32 +206,145 @@ class Container:
     manual_trade_gate: ManualTradeGate
     reconciliation: ReconciliationService
     health_monitor: GatewayHealthMonitor
+    position_manager: PositionManager
     trade_journal: TradeJournalService
     activity_log: ActivityLogService
     risk_manager: RiskManager
-    spread_gate: SpreadGate
     trade_engine: TradeEngine
     strategy_registry: StrategyRegistry
     strategy_versions: StrategyVersionService
-    indicators: IndicatorService
-    skill_selector: SkillSelectorPort
-    skill_assignment: SkillAssignmentService
     pdf_to_strategy: PdfToStrategyService
     code_regeneration: CodeRegenerationService
     refinement_loop: RefinementLoopService
-    provider_settings: ProviderSettingsService
-    news_client: httpx.AsyncClient
-    news_window_service: NewsWindowService
-
-    _closers: list = field(default_factory=list)
-    alert_telegram_client: httpx.AsyncClient | None = None
 
     async def aclose(self) -> None:
         await self.candle_stream.stop()
         await self.live_candle.stop()
-        await self.news_window_service.stop()
         await self.health_monitor.stop()
         await self.gateway_client.aclose()
+
+
+@dataclass
+class Container:
+    settings: Settings
+    session_issuer: SessionTokenIssuer
+    symbols: list[str]
+    spread_gate: SpreadGate
+    indicators: IndicatorService
+    skill_selector: SkillSelectorPort
+    skill_assignment: SkillAssignmentService
+    provider_settings: ProviderSettingsService
+    news_client: httpx.AsyncClient
+    news_window_service: NewsWindowService
+    accounts: dict[str, AccountRuntime]
+    primary_account_id: str
+
+    _closers: list = field(default_factory=list)
+    alert_telegram_client: httpx.AsyncClient | None = None
+
+    @property
+    def _primary(self) -> AccountRuntime:
+        return self.accounts[self.primary_account_id]
+
+    # --- backward-compat single-account accessors ---
+    # Every field the pre-Phase-5 `Container` had, delegating to the primary
+    # account (the first enabled `accounts.yaml` entry) — this is why every
+    # existing route's `request.app.state.container.<x>` accessor and every
+    # `SimpleNamespace`-stubbed route test keep working unchanged. Phase 6
+    # deletes these one at a time as each route switches to
+    # `get_account_runtime(account_id)`.
+    @property
+    def gateway_client(self) -> httpx.AsyncClient:
+        return self._primary.gateway_client
+
+    @property
+    def event_bus(self) -> EventBus:
+        return self._primary.event_bus
+
+    @property
+    def market_data(self) -> GatewayMarketData:
+        return self._primary.market_data
+
+    @property
+    def candle_history(self) -> CandleHistoryService:
+        return self._primary.candle_history
+
+    @property
+    def candle_stream(self) -> CandleStreamService:
+        return self._primary.candle_stream
+
+    @property
+    def live_candle(self) -> LiveCandleService:
+        return self._primary.live_candle
+
+    @property
+    def ws_broadcaster(self) -> WsBroadcaster:
+        return self._primary.ws_broadcaster
+
+    @property
+    def account(self) -> AccountService:
+        return self._primary.account
+
+    @property
+    def broker(self) -> BrokerPort:
+        return self._primary.broker
+
+    @property
+    def order_service(self) -> OrderService:
+        return self._primary.order_service
+
+    @property
+    def manual_trade_gate(self) -> ManualTradeGate:
+        return self._primary.manual_trade_gate
+
+    @property
+    def reconciliation(self) -> ReconciliationService:
+        return self._primary.reconciliation
+
+    @property
+    def health_monitor(self) -> GatewayHealthMonitor:
+        return self._primary.health_monitor
+
+    @property
+    def trade_journal(self) -> TradeJournalService:
+        return self._primary.trade_journal
+
+    @property
+    def activity_log(self) -> ActivityLogService:
+        return self._primary.activity_log
+
+    @property
+    def risk_manager(self) -> RiskManager:
+        return self._primary.risk_manager
+
+    @property
+    def trade_engine(self) -> TradeEngine:
+        return self._primary.trade_engine
+
+    @property
+    def strategy_registry(self) -> StrategyRegistry:
+        return self._primary.strategy_registry
+
+    @property
+    def strategy_versions(self) -> StrategyVersionService:
+        return self._primary.strategy_versions
+
+    @property
+    def pdf_to_strategy(self) -> PdfToStrategyService:
+        return self._primary.pdf_to_strategy
+
+    @property
+    def code_regeneration(self) -> CodeRegenerationService:
+        return self._primary.code_regeneration
+
+    @property
+    def refinement_loop(self) -> RefinementLoopService:
+        return self._primary.refinement_loop
+
+    async def aclose(self) -> None:
+        for runtime in self.accounts.values():
+            await runtime.aclose()
+        await self.news_window_service.stop()
         await self.news_client.aclose()
         if self.alert_telegram_client is not None:
             await self.alert_telegram_client.aclose()
@@ -168,146 +352,38 @@ class Container:
 
 def build_container(settings: Settings | None = None) -> Container:
     settings = settings or Settings()
-    event_bus = EventBus()
     session_issuer = SessionTokenIssuer()
     app_config = load_yaml_config("app", settings.configs_dir)
     symbols = list(app_config["symbols"])
-    mode = app_config.get("mode", "paper")
+    timezone = app_config.get("timezone", "UTC")
+    engine_config = app_config.get("engine", {})
 
-    gateway_client = httpx.AsyncClient(
-        base_url=settings.gateway_url,
-        headers={"X-Gateway-Secret": settings.gateway_shared_secret},
-        # 30 s: the Wine-hosted gateway can take 15-25 s on the first
-        # mt5.initialize() call while the terminal completes its IPC handshake.
-        timeout=30.0,
-    )
+    account_configs = [a for a in load_accounts_config(settings.configs_dir) if a.enabled]
+    if not account_configs:
+        raise ValueError("configs/accounts.yaml has no enabled account")
+    primary_account_id = account_configs[0].id
 
     session_factory = make_session_factory(settings.database_url)
-    market_data = GatewayMarketData(gateway_client)
+
+    # --- shared, account-agnostic DB repositories ---
+    # Thin wrappers over one shared SQLite DB — the `account_id` param each
+    # method already accepts (MULTI_ACCOUNT_PLAN.md Phase 4) is enough to
+    # isolate rows; only the *application services* built per account below
+    # need a distinct instance (to bake in which account_id to pass).
     candle_repository = CandleRepository(session_factory)
     symbol_spec_repository = SymbolSpecRepository(session_factory)
-    ws_broadcaster = WsBroadcaster()
-    candle_stream = CandleStreamService(
-        market_data=market_data,
-        repository=candle_repository,
-        event_bus=event_bus,
-        broadcaster=ws_broadcaster,
-        symbols=symbols,
-        timeframes=list(Timeframe),
-    )
-    candle_history = CandleHistoryService(market_data, candle_repository, symbol_spec_repository)
-    live_candle = LiveCandleService(market_data=market_data, broadcaster=ws_broadcaster)
+    journal_repository = JournalRepository(session_factory)
+    activity_log_repository = ActivityLogRepository(session_factory)
+    strategy_version_repository = StrategyVersionRepository(session_factory)
 
-    account = AccountService(
-        gateway=GatewayAccount(gateway_client),
-        store=FernetCredentialStore(Path("data/credentials.enc")),
-    )
-
-    # mode: paper (default, always safe) | live (real orders via the gateway).
-    broker: BrokerPort = (
-        GatewayBroker(gateway_client) if mode == "live" else PaperBroker(market_data)
-    )
-
+    risk_caps = load_risk_caps(settings.configs_dir)
     symbol_configs = {
         symbol: load_symbol_trading_config(symbol, settings.configs_dir) for symbol in symbols
     }
     spread_gate = SpreadGate(symbol_configs)
-    order_service = OrderService(
-        broker=broker, market_data=market_data, spread_gate=spread_gate, event_bus=event_bus
-    )
 
-    journal_repository = JournalRepository(session_factory)
-    market_context = CandleRepositoryMarketContext(candle_repository)
     review_every_n_trades = load_yaml_config("ai", settings.configs_dir).get(
         "review_every_n_trades", 10
-    )
-    trade_journal = TradeJournalService(
-        repository=journal_repository,
-        market_context=market_context,
-        event_bus=event_bus,
-        review_every_n_trades=review_every_n_trades,
-    )
-    event_bus.subscribe(PositionOpened, trade_journal.on_position_opened)
-    event_bus.subscribe(PositionClosed, trade_journal.on_position_closed)
-
-    activity_log = ActivityLogService(ActivityLogRepository(session_factory))
-
-    alerting_config = load_alerting_config(settings.configs_dir)
-    alert_adapters: list[AlertPort] = []
-    alert_telegram_client: httpx.AsyncClient | None = None
-    if alerting_config.telegram_enabled and settings.telegram_bot_token:
-        alert_telegram_client = httpx.AsyncClient(base_url="https://api.telegram.org", timeout=10.0)
-        alert_adapters.append(
-            TelegramAlertAdapter(
-                alert_telegram_client, settings.telegram_bot_token, settings.telegram_chat_id
-            )
-        )
-    if alerting_config.email_enabled and alerting_config.smtp_host:
-        alert_adapters.append(
-            EmailAlertAdapter(
-                smtp_host=alerting_config.smtp_host,
-                smtp_port=alerting_config.smtp_port,
-                username=settings.smtp_username,
-                password=settings.smtp_password,
-                from_address=alerting_config.from_address,
-                to_address=alerting_config.to_address,
-            )
-        )
-    alert_port: AlertPort = (
-        CompositeAlertAdapter(alert_adapters) if alert_adapters else NoopAlertAdapter()
-    )
-    alert_service = AlertService(port=alert_port, config=alerting_config)
-    event_bus.subscribe(PositionOpened, alert_service.on_position_opened)
-    event_bus.subscribe(PositionClosed, alert_service.on_position_closed)
-    event_bus.subscribe(CircuitBreakerTripped, alert_service.on_circuit_breaker_tripped)
-    event_bus.subscribe(RefinementCompleted, alert_service.on_refinement_completed)
-    event_bus.subscribe(GatewayHealthChanged, alert_service.on_gateway_health_changed)
-
-    timezone = app_config.get("timezone", "UTC")
-    engine_config = app_config.get("engine", {})
-    risk_caps = load_risk_caps(settings.configs_dir)
-    risk_manager = RiskManager(caps=risk_caps, timezone=timezone)
-    manual_trade_gate = ManualTradeGate(order_service=order_service, risk_manager=risk_manager)
-
-    reconciliation = ReconciliationService(
-        broker=broker, journal=trade_journal, event_bus=event_bus
-    )
-    health_monitor = GatewayHealthMonitor(
-        account=account, reconciliation=reconciliation, event_bus=event_bus
-    )
-    position_manager = PositionManager(
-        order_service=order_service,
-        market_data=market_data,
-        reconciliation=reconciliation,
-        risk_manager=risk_manager,
-    )
-
-    strategy_registry = StrategyRegistry()
-    breakout_v1 = BreakoutV1()
-    strategy_registry.register(breakout_v1.spec.name, breakout_v1)
-    breakout_v2 = BreakoutV2()
-    strategy_registry.register(breakout_v2.spec.name, breakout_v2)
-    trend_structure_v1 = TrendStructureV1()
-    strategy_registry.register(trend_structure_v1.spec.name, trend_structure_v1)
-    trend_structure_v2 = TrendStructureV2()
-    strategy_registry.register(trend_structure_v2.spec.name, trend_structure_v2)
-    mean_reversion_v1 = MeanReversionV1()
-    strategy_registry.register(mean_reversion_v1.spec.name, mean_reversion_v1)
-
-    strategy_version_repository = StrategyVersionRepository(session_factory)
-    strategy_versions = StrategyVersionService(
-        repository=strategy_version_repository,
-        registry=strategy_registry,
-        generated_dir=_STRATEGIES_GENERATED_DIR,
-    )
-    # Restores whichever AI-generated versions were active before a restart;
-    # runs after the baseline registration above so a same-named AI version
-    # (unlikely, but possible) wins, matching what the DB says is live.
-    strategy_versions.load_active_into_registry()
-
-    indicator_repository = IndicatorRepository(session_factory)
-    indicators = IndicatorService(
-        repository=indicator_repository, candle_repository=candle_repository
     )
 
     provider_config_repository = ProviderConfigRepository(session_factory)
@@ -326,27 +402,18 @@ def build_container(settings: Settings | None = None) -> Container:
         provider_secrets=provider_secrets,
     )
     draft_repository = DraftRepository(session_factory)
-    pdf_to_strategy = PdfToStrategyService(
-        draft_repository=draft_repository,
-        strategy_versions=strategy_versions,
-        llm_router=llm_router,
-    )
-    code_regeneration = CodeRegenerationService(
-        strategy_versions=strategy_versions,
-        llm_router=llm_router,
+    report_repository = AnalysisReportRepository(session_factory)
+    proposal_repository = RefinementProposalRepository(session_factory)
+    refinement_config = load_refinement_config(settings.configs_dir)
+
+    indicator_repository = IndicatorRepository(session_factory)
+    indicators = IndicatorService(
+        repository=indicator_repository, candle_repository=candle_repository
     )
 
     normal_skill_repository = NormalSkillRepository(_SKILLS_DIR)
     normal_skill_selector = SkillSelector(
         skills=normal_skill_repository.load_all(symbols), timezone=timezone
-    )
-    skill_assignment = SkillAssignmentService(
-        repository=normal_skill_repository,
-        selector=normal_skill_selector,
-        strategy_registry=strategy_registry,
-        candle_stream=candle_stream,
-        spread_gate=spread_gate,
-        configs_dir=settings.configs_dir,
     )
 
     news_config = load_news_config(settings.configs_dir)
@@ -374,11 +441,47 @@ def build_container(settings: Settings | None = None) -> Container:
         if news_config.calendar_source == "finnhub"
         else ForexFactoryCalendar(news_client)
     )
+
+    alerting_config = load_alerting_config(settings.configs_dir)
+    alert_adapters: list[AlertPort] = []
+    alert_telegram_client: httpx.AsyncClient | None = None
+    if alerting_config.telegram_enabled and settings.telegram_bot_token:
+        alert_telegram_client = httpx.AsyncClient(base_url="https://api.telegram.org", timeout=10.0)
+        alert_adapters.append(
+            TelegramAlertAdapter(
+                alert_telegram_client, settings.telegram_bot_token, settings.telegram_chat_id
+            )
+        )
+    if alerting_config.email_enabled and alerting_config.smtp_host:
+        alert_adapters.append(
+            EmailAlertAdapter(
+                smtp_host=alerting_config.smtp_host,
+                smtp_port=alerting_config.smtp_port,
+                username=settings.smtp_username,
+                password=settings.smtp_password,
+                from_address=alerting_config.from_address,
+                to_address=alerting_config.to_address,
+            )
+        )
+    alert_port: AlertPort = (
+        CompositeAlertAdapter(alert_adapters) if alert_adapters else NoopAlertAdapter()
+    )
+    alert_service = AlertService(port=alert_port, config=alerting_config)
+
+    baseline_strategies = _baseline_strategies()
+
+    # Event buses are created up front, one per account, so `NewsWindowService`
+    # (one process-wide instance) and `skill_selector` (which every account's
+    # `TradeEngine` needs at construction) can both be wired before any
+    # `AccountRuntime` itself is built — avoids constructing engines with a
+    # placeholder and patching them after the fact.
+    event_buses = {cfg.id: EventBus() for cfg in account_configs}
+
     news_window_service = NewsWindowService(
         calendar=news_calendar,
         config=news_config,
         window_specs=window_specs,
-        event_bus=event_bus,
+        event_bus=_FanOutEventBus(list(event_buses.values())),
     )
     skill_selector: SkillSelectorPort = NewsSkillSelector(
         normal_selector=normal_skill_selector,
@@ -386,15 +489,203 @@ def build_container(settings: Settings | None = None) -> Container:
         window_source=news_window_service,
     )
 
+    accounts: dict[str, AccountRuntime] = {}
+    for account_cfg in account_configs:
+        runtime = build_account_runtime(
+            settings,
+            account_cfg,
+            event_bus=event_buses[account_cfg.id],
+            symbols=list(symbols),
+            timezone=timezone,
+            engine_config=engine_config,
+            candle_repository=candle_repository,
+            symbol_spec_repository=symbol_spec_repository,
+            journal_repository=journal_repository,
+            activity_log_repository=activity_log_repository,
+            strategy_version_repository=strategy_version_repository,
+            baseline_strategies=baseline_strategies,
+            risk_caps=risk_caps,
+            spread_gate=spread_gate,
+            review_every_n_trades=review_every_n_trades,
+            skill_selector=skill_selector,
+            llm_router=llm_router,
+            draft_repository=draft_repository,
+            report_repository=report_repository,
+            proposal_repository=proposal_repository,
+            refinement_config=refinement_config,
+        )
+        accounts[account_cfg.id] = runtime
+
+    for runtime in accounts.values():
+        event_bus = runtime.event_bus
+        event_bus.subscribe(PositionOpened, alert_service.on_position_opened)
+        event_bus.subscribe(PositionClosed, alert_service.on_position_closed)
+        event_bus.subscribe(CircuitBreakerTripped, alert_service.on_circuit_breaker_tripped)
+        event_bus.subscribe(RefinementCompleted, alert_service.on_refinement_completed)
+        event_bus.subscribe(GatewayHealthChanged, alert_service.on_gateway_health_changed)
+        event_bus.subscribe(NewsWindowEntered, runtime.trade_engine.on_news_window_entered)
+
+    skill_assignment = SkillAssignmentService(
+        repository=normal_skill_repository,
+        selector=normal_skill_selector,
+        strategy_registry=accounts[primary_account_id].strategy_registry,
+        candle_streams=[rt.candle_stream for rt in accounts.values()],
+        spread_gate=spread_gate,
+        configs_dir=settings.configs_dir,
+    )
+
+    return Container(
+        settings=settings,
+        session_issuer=session_issuer,
+        symbols=symbols,
+        spread_gate=spread_gate,
+        indicators=indicators,
+        skill_selector=skill_selector,
+        skill_assignment=skill_assignment,
+        provider_settings=provider_settings,
+        news_client=news_client,
+        news_window_service=news_window_service,
+        accounts=accounts,
+        primary_account_id=primary_account_id,
+        alert_telegram_client=alert_telegram_client,
+    )
+
+
+def build_account_runtime(
+    settings: Settings,
+    account_cfg: AccountConfig,
+    *,
+    event_bus: EventBus,
+    symbols: list[str],
+    timezone: str,
+    engine_config: dict,
+    candle_repository: CandleRepository,
+    symbol_spec_repository: SymbolSpecRepository,
+    journal_repository: JournalRepository,
+    activity_log_repository: ActivityLogRepository,
+    strategy_version_repository: StrategyVersionRepository,
+    baseline_strategies: list[tuple[str, Strategy]],
+    risk_caps,
+    spread_gate: SpreadGate,
+    review_every_n_trades: int,
+    skill_selector: SkillSelectorPort,
+    llm_router: LLMRouter,
+    draft_repository: DraftRepository,
+    report_repository: AnalysisReportRepository,
+    proposal_repository: RefinementProposalRepository,
+    refinement_config,
+) -> AccountRuntime:
+    """Builds one account's full, isolated trading runtime — its own gateway
+    connection, event bus, journal, and strategy registry — mirroring what
+    the pre-Phase-5 `build_container` wired once for the whole process."""
+    account_id = account_cfg.id
+
+    gateway_secret = _resolve_gateway_secret(account_cfg.gateway_shared_secret_env)
+    gateway_client = httpx.AsyncClient(
+        base_url=account_cfg.gateway_url,
+        headers={"X-Gateway-Secret": gateway_secret},
+        # 30 s: the Wine-hosted gateway can take 15-25 s on the first
+        # mt5.initialize() call while the terminal completes its IPC handshake.
+        timeout=30.0,
+    )
+
+    market_data = GatewayMarketData(gateway_client)
+    ws_broadcaster = WsBroadcaster()
+    candle_history = CandleHistoryService(
+        market_data, candle_repository, symbol_spec_repository, account_id=account_id
+    )
+    recent_candle_cache: dict[tuple[str, Timeframe], tuple[float, Candle]] = {}
+    candle_stream = CandleStreamService(
+        market_data=market_data,
+        repository=candle_repository,
+        event_bus=event_bus,
+        broadcaster=ws_broadcaster,
+        symbols=symbols,
+        timeframes=list(Timeframe),
+        candle_history=candle_history,
+        recent_candle_cache=recent_candle_cache,
+        account_id=account_id,
+    )
+    live_candle = LiveCandleService(
+        market_data=market_data,
+        broadcaster=ws_broadcaster,
+        recent_candle_cache=recent_candle_cache,
+        account_id=account_id,
+    )
+
+    account = AccountService(
+        gateway=GatewayAccount(gateway_client),
+        store=FernetCredentialStore(credentials_path_for(account_id)),
+    )
+
+    # mode: paper (always safe) | live (real orders via this account's gateway).
+    broker: BrokerPort = (
+        GatewayBroker(gateway_client) if account_cfg.mode == "live" else PaperBroker(market_data)
+    )
+    order_service = OrderService(
+        broker=broker, market_data=market_data, spread_gate=spread_gate, event_bus=event_bus
+    )
+
+    trade_journal = TradeJournalService(
+        repository=journal_repository,
+        market_context=CandleRepositoryMarketContext(candle_repository),
+        event_bus=event_bus,
+        review_every_n_trades=review_every_n_trades,
+        account_id=account_id,
+    )
+    event_bus.subscribe(PositionOpened, trade_journal.on_position_opened)
+    event_bus.subscribe(PositionClosed, trade_journal.on_position_closed)
+
+    activity_log = ActivityLogService(activity_log_repository, account_id=account_id)
+
+    risk_manager = RiskManager(caps=risk_caps, timezone=timezone)
+    manual_trade_gate = ManualTradeGate(order_service=order_service, risk_manager=risk_manager)
+
+    reconciliation = ReconciliationService(
+        broker=broker, journal=trade_journal, event_bus=event_bus
+    )
+    health_monitor = GatewayHealthMonitor(
+        account=account, reconciliation=reconciliation, event_bus=event_bus, account_id=account_id
+    )
+    position_manager = PositionManager(
+        order_service=order_service,
+        market_data=market_data,
+        reconciliation=reconciliation,
+        risk_manager=risk_manager,
+    )
+
+    strategy_registry = StrategyRegistry()
+    for name, instance in baseline_strategies:
+        strategy_registry.register(name, instance)
+    strategy_versions = StrategyVersionService(
+        repository=strategy_version_repository,
+        registry=strategy_registry,
+        generated_dir=_STRATEGIES_GENERATED_DIR,
+        account_id=account_id,
+    )
+    # Restores whichever AI-generated versions were active on *this* account
+    # before a restart — separate per account, since Phase 4's repository
+    # already keys "active version" by (name, account_id).
+    strategy_versions.load_active_into_registry()
+
+    pdf_to_strategy = PdfToStrategyService(
+        draft_repository=draft_repository,
+        strategy_versions=strategy_versions,
+        llm_router=llm_router,
+    )
+    code_regeneration = CodeRegenerationService(
+        strategy_versions=strategy_versions,
+        llm_router=llm_router,
+    )
     refinement_loop = RefinementLoopService(
-        report_repository=AnalysisReportRepository(session_factory),
-        proposal_repository=RefinementProposalRepository(session_factory),
+        report_repository=report_repository,
+        proposal_repository=proposal_repository,
         journal_repository=journal_repository,
         strategy_versions=strategy_versions,
         strategy_registry=strategy_registry,
         skill_selector=skill_selector,
         llm_router=llm_router,
-        refinement_config=load_refinement_config(settings.configs_dir),
+        refinement_config=refinement_config,
         timezone=timezone,
         event_bus=event_bus,
     )
@@ -414,14 +705,15 @@ def build_container(settings: Settings | None = None) -> Container:
     )
     event_bus.subscribe(CandleClosed, trade_engine.on_candle_closed)
     event_bus.subscribe(PositionClosed, trade_engine.on_position_closed)
-    event_bus.subscribe(NewsWindowEntered, trade_engine.on_news_window_entered)
+    # NewsWindowEntered subscription is wired by build_container, once every
+    # account's bus exists (see its loop after this function returns).
 
-    return Container(
-        settings=settings,
-        event_bus=event_bus,
-        session_issuer=session_issuer,
+    return AccountRuntime(
+        id=account_id,
+        config=account_cfg,
         symbols=symbols,
         gateway_client=gateway_client,
+        event_bus=event_bus,
         market_data=market_data,
         candle_history=candle_history,
         candle_stream=candle_stream,
@@ -433,23 +725,16 @@ def build_container(settings: Settings | None = None) -> Container:
         manual_trade_gate=manual_trade_gate,
         reconciliation=reconciliation,
         health_monitor=health_monitor,
+        position_manager=position_manager,
         trade_journal=trade_journal,
         activity_log=activity_log,
         risk_manager=risk_manager,
-        spread_gate=spread_gate,
         trade_engine=trade_engine,
         strategy_registry=strategy_registry,
         strategy_versions=strategy_versions,
-        indicators=indicators,
-        skill_selector=skill_selector,
-        skill_assignment=skill_assignment,
         pdf_to_strategy=pdf_to_strategy,
         code_regeneration=code_regeneration,
         refinement_loop=refinement_loop,
-        provider_settings=provider_settings,
-        news_client=news_client,
-        news_window_service=news_window_service,
-        alert_telegram_client=alert_telegram_client,
     )
 
 

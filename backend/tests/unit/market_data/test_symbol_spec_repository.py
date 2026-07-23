@@ -51,3 +51,15 @@ def test_specs_are_keyed_per_symbol(repository):
 
     assert repository.get("XAUUSD").contract_size == 100.0
     assert repository.get("XAGUSD").contract_size == 5000.0
+
+
+def test_specs_are_keyed_per_account(repository):
+    """Different brokers quote different point/digits/stops_level for a
+    nominally identical symbol — a shared spec keyed only on `symbol` would
+    silently mix broker-specific facts across accounts."""
+    repository.upsert("XAUUSD", spec(digits=2, point=0.01), account_id="ftmo-1")
+    repository.upsert("XAUUSD", spec(digits=3, point=0.001), account_id="ftmo-2")
+
+    assert repository.get("XAUUSD", account_id="ftmo-1").digits == 2
+    assert repository.get("XAUUSD", account_id="ftmo-2").digits == 3
+    assert repository.get("XAUUSD", account_id="default") is None

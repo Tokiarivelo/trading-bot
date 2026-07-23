@@ -113,7 +113,7 @@ async def api(tmp_path):
         repository=repository,
         selector=selector,
         strategy_registry=registry,
-        candle_stream=candle_stream,
+        candle_streams=[candle_stream],
         spread_gate=spread_gate,
         configs_dir=configs_dir,
     )

@@ -21,6 +21,14 @@ from src.market_data.domain.models import (
     Timeframe,
 )
 
+# The shared gateway client's default timeout (see container.py) is 30s,
+# sized for the rare cold `mt5.initialize()` handshake on account/broker
+# calls. Market-data reads back the interactive chart, though — once
+# connected, MT5 answers `copy_rates_from_pos` in well under a second, so a
+# stuck/overloaded terminal should fail fast here and let CandleHistoryService
+# fall back to the DB instead of leaving a timeframe switch hanging for 30s.
+_READ_TIMEOUT_S = 8.0
+
 
 class GatewayMarketData:
     def __init__(self, client: httpx.AsyncClient) -> None:
@@ -68,7 +76,7 @@ class GatewayMarketData:
 
     async def _get(self, path: str, params: dict[str, Any]) -> Any:
         try:
-            response = await self._client.get(path, params=params)
+            response = await self._client.get(path, params=params, timeout=_READ_TIMEOUT_S)
         except httpx.HTTPError as exc:
             raise MarketDataUnavailable(f"gateway unreachable: {exc}") from exc
         if response.status_code != 200:

@@ -15,7 +15,7 @@ class FakeRepository:
         self.calls.append(("search", kwargs))
         return self.entries, self.total
 
-    def delete_by_ids(self, ids):
+    def delete_by_ids(self, ids, account_id="default"):
         self.calls.append(("delete_by_ids", ids))
         return self.deleted
 

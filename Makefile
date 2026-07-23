@@ -23,8 +23,10 @@ UV           := uv
 PNPM         := pnpm
 
 # Ports (override like: make dev-backend BACKEND_PORT=8001)
+# Gateway ports are no longer a single override here — each account in
+# configs/accounts.yaml carries its own gateway_url/port, resolved per
+# invocation by scripts/print_account_gateway_env.py (see dev-gateway below).
 BACKEND_PORT  ?= 8000
-GATEWAY_PORT  ?= 8787
 
 # Frontend port defaults to TB_FRONTEND_PORT from .env (falls back to 3000
 # if unset/no .env yet) — edit .env once instead of retyping the override
@@ -43,10 +45,6 @@ WINEPREFIX ?= $(HOME)/.mt5
 # make dev-gateway WINEDEBUG=
 WINEDEBUG ?= fixme-all
 
-# Shared secret the backend and gateway must agree on. Pulled from .env's
-# TB_GATEWAY_SHARED_SECRET so `make dev-gateway` / `make dev` always match
-# what the backend sends — no more silent 401s from a forgotten env var.
-GATEWAY_SHARED_SECRET := $(shell [ -f .env ] && grep -E '^TB_GATEWAY_SHARED_SECRET=' .env | cut -d= -f2-)
 
 # ════════════════════════════════ HELP ══════════════════════════════════════
 
@@ -110,16 +108,11 @@ setup-wine: ## One-time host setup for the Wine-hosted MT5 gateway (Ubuntu/Debia
 # ─── Dev servers ─────────────────────────────────────────────────────────────
 
 .PHONY: dev
-dev: ## Run backend + frontend + gateway together (Ctrl-C stops all)
-	@if ! pgrep -x terminal64 > /dev/null; then \
-		echo "MT5 terminal not running — launching it now (give it ~10 s to connect)..."; \
-		WINEPREFIX=$(WINEPREFIX) WINEDEBUG=$(WINEDEBUG) wine "$(WINEPREFIX)/drive_c/Program Files/MetaTrader 5/terminal64.exe" & \
-		sleep 10; \
-	fi
+dev: ## Run backend + frontend + the default account's gateway together (Ctrl-C stops all)
 	@trap 'kill 0' EXIT; \
 	( cd $(BACKEND_DIR) && $(UV) run uvicorn src.main:socket_app --reload --port $(BACKEND_PORT) ) & \
 	( cd $(FRONTEND_DIR) && $(PNPM) dev --port $(FRONTEND_PORT) ) & \
-	( cd $(GATEWAY_DIR) && WINEPREFIX=$(WINEPREFIX) WINEDEBUG=$(WINEDEBUG) GATEWAY_SHARED_SECRET=$(GATEWAY_SHARED_SECRET) GATEWAY_PORT=$(GATEWAY_PORT) wine $(WINE_PYTHON) run_gateway.py ) & \
+	$(MAKE) dev-gateway & \
 	wait
 
 .PHONY: dev-backend
@@ -136,24 +129,48 @@ dev-frontend: ## Run the Next.js dev server (default http://localhost:3000)
 WINE_PYTHON ?= $(WINEPREFIX)/drive_c/users/$(shell whoami)/AppData/Local/Programs/Python/Python312/python.exe
 
 .PHONY: dev-gateway
-dev-gateway: ## Run the MT5 gateway under Wine (http://localhost:8787); auto-starts the MT5 terminal first
-	@if ! pgrep -x terminal64 > /dev/null; then \
+dev-gateway: ## Run one account's MT5 gateway under Wine: make dev-gateway ACCOUNT=ftmo-1 (defaults to the first enabled account in configs/accounts.yaml); auto-starts the MT5 terminal first
+	@mkdir -p $(GATEWAY_DIR)/run
+	@eval "$$(cd $(BACKEND_DIR) && $(UV) run python -m scripts.print_account_gateway_env $(ACCOUNT))" && \
+	SECRET=$$(grep -E "^$${TB_RESOLVED_GATEWAY_SECRET_ENV}=" .env 2>/dev/null | cut -d= -f2-) && \
+	if ! pgrep -x terminal64 > /dev/null; then \
 		echo "MT5 terminal not running — launching it now (give it ~10 s to connect)..."; \
 		WINEPREFIX=$(WINEPREFIX) WINEDEBUG=$(WINEDEBUG) wine "$(WINEPREFIX)/drive_c/Program Files/MetaTrader 5/terminal64.exe" & \
 		sleep 10; \
-	fi
-	cd $(GATEWAY_DIR) && WINEPREFIX=$(WINEPREFIX) WINEDEBUG=$(WINEDEBUG) GATEWAY_SHARED_SECRET=$(GATEWAY_SHARED_SECRET) GATEWAY_PORT=$(GATEWAY_PORT) wine $(WINE_PYTHON) run_gateway.py
+	fi; \
+	echo "starting gateway for account '$$TB_RESOLVED_ACCOUNT_ID' -> http://$$TB_RESOLVED_GATEWAY_HOST:$$TB_RESOLVED_GATEWAY_PORT (pid file: $(GATEWAY_DIR)/run/$$TB_RESOLVED_ACCOUNT_ID.pid)"; \
+	( cd $(GATEWAY_DIR) && WINEPREFIX=$(WINEPREFIX) WINEDEBUG=$(WINEDEBUG) GATEWAY_SHARED_SECRET=$$SECRET GATEWAY_HOST=$$TB_RESOLVED_GATEWAY_HOST GATEWAY_PORT=$$TB_RESOLVED_GATEWAY_PORT wine $(WINE_PYTHON) run_gateway.py & \
+	  echo $$! > run/$$TB_RESOLVED_ACCOUNT_ID.pid; \
+	  wait $$! )
+
+.PHONY: dev-gateway-all
+dev-gateway-all: ## Run every enabled account's gateway concurrently (Ctrl-C stops all); see configs/accounts.yaml
+	@mkdir -p $(GATEWAY_DIR)/run
+	@ids=$$(cd $(BACKEND_DIR) && $(UV) run python -m scripts.print_account_gateway_env --list-ids) && \
+	if [ -z "$$ids" ]; then echo "no enabled accounts in configs/accounts.yaml"; exit 1; fi; \
+	if ! pgrep -x terminal64 > /dev/null; then \
+		echo "MT5 terminal not running — launching it now (give it ~10 s to connect)..."; \
+		WINEPREFIX=$(WINEPREFIX) WINEDEBUG=$(WINEDEBUG) wine "$(WINEPREFIX)/drive_c/Program Files/MetaTrader 5/terminal64.exe" & \
+		sleep 10; \
+	fi; \
+	trap 'kill 0' EXIT; \
+	for id in $$ids; do \
+		$(MAKE) dev-gateway ACCOUNT=$$id & \
+	done; \
+	wait
 
 .PHONY: mt5-terminal
 mt5-terminal: ## Launch the MT5 terminal in the dedicated Wine prefix (leave it running)
 	WINEPREFIX=$(WINEPREFIX) WINEDEBUG=$(WINEDEBUG) wine "$(WINEPREFIX)/drive_c/Program Files/MetaTrader 5/terminal64.exe" &
 
 .PHONY: mt5-login
-mt5-login: ## Log in to MT5 through the gateway from the CLI: make mt5-login LOGIN=123 PASSWORD=x SERVER=Broker-Demo
+mt5-login: ## Log in to an account's gateway from the CLI: make mt5-login ACCOUNT=ftmo-1 LOGIN=123 PASSWORD=x SERVER=Broker-Demo (ACCOUNT defaults to the first enabled account)
 	@test -n "$(LOGIN)" && test -n "$(PASSWORD)" && test -n "$(SERVER)" || \
-		{ echo 'usage: make mt5-login LOGIN=12345678 PASSWORD=*** SERVER=MetaQuotes-Demo'; exit 1; }
-	curl -sf -X POST http://127.0.0.1:$(GATEWAY_PORT)/login \
-		-H "X-Gateway-Secret: $(GATEWAY_SHARED_SECRET)" \
+		{ echo 'usage: make mt5-login ACCOUNT=ftmo-1 LOGIN=12345678 PASSWORD=*** SERVER=MetaQuotes-Demo'; exit 1; }
+	@eval "$$(cd $(BACKEND_DIR) && $(UV) run python -m scripts.print_account_gateway_env $(ACCOUNT))" && \
+	SECRET=$$(grep -E "^$${TB_RESOLVED_GATEWAY_SECRET_ENV}=" .env 2>/dev/null | cut -d= -f2-) && \
+	curl -sf -X POST http://$$TB_RESOLVED_GATEWAY_HOST:$$TB_RESOLVED_GATEWAY_PORT/login \
+		-H "X-Gateway-Secret: $$SECRET" \
 		-H "Content-Type: application/json" \
 		-d '{"login": $(LOGIN), "password": "$(PASSWORD)", "server": "$(SERVER)"}' \
 		| python3 -m json.tool
@@ -285,10 +302,11 @@ openapi: ## Dump the backend OpenAPI schema (backend must be running)
 	curl -sf http://localhost:$(BACKEND_PORT)/openapi.json | python3 -m json.tool
 
 .PHONY: doctor
-doctor: ## Diagnose the full stack: gateway up? terminal connected? backend can reach it?
-	@echo "── gateway :$(GATEWAY_PORT)/health ──"; \
-	if curl -sf http://127.0.0.1:$(GATEWAY_PORT)/health; then echo; else \
-		echo; echo "gateway is DOWN — run 'make dev-gateway' (Wine + terminal must be up first)"; exit 0; \
+doctor: ## Diagnose the full stack: gateway up? terminal connected? backend can reach it? (make doctor ACCOUNT=ftmo-1 to check a non-default account's gateway)
+	@eval "$$(cd $(BACKEND_DIR) && $(UV) run python -m scripts.print_account_gateway_env $(ACCOUNT))"; \
+	echo "── gateway '$$TB_RESOLVED_ACCOUNT_ID' :$$TB_RESOLVED_GATEWAY_PORT/health ──"; \
+	if curl -sf http://$$TB_RESOLVED_GATEWAY_HOST:$$TB_RESOLVED_GATEWAY_PORT/health; then echo; else \
+		echo; echo "gateway is DOWN — run 'make dev-gateway ACCOUNT=$$TB_RESOLVED_ACCOUNT_ID' (Wine + terminal must be up first)"; exit 0; \
 	fi; \
 	echo; echo "── backend :$(BACKEND_PORT)/account/status ──"; \
 	if curl -sf http://127.0.0.1:$(BACKEND_PORT)/account/status; then echo; else \
@@ -296,10 +314,10 @@ doctor: ## Diagnose the full stack: gateway up? terminal connected? backend can 
 	fi; \
 	echo; echo "If terminal_connected is false: MT5 isn't logged in yet — that's why"; \
 	echo "/symbol_info etc. return 502/503. Fix with the UI's MT5 Account panel, or:"; \
-	echo "  make mt5-login LOGIN=12345678 PASSWORD=*** SERVER=MetaQuotes-Demo"
+	echo "  make mt5-login ACCOUNT=$$TB_RESOLVED_ACCOUNT_ID LOGIN=12345678 PASSWORD=*** SERVER=MetaQuotes-Demo"
 
 .PHONY: kill stop
-kill stop: ## Kill all dev processes (backend, frontend, gateway, MT5 terminal)
+kill stop: ## Kill dev processes (backend, frontend, gateway(s), MT5 terminal); make kill ACCOUNT=ftmo-1 to stop just that one account's gateway
 	@echo "Stopping dev processes…"
 	@# Kill whatever is actually bound to each port first — this is the part
 	@# that matters. `pnpm dev` execs `next dev`, which execs a `next-server`
@@ -309,7 +327,26 @@ kill stop: ## Kill all dev processes (backend, frontend, gateway, MT5 terminal)
 	@# Similarly uvicorn's --reload can leave its actual worker in a state
 	@# where the parent is alive but nothing is listening, or vice versa —
 	@# killing by port sidesteps all of that regardless of process shape.
-	@for port in $(BACKEND_PORT) $(FRONTEND_PORT) $(GATEWAY_PORT); do \
+	@# Gateway processes aren't killed by port any more: with N accounts each
+	@# on its own port, that would mean re-deriving every account's port here.
+	@# `make dev-gateway` writes gateway/run/<account_id>.pid on start instead,
+	@# so gateways are looked up and killed by PID file below — precise per
+	@# account, and it doesn't matter if the port moved or the process wedged
+	@# without ever binding it.
+	@if [ -n "$(ACCOUNT)" ]; then \
+		pidfile=$(GATEWAY_DIR)/run/$(ACCOUNT).pid; \
+		if [ -f "$$pidfile" ] && kill -0 $$(cat "$$pidfile") 2>/dev/null; then \
+			pid=$$(cat "$$pidfile"); \
+			kill -TERM $$pid 2>/dev/null; sleep 1; kill -KILL $$pid 2>/dev/null; \
+			rm -f "$$pidfile"; \
+			echo "  ✓ gateway '$(ACCOUNT)' (pid $$pid) stopped"; \
+		else \
+			echo "  – no running gateway tracked for account '$(ACCOUNT)' ($$pidfile)"; \
+		fi; \
+		echo "Done."; \
+		exit 0; \
+	fi; \
+	for port in $(BACKEND_PORT) $(FRONTEND_PORT); do \
 		pids=$$(fuser $$port/tcp 2>/dev/null); \
 		if [ -n "$$pids" ]; then \
 			echo "  killing pid(s) $$pids listening on :$$port"; \
@@ -317,14 +354,25 @@ kill stop: ## Kill all dev processes (backend, frontend, gateway, MT5 terminal)
 			sleep 1; \
 			kill -KILL $$pids 2>/dev/null; \
 		fi; \
-	done
-	@# Then sweep by pattern for anything not yet bound to a port (still
-	@# starting) or left over as an unattached child process.
-	@pkill -f "uvicorn src.main:socket_app"       2>/dev/null && echo "  ✓ backend process(es) stopped"  || echo "  – no leftover backend process"
-	@pkill -f "next-server|next dev|pnpm.*dev"    2>/dev/null && echo "  ✓ frontend process(es) stopped" || echo "  – no leftover frontend process"
-	@pkill -f "run_gateway.py"                    2>/dev/null && echo "  ✓ gateway process(es) stopped"  || echo "  – no leftover gateway process"
-	@pkill -x terminal64                          2>/dev/null && echo "  ✓ MT5 terminal stopped"        || echo "  – MT5 terminal not running"
-	@echo "Done."
+	done; \
+	pkill -f "uvicorn src.main:socket_app"       2>/dev/null && echo "  ✓ backend process(es) stopped"  || echo "  – no leftover backend process"; \
+	pkill -f "next-server|next dev|pnpm.*dev"    2>/dev/null && echo "  ✓ frontend process(es) stopped" || echo "  – no leftover frontend process"; \
+	if ls $(GATEWAY_DIR)/run/*.pid >/dev/null 2>&1; then \
+		for pidfile in $(GATEWAY_DIR)/run/*.pid; do \
+			acct=$$(basename "$$pidfile" .pid); \
+			pid=$$(cat "$$pidfile" 2>/dev/null); \
+			if [ -n "$$pid" ] && kill -0 $$pid 2>/dev/null; then \
+				kill -TERM $$pid 2>/dev/null; sleep 1; kill -KILL $$pid 2>/dev/null; \
+				echo "  ✓ gateway '$$acct' (pid $$pid) stopped"; \
+			fi; \
+			rm -f "$$pidfile"; \
+		done; \
+	else \
+		echo "  – no gateway/run/*.pid files (nothing started via make dev-gateway)"; \
+	fi; \
+	pkill -f "run_gateway.py" 2>/dev/null && echo "  ✓ swept a leftover gateway process not tracked by any PID file" || true; \
+	pkill -x terminal64 2>/dev/null && echo "  ✓ MT5 terminal stopped" || echo "  – MT5 terminal not running"; \
+	echo "Done."
 
 .PHONY: clean
 clean: ## Remove caches and build artifacts (keeps .venv and node_modules)

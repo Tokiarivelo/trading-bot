@@ -123,3 +123,48 @@ def test_delete_by_filter_with_no_filters_deletes_everything(repository):
     _, total = repository.search()
     assert deleted == 2
     assert total == 0
+
+
+def test_search_scopes_to_account_id(repository):
+    repository.save(
+        created_at=100, level="INFO", logger="src.engine", message="a", account_id="ftmo-1"
+    )
+    repository.save(
+        created_at=200, level="INFO", logger="src.engine", message="b", account_id="ftmo-2"
+    )
+
+    entries, total = repository.search(account_id="ftmo-1")
+
+    assert total == 1
+    assert entries[0].message == "a"
+    assert repository.search(account_id="default") == ([], 0)
+
+
+def test_delete_by_ids_does_not_cross_accounts(repository):
+    repository.save(
+        created_at=100, level="INFO", logger="src.engine", message="a", account_id="ftmo-1"
+    )
+    entries, _ = repository.search(account_id="ftmo-1")
+    other_account_id = entries[0].id
+
+    deleted = repository.delete_by_ids([other_account_id], account_id="ftmo-2")
+
+    assert deleted == 0
+    remaining, total = repository.search(account_id="ftmo-1")
+    assert total == 1
+
+
+def test_delete_by_filter_scopes_to_account_id(repository):
+    repository.save(
+        created_at=100, level="INFO", logger="src.engine", message="a", account_id="ftmo-1"
+    )
+    repository.save(
+        created_at=200, level="INFO", logger="src.engine", message="b", account_id="ftmo-2"
+    )
+
+    deleted = repository.delete_by_filter(account_id="ftmo-1")
+
+    assert deleted == 1
+    assert repository.search(account_id="ftmo-1") == ([], 0)
+    _, total = repository.search(account_id="ftmo-2")
+    assert total == 1

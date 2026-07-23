@@ -136,6 +136,32 @@ Do this once inside the MT5 terminal, logged into your **demo** account:
    `terminal_connected: false` whenever it isn't, and the backend pauses
    streaming until it returns.
 
+## Running more than one account
+
+`MetaTrader5`'s Python package only supports one logged-in account per OS
+process — so N broker accounts means N gateway processes, each with its own
+port, terminal instance (a separate Wine prefix per account is simplest on
+Linux; a VPS naturally gives you one terminal per account), and shared
+secret. Everything above still applies per-instance; what changes is how you
+launch and stop them.
+
+Each account is an entry in the repo root's `configs/accounts.yaml`
+(`gateway_url` fixes its port, `gateway_shared_secret_env` names the `.env`
+variable holding its secret — a distinct one per account). From the repo
+root:
+
+```bash
+make dev-gateway ACCOUNT=ftmo-1     # this one account's gateway (defaults to
+                                     # the first enabled account if ACCOUNT is omitted)
+make dev-gateway-all                # every enabled account's gateway at once
+make kill ACCOUNT=ftmo-1            # stop just that one gateway
+```
+
+`make dev-gateway` writes `gateway/run/<account_id>.pid` for the duration of
+the process — that's what lets `make kill` (or `make kill ACCOUNT=...`) stop
+one gateway precisely instead of `pkill`-ing every `run_gateway.py` process
+on the machine.
+
 ## Wiring the backend to the gateway
 
 In the repo root `.env` (see `.env.example`):

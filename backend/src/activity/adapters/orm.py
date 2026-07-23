@@ -12,6 +12,7 @@ class LogRow(Base):
     __tablename__ = "activity_logs"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    account_id: Mapped[str] = mapped_column(String(64), index=True)
     created_at: Mapped[int] = mapped_column(Integer, index=True)
     level: Mapped[str] = mapped_column(String(10), index=True)
     logger: Mapped[str] = mapped_column(String(128), index=True)

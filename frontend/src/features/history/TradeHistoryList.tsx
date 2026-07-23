@@ -36,10 +36,10 @@ export function TradeHistoryList({
   /** Ticket currently highlighted on the chart (see page.tsx's
    * `selectedOrderTicket`) — forwarded to TradeHistoryTable so a row stays
    * marked in sync with the chart however the selection changed. */
-  selectedTicket?: number | null;
+  selectedTicket?: string | number | null;
   /** Called with a row's ticket + symbol when clicked — forwarded straight
    * through from TradeHistoryTable. */
-  onSelectTicket?: (ticket: number, symbol: string) => void;
+  onSelectTicket?: (ticket: string | number, symbol: string) => void;
 } = {}) {
   const [filters, setFilters] = useState<TradeHistoryFilterState>(EMPTY_FILTERS);
   const [groupBy, setGroupBy] = useState<GroupBy>("none");

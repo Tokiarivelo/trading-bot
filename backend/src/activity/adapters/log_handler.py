@@ -14,6 +14,7 @@ import logging.handlers
 import queue
 
 from src.activity.adapters.repository import ActivityLogRepository
+from src.shared.logging.account_context import current_account_id
 
 
 class _DBLogHandler(logging.Handler):
@@ -28,6 +29,7 @@ class _DBLogHandler(logging.Handler):
                 level=record.levelname,
                 logger=record.name,
                 message=self.format(record),
+                account_id=current_account_id.get(),
             )
         except Exception:
             self.handleError(record)

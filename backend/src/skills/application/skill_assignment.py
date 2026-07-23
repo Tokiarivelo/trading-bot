@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -105,14 +106,14 @@ class SkillAssignmentService:
         repository: NormalSkillRepository,
         selector: SkillSelector,
         strategy_registry: StrategyRegistry,
-        candle_stream: CandleStreamService,
+        candle_streams: Sequence[CandleStreamService],
         spread_gate: SpreadGate,
         configs_dir: Path,
     ) -> None:
         self._repository = repository
         self._selector = selector
         self._strategy_registry = strategy_registry
-        self._candle_stream = candle_stream
+        self._candle_streams = candle_streams
         self._spread_gate = spread_gate
         self._configs_dir = configs_dir
 
@@ -174,7 +175,8 @@ class SkillAssignmentService:
         await asyncio.to_thread(self._repository.save, skill)
 
         if not was_active:
-            self._candle_stream.add_symbol(symbol)
+            for candle_stream in self._candle_streams:
+                candle_stream.add_symbol(symbol)
             self._spread_gate.set_config(symbol, config)
         self._selector.set(skill)
 

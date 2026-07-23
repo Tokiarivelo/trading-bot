@@ -109,10 +109,12 @@ class StrategyVersionService:
         repository: StrategyVersionRepository,
         registry: StrategyRegistry,
         generated_dir: Path,
+        account_id: str = "default",
     ) -> None:
         self._repository = repository
         self._registry = registry
         self._generated_dir = generated_dir
+        self._account_id = account_id
 
     def save_generated_code(
         self,
@@ -135,11 +137,11 @@ class StrategyVersionService:
         if spec is None:
             spec = _derive_spec_snapshot(instance)
 
-        next_version = self._repository.latest_version_number(name) + 1
+        next_version = self._repository.latest_version_number(name, self._account_id) + 1
         file_name = f"{name}_v{next_version}.py"
         (self._generated_dir / file_name).write_text(code)
 
-        parent = self._repository.get_active(name)
+        parent = self._repository.get_active(name, self._account_id)
         version = StrategyVersion(
             id=str(uuid.uuid4()),
             name=name,
@@ -153,7 +155,7 @@ class StrategyVersionService:
             draft_id=draft_id,
             spec=spec,
         )
-        self._repository.save(version)
+        self._repository.save(version, self._account_id)
         logger.info(
             "strategy version saved: name=%s version=%d id=%s", name, next_version, version.id
         )
@@ -179,7 +181,7 @@ class StrategyVersionService:
         source = self._repository.get(version_id)
         if source is None:
             raise ValueError(f"no strategy version with id {version_id!r}")
-        if self._repository.latest_version_number(new_name) > 0:
+        if self._repository.latest_version_number(new_name, self._account_id) > 0:
             raise StrategyNameConflictError(new_name)
 
         code = self.get_code(source)
@@ -222,7 +224,7 @@ class StrategyVersionService:
             spec=new_spec,
             backtest_report_id=None,
         )
-        self._repository.save(duplicated)
+        self._repository.save(duplicated, self._account_id)
         logger.info(
             "strategy version duplicated: source_id=%s new_name=%s new_id=%s",
             version_id,
@@ -267,7 +269,7 @@ class StrategyVersionService:
             raise ValueError(f"no strategy version with id {version_id!r}")
 
         forking = new_name is not None and new_name != base.name
-        if forking and self._repository.latest_version_number(new_name) > 0:
+        if forking and self._repository.latest_version_number(new_name, self._account_id) > 0:
             raise StrategyNameConflictError(new_name)
 
         instance, errors = validate_and_load(code)
@@ -275,7 +277,11 @@ class StrategyVersionService:
             raise StrategyValidationError(errors)
 
         target_name = new_name if forking else base.name
-        next_version = 1 if forking else self._repository.latest_version_number(base.name) + 1
+        next_version = (
+            1
+            if forking
+            else self._repository.latest_version_number(base.name, self._account_id) + 1
+        )
         parent_version_id = None if forking else base.id
         effective_spec = base.spec if spec is _UNSET else spec
         if spec is _UNSET and effective_spec is None:
@@ -302,7 +308,7 @@ class StrategyVersionService:
             spec=effective_spec,
             backtest_report_id=None,
         )
-        self._repository.save(version)
+        self._repository.save(version, self._account_id)
         logger.info(
             "strategy version edited: name=%s version=%d id=%s source=%s base=%s forked=%s",
             target_name,
@@ -324,13 +330,16 @@ class StrategyVersionService:
         anchor = self._repository.get(version_id)
         if anchor is None:
             raise ValueError(f"no strategy version with id {version_id!r}")
-        if new_name != anchor.name and self._repository.latest_version_number(new_name) > 0:
+        if (
+            new_name != anchor.name
+            and self._repository.latest_version_number(new_name, self._account_id) > 0
+        ):
             raise StrategyNameConflictError(new_name)
 
         renamed_anchor = None
-        for version in self._repository.list_all(anchor.name):
+        for version in self._repository.list_all(anchor.name, account_id=self._account_id):
             renamed = replace(version, name=new_name)
-            self._repository.save(renamed)
+            self._repository.save(renamed, self._account_id)
             if version.id == version_id:
                 renamed_anchor = renamed
         logger.info("strategy family renamed: %s -> %s (id=%s)", anchor.name, new_name, version_id)
@@ -350,7 +359,7 @@ class StrategyVersionService:
             raise ValueError(f"no strategy version with id {version_id!r}")
 
         updated = replace(version, spec=spec)
-        self._repository.save(updated)
+        self._repository.save(updated, self._account_id)
         logger.info(
             "strategy version spec updated: name=%s version=%d id=%s",
             version.name,
@@ -362,7 +371,7 @@ class StrategyVersionService:
     def list_versions(
         self, name: str | None = None, status: VersionStatus | None = None
     ) -> list[StrategyVersion]:
-        return self._repository.list_all(name, status)
+        return self._repository.list_all(name, status, self._account_id)
 
     def get_version(self, version_id: str) -> StrategyVersion | None:
         return self._repository.get(version_id)
@@ -388,14 +397,15 @@ class StrategyVersionService:
 
         instance = self._load_instance(version)
 
-        previous_active = self._repository.get_active(version.name)
+        previous_active = self._repository.get_active(version.name, self._account_id)
         if previous_active is not None and previous_active.id != version.id:
             self._repository.save(
-                replace(previous_active, status=VersionStatus.ARCHIVED, paused=False)
+                replace(previous_active, status=VersionStatus.ARCHIVED, paused=False),
+                self._account_id,
             )
 
         activated = replace(version, status=VersionStatus.ACTIVE, paused=False)
-        self._repository.save(activated)
+        self._repository.save(activated, self._account_id)
         self._registry.resume(version.name)
         self._registry.register(version.name, instance)
         logger.info(
@@ -422,7 +432,7 @@ class StrategyVersionService:
             raise VersionAlreadyArchivedError(version_id)
 
         archived = replace(version, status=VersionStatus.ARCHIVED, paused=False)
-        self._repository.save(archived)
+        self._repository.save(archived, self._account_id)
         if version.status == VersionStatus.ACTIVE:
             self._registry.unregister(version.name)
         logger.info(
@@ -472,7 +482,7 @@ class StrategyVersionService:
             raise VersionNotActiveError(version_id)
 
         paused = replace(version, paused=True)
-        self._repository.save(paused)
+        self._repository.save(paused, self._account_id)
         self._registry.pause(version.name)
         logger.info(
             "strategy version paused: name=%s version=%d id=%s",
@@ -494,7 +504,7 @@ class StrategyVersionService:
             raise VersionNotActiveError(version_id)
 
         resumed = replace(version, paused=False)
-        self._repository.save(resumed)
+        self._repository.save(resumed, self._account_id)
         self._registry.resume(version.name)
         logger.info(
             "strategy version resumed: name=%s version=%d id=%s",
@@ -511,7 +521,7 @@ class StrategyVersionService:
         Versions whose code no longer validates are logged and skipped.
         Returns the number of versions backfilled. Safe to re-run."""
         backfilled = 0
-        for version in self._repository.list_all():
+        for version in self._repository.list_all(account_id=self._account_id):
             if version.spec is not None:
                 continue
             try:
@@ -523,7 +533,9 @@ class StrategyVersionService:
                     version.version,
                 )
                 continue
-            self._repository.save(replace(version, spec=_derive_spec_snapshot(instance)))
+            self._repository.save(
+                replace(version, spec=_derive_spec_snapshot(instance)), self._account_id
+            )
             backfilled += 1
             logger.info(
                 "spec snapshot backfilled: name=%s version=%d id=%s",
@@ -536,7 +548,7 @@ class StrategyVersionService:
     def load_active_into_registry(self) -> None:
         """Called once at startup so a backend restart doesn't lose whichever
         AI-generated versions were active before it went down."""
-        for version in self._repository.list_active():
+        for version in self._repository.list_active(self._account_id):
             try:
                 instance = self._load_instance(version)
             except Exception:

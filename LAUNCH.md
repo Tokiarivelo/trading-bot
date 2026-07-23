@@ -118,16 +118,19 @@ and connected.
 ### 5. Start everything
 
 ```bash
-make dev            # backend + frontend + gateway together, or run separately:
+make dev            # backend + frontend + the default account's gateway together, or run separately:
 make dev-backend     # http://localhost:8000
 make dev-frontend    # http://localhost:3000
 make dev-gateway      # http://localhost:8787 (needs the terminal from step 4 already running)
 ```
 
-`make dev-gateway` and `make dev` now automatically pass the gateway
-`WINEPREFIX` and the `GATEWAY_SHARED_SECRET` read out of your `.env`, so the
-backend and gateway always agree on the shared secret — no separate
-configuration needed.
+`make dev-gateway` and `make dev` resolve host/port/secret from
+`configs/accounts.yaml` (the `default` entry unless you pass `ACCOUNT=...`)
+and read the actual secret value out of your `.env`, so the backend and
+gateway always agree on the shared secret — no separate configuration
+needed. Running more than one broker account side by side? See "Running
+multiple accounts" below — the single-account commands above still work
+unchanged, they just resolve to whichever account is first and enabled.
 
 ### 6. Log in to MT5 through the gateway
 
@@ -151,6 +154,32 @@ Browse the full, documented backend API at <http://localhost:8000/docs>
 (Swagger UI) or <http://localhost:8000/redoc> — every endpoint lists its
 request/response schema and the status codes it can return.
 
+## Running multiple accounts
+
+MT5 only allows one logged-in account per OS process, so running several
+broker accounts (different prop firms, live + demo, different brokers)
+side by side means several gateway *processes*. Add an entry per account to
+`configs/accounts.yaml` (each needs its own `gateway_url` port and its own
+`gateway_shared_secret_env` — a distinct `.env` variable per account, e.g.
+`TB_GATEWAY_SHARED_SECRET_FTMO1=...`), then:
+
+```bash
+make dev-gateway ACCOUNT=ftmo-1        # start just that account's gateway
+make dev-gateway-all                   # start every enabled account's gateway at once
+make mt5-login ACCOUNT=ftmo-1 LOGIN=... PASSWORD=... SERVER=...
+make doctor ACCOUNT=ftmo-1             # health-check that account's gateway
+make kill ACCOUNT=ftmo-1               # stop just that one gateway
+make kill                              # stop everything (all accounts + backend + frontend + terminal)
+```
+
+Each `make dev-gateway` run writes `gateway/run/<account_id>.pid` while it's
+up, which is how `make kill` targets one account precisely instead of
+killing every gateway process on the machine. The backend/frontend/DB side
+of multi-account support (routing, per-account credentials, isolated
+journal/candle data) is tracked in `MULTI_ACCOUNT_PLAN.md` and lands in
+later phases — today each backend `Container` still wires exactly one
+account end-to-end (the first enabled entry in `accounts.yaml`).
+
 ## Quality gates before calling anything "done"
 
 ```bash
@@ -164,7 +193,7 @@ make check   # lint + backend/gateway tests + frontend production build
 | `symbol_info` → 502, `market-data/symbol-info` → 503 | Not logged in to MT5 yet — step 6 |
 | `terminal_connected: false` after login worked before | Terminal closed/crashed, or lost broker connection — restart it (step 4), then repeat step 6 |
 | `502 login rejected: [-6] Authorization failed` | Wrong login/password/**server name** — copy the server name exactly from the broker email |
-| `401 bad or missing X-Gateway-Secret` | `TB_GATEWAY_SHARED_SECRET` in `.env` doesn't match what the gateway process has — re-run `make dev-gateway`/`make dev`, which now derive it from `.env` automatically |
+| `401 bad or missing X-Gateway-Secret` | The `.env` variable named by that account's `gateway_shared_secret_env` in `configs/accounts.yaml` doesn't match what the gateway process has — re-run `make dev-gateway`/`make dev` (or `make dev-gateway ACCOUNT=...`), which derive it from `.env` automatically |
 | Order calls fail with retcode `10027` | Algo Trading disabled in the terminal — step 4.2 |
 | `/candles` returns very few bars | Terminal hasn't downloaded that history — step 4.4 |
 | Wine terminal loses connection when laptop sleeps | Disable suspend, or move to a Windows VPS (`gateway/README.md`, Option B) |

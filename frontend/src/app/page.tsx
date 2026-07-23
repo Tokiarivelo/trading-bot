@@ -87,7 +87,7 @@ export default function Home() {
   // TradingView's "selected position" look. Cleared by clicking the same
   // row again.
   const [selectedOrderTicket, setSelectedOrderTicket] = useState<{
-    ticket: number;
+    ticket: string | number;
     symbol: string;
   } | null>(null);
   useEffect(() => {
@@ -130,7 +130,7 @@ export default function Home() {
   // already-selected ticket toggles it off; clicking any other ticket
   // selects it and, if it belongs to a symbol that isn't on screen, switches
   // the chart to it first — same as TradingView's positions panel.
-  function handleSelectOrderTicket(ticket: number, orderSymbol: string) {
+  function handleSelectOrderTicket(ticket: string | number, orderSymbol: string) {
     if (selectedOrderTicket && selectedOrderTicket.ticket === ticket) {
       setSelectedOrderTicket(null);
       return;

@@ -11,6 +11,7 @@ from src.shared.db.base import Base
 class CandleRow(Base):
     __tablename__ = "candles"
 
+    account_id: Mapped[str] = mapped_column(String(64), primary_key=True)
     symbol: Mapped[str] = mapped_column(String(16), primary_key=True)
     timeframe: Mapped[str] = mapped_column(String(4), primary_key=True)
     # Bar open time as epoch seconds UTC — matches the wire format and
@@ -33,6 +34,7 @@ class SymbolSpecRow(Base):
 
     __tablename__ = "symbol_specs"
 
+    account_id: Mapped[str] = mapped_column(String(64), primary_key=True)
     symbol: Mapped[str] = mapped_column(String(64), primary_key=True)
     point: Mapped[float] = mapped_column(Float)
     digits: Mapped[int] = mapped_column(Integer)

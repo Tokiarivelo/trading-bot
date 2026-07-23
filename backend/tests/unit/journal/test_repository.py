@@ -235,3 +235,49 @@ def test_search_paginates_with_limit_and_offset(repository):
     assert total == 4
     assert [r.id for r in page1] == ["4", "3"]
     assert [r.id for r in page2] == ["2", "1"]
+
+
+def test_save_defaults_to_default_account(repository):
+    repository.save(make_record("1"))
+    assert repository.get_last_n("XAUUSD", 10, account_id="default") == [make_record("1")]
+
+
+def test_queries_do_not_leak_across_accounts(repository):
+    repository.save(make_record("1"), account_id="ftmo-1")
+    repository.save(make_record("2"), account_id="ftmo-2")
+
+    assert [r.id for r in repository.get_last_n("XAUUSD", 10, account_id="ftmo-1")] == ["1"]
+    assert [r.id for r in repository.get_last_n("XAUUSD", 10, account_id="ftmo-2")] == ["2"]
+    assert repository.get_last_n("XAUUSD", 10, account_id="default") == []
+
+
+def test_search_scopes_to_account_id(repository):
+    repository.save(make_record("1"), account_id="ftmo-1")
+    repository.save(make_record("2"), account_id="ftmo-2")
+
+    items, total = repository.search(account_id="ftmo-1")
+    assert total == 1
+    assert items[0].id == "1"
+
+
+def test_get_open_and_get_last_n_closed_and_count_closed_scope_to_account(repository):
+    repository.save(make_record("1"), account_id="ftmo-1")
+    repository.save(
+        make_record("2", close_price=2410.0, close_time=utc(2026, 7, 10, 15, 0), profit=1.0),
+        account_id="ftmo-1",
+    )
+    repository.save(make_record("3"), account_id="ftmo-2")
+
+    assert [r.id for r in repository.get_open(account_id="ftmo-1")] == ["1"]
+    assert [r.id for r in repository.get_open(account_id="ftmo-2")] == ["3"]
+    assert [r.id for r in repository.get_last_n_closed("XAUUSD", 10, account_id="ftmo-1")] == ["2"]
+    assert repository.get_last_n_closed("XAUUSD", 10, account_id="ftmo-2") == []
+    assert repository.count_closed("XAUUSD", account_id="ftmo-1") == 1
+    assert repository.count_closed("XAUUSD", account_id="ftmo-2") == 0
+
+
+def test_get_markers_scopes_to_account(repository):
+    repository.save(make_record("1"), account_id="ftmo-1")
+    repository.save(make_record("2"), account_id="ftmo-2")
+
+    assert [r.id for r in repository.get_markers("XAUUSD", account_id="ftmo-1")] == ["1"]

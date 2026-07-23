@@ -35,6 +35,8 @@ import {
   FibRetracement,
   ParallelChannel,
   Circle,
+  LongPosition,
+  ShortPosition,
 } from 'lightweight-charts-drawing';
 import {
   Activity,
@@ -86,7 +88,7 @@ import {
 import { python } from '@codemirror/lang-python';
 import { githubDarkInit } from '@uiw/codemirror-theme-github';
 import CodeMirror from '@uiw/react-codemirror';
-import { subscribeRoom } from '@/shared/api/ws';
+import { onSocketConnect, subscribeRoom } from '@/shared/api/ws';
 import type { Trading } from '@/features/trading/useTrading';
 import { BacktestStrategyEditor } from '@/features/backtest/BacktestStrategyEditor';
 import { SIGNAL_OUTCOME_META } from '@/features/backtest/signalOutcome';
@@ -184,7 +186,6 @@ export interface ManualIndicator {
   previewCode?: string;
 }
 
-/** Tool type strings accepted by DrawingManager.setActiveTool() */
 export type DrawingToolType =
   | 'trend-line'
   | 'extended-line'
@@ -193,7 +194,9 @@ export type DrawingToolType =
   | 'rectangle'
   | 'fib-retracement'
   | 'parallel-channel'
-  | 'circle';
+  | 'circle'
+  | 'long-position'
+  | 'short-position';
 
 const TIMEFRAMES: Candle['timeframe'][] = [
   'M1',
@@ -265,8 +268,14 @@ async function fetchCandlesForPeriod(
   fromSec: number,
   toSec: number,
   onPage?: (page: number, loaded: number) => void,
+  signal?: AbortSignal,
 ): Promise<Candle[]> {
-  let acc: Candle[] = [];
+  // Pages come back newest-first (page 1 = most recent); collect them in
+  // that order and concatenate once at the end instead of prepending each
+  // batch onto a growing array, which would copy the whole accumulator on
+  // every page (O(n^2) for a period spanning many chunks).
+  const pages: Candle[][] = [];
+  let loaded = 0;
   // `before` excludes the cursor bar itself — nudge one bar past `toSec` so
   // the bar covering the period's end is still included in the first page.
   let cursor = toSec + TIMEFRAME_SECONDS[timeframe];
@@ -276,14 +285,17 @@ async function fetchCandlesForPeriod(
       timeframe,
       SESSION_REPLAY_CHUNK_SIZE,
       cursor,
+      signal,
     );
     if (batch.length === 0) break;
-    acc = [...batch, ...acc];
-    onPage?.(page, acc.length);
+    pages.push(batch);
+    loaded += batch.length;
+    onPage?.(page, loaded);
     const oldest = batch[0];
     if (oldest.time <= fromSec || batch.length < SESSION_REPLAY_CHUNK_SIZE) break;
     cursor = oldest.time;
   }
+  const acc = pages.reverse().flat();
   return acc.filter((c) => c.time >= fromSec && c.time <= toSec);
 }
 
@@ -318,7 +330,6 @@ const NEWS_POLL_MS = 30_000;
 // before the user actually scrolls past the end of the data.
 const LOAD_MORE_THRESHOLD = 50;
 
-/** Number of anchor clicks needed to complete each drawing tool. */
 const REQUIRED_ANCHORS: Record<DrawingToolType, number> = {
   'trend-line': 2,
   'extended-line': 2,
@@ -328,6 +339,8 @@ const REQUIRED_ANCHORS: Record<DrawingToolType, number> = {
   'fib-retracement': 2,
   'parallel-channel': 3,
   circle: 2,
+  'long-position': 3,
+  'short-position': 3,
 };
 
 function cssVar(name: string): string {
@@ -412,6 +425,10 @@ function loadDrawingsFromStorage(
           return new ParallelChannel(d.id, d.anchors, d.style, d.options);
         case 'circle':
           return new Circle(d.id, d.anchors, d.style, d.options);
+        case 'long-position':
+          return new LongPosition(d.id, d.anchors, d.style, d.options);
+        case 'short-position':
+          return new ShortPosition(d.id, d.anchors, d.style, d.options);
         default:
           return null;
       }
@@ -444,6 +461,10 @@ function createDrawingInstance(
       return new ParallelChannel(id, anchors, style);
     case 'circle':
       return new Circle(id, anchors, style);
+    case 'long-position':
+      return new LongPosition(id, anchors, style);
+    case 'short-position':
+      return new ShortPosition(id, anchors, style);
     default:
       return null;
   }
@@ -1321,6 +1342,8 @@ function DrawingContextMenu({
     'fib-retracement': 'Fibonacci Retr.',
     'parallel-channel': 'Parallel Channel',
     circle: 'Circle',
+    'long-position': 'Long Position',
+    'short-position': 'Short Position',
   };
 
   return (
@@ -1435,6 +1458,8 @@ function DrawingEditPopover({
     'fib-retracement': 'Fibonacci Retr.',
     'parallel-channel': 'Parallel Channel',
     circle: 'Circle',
+    'long-position': 'Long Position',
+    'short-position': 'Short Position',
   };
 
   return (
@@ -1582,11 +1607,11 @@ export function ChartPanel({
    * (thicker, glowing) and every other line dims, mirroring TradingView's
    * "selected position" look. Null (the default) renders every line at its
    * normal, always-on style. */
-  highlightedTicket?: number | null;
+  highlightedTicket?: string | number | null;
   /** Called when the user clicks an entry/SL/TP/pending line on the chart —
    * notifies parent to highlight all lines for this order/position and sync
    * with the OrdersDock table. */
-  onSelectTicket?: (ticket: number, symbol: string) => void;
+  onSelectTicket?: (ticket: string | number, symbol: string) => void;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
@@ -1882,6 +1907,12 @@ export function ChartPanel({
   const [spreadPoints, setSpreadPoints] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loadingMore, setLoadingMore] = useState(false);
+  // True from the moment a symbol/timeframe/report switch starts clearing
+  // state until fresh candles actually land — the chart keeps the previous
+  // symbol/timeframe's bars on screen the whole time (there's no cheap way
+  // to blank a lightweight-charts series without a visible flash), so
+  // without this the switch looks like nothing happened until data arrives.
+  const [switchingChart, setSwitchingChart] = useState(false);
   const [newsBands, setNewsBands] = useState<NewsBand[]>([]);
   // Active drawing tool — null means normal pointer/pan mode.
   const [drawingTool, setDrawingTool] = useState<DrawingToolType | null>(null);
@@ -1984,7 +2015,7 @@ export function ChartPanel({
   const drawingToolRef = useRef(drawingTool);
   drawingToolRef.current = drawingTool;
 
-  const [internalHighlightedTicket, setInternalHighlightedTicket] = useState<number | null>(null);
+  const [internalHighlightedTicket, setInternalHighlightedTicket] = useState<string | number | null>(null);
   const activeHighlightedTicket = highlightedTicket ?? internalHighlightedTicket;
 
   // This symbol's closed trades from the journal (filled by the always-on
@@ -1993,7 +2024,7 @@ export function ChartPanel({
   // though it's no longer an open position in `trading.positions`.
   const [closedTrades, setClosedTrades] = useState<TradeMarker[]>([]);
 
-  const handleTicketSelect = useCallback((ticket: number) => {
+  const handleTicketSelect = useCallback((ticket: string | number) => {
     if (onSelectTicket) {
       onSelectTicket(ticket, symbol);
     } else {
@@ -3163,8 +3194,18 @@ export function ChartPanel({
   // changes (§F: "test the bot in chart for candle history").
   useEffect(() => {
     let cancelled = false;
+    // Cancels the initial-history fetch (and, since it's the one
+    // `AbortController` shared for this symbol/timeframe/report's whole
+    // lifetime, `loadMore`'s pan-left pagination fetch too) in flight for
+    // the *previous* symbol/timeframe/report as soon as a newer one is
+    // picked, instead of leaving it to finish on its own. Without this,
+    // rapidly clicking through timeframes (or panning left then switching
+    // symbol mid-fetch) queues up real HTTP requests competing for the same
+    // connection pool whose result the client would just discard anyway.
+    const initialLoadController = new AbortController();
     setError(null);
     setLoadingMore(false);
+    setSwitchingChart(true);
     setContextMenu(null);
     setOrderPopover(null);
     setDrawingContextMenu(null);
@@ -3270,6 +3311,7 @@ export function ChartPanel({
           timeframe,
           CANDLE_COUNT,
           oldest.time,
+          initialLoadController.signal,
         );
         if (cancelled) return;
         if (older.length === 0) {
@@ -3334,9 +3376,11 @@ export function ChartPanel({
           (page, loaded) => {
             if (!cancelled) setSessionReplayLoadingPage({ page, loaded });
           },
+          initialLoadController.signal,
         );
       }
-      if (!backtestReportId) return getCandles(symbol, timeframe, CANDLE_COUNT);
+      if (!backtestReportId)
+        return getCandles(symbol, timeframe, CANDLE_COUNT, undefined, initialLoadController.signal);
       const report = await getBacktestReport(backtestReportId);
       if (cancelled) return [];
       setBacktestTrades(report.trades);
@@ -3360,7 +3404,7 @@ export function ChartPanel({
         lastClose > 0
           ? lastClose + 2 * TIMEFRAME_SECONDS[timeframe]
           : undefined;
-      return getCandles(symbol, timeframe, CANDLE_COUNT, anchor);
+      return getCandles(symbol, timeframe, CANDLE_COUNT, anchor, initialLoadController.signal);
     }
 
     renderRef.current = render;
@@ -3388,6 +3432,7 @@ export function ChartPanel({
         render();
         historyLoadedRef.current = true;
         setSessionReplayLoadingPage(null);
+        setSwitchingChart(false);
         // A symbol/timeframe switch loads a fresh price/time range, but
         // lightweight-charts keeps whatever pan/zoom/price-scale state was
         // active for the previous symbol. `scrollToRealTime()` alone only
@@ -3407,6 +3452,7 @@ export function ChartPanel({
       .catch(() => {
         if (cancelled) return;
         setSessionReplayLoadingPage(null);
+        setSwitchingChart(false);
         setError(
           backtestReportId
             ? 'failed to load backtest report'
@@ -3426,6 +3472,7 @@ export function ChartPanel({
     if (backtestReportId || sessionReplayPeriod) {
       return () => {
         cancelled = true;
+        initialLoadController.abort();
         if (overlayTimer) clearTimeout(overlayTimer);
         historyLoadedRef.current = false;
         chart
@@ -3484,14 +3531,48 @@ export function ChartPanel({
       },
     );
 
+    // A reconnect (network blip, backend restart) can leave a hole between
+    // the last bar we have and "now" — `candle_closed`/`candle_update` only
+    // stream deltas going forward, they never backfill what was missed while
+    // disconnected. Refetch the tail on every `connect` after the first
+    // (guarded by `historyLoadedRef`, which is false during the initial
+    // load's own fetch) and splice it in: bars older than the refetched
+    // window are left untouched, so paged-in history from `loadMore` above
+    // survives.
+    let patchingReconnect = false;
+    async function patchLatestHistoryOnReconnect() {
+      if (!historyLoadedRef.current || patchingReconnect) return;
+      patchingReconnect = true;
+      try {
+        const latest = await getCandles(symbol, timeframe, CANDLE_COUNT);
+        if (cancelled || latest.length === 0) return;
+        const cutoff = latest[0].time;
+        candlesRef.current = [
+          ...candlesRef.current.filter((c) => c.time < cutoff),
+          ...latest,
+        ];
+        render();
+      } catch {
+        // Transient failure — the next reconnect (or the regular live-tick
+        // stream, once it catches up) gets another chance.
+      } finally {
+        patchingReconnect = false;
+      }
+    }
+    const unsubscribeReconnect = onSocketConnect(() => {
+      void patchLatestHistoryOnReconnect();
+    });
+
     return () => {
       cancelled = true;
+      initialLoadController.abort();
       if (overlayTimer) clearTimeout(overlayTimer);
       historyLoadedRef.current = false;
       chart
         ?.timeScale()
         .unsubscribeVisibleLogicalRangeChange(onVisibleRangeChange);
       unsubscribe();
+      unsubscribeReconnect();
     };
   }, [symbol, timeframe, backtestReportId, sessionReplayPeriod]);
 
@@ -3871,22 +3952,20 @@ export function ChartPanel({
   // ticket, not on every `closedTrades` poll refresh (which would otherwise
   // fight the user's own panning every MARKERS_POLL_MS while a trade stays
   // selected).
-  const lastNavigatedHistoryTicketRef = useRef<number | null>(null);
+  const lastNavigatedHistoryTicketRef = useRef<string | number | null>(null);
   useEffect(() => {
     if (activeHighlightedTicket === null) {
       lastNavigatedHistoryTicketRef.current = null;
       return;
     }
     if (lastNavigatedHistoryTicketRef.current === activeHighlightedTicket) return;
-    const t = closedTrades.find(
-      (c) => Number(c.id) === activeHighlightedTicket && c.close_time !== null,
-    );
+    const t = findHistoryTrade();
     if (t) {
       lastNavigatedHistoryTicketRef.current = activeHighlightedTicket;
       navigateToTime(t.open_time);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeHighlightedTicket, closedTrades]);
+  }, [activeHighlightedTicket, closedTrades, trading.positions]);
 
   // Live-bot "eye" view: fetch one bot's own signal trail + own trades and
   // feed them into the *same* backtestSignals/backtestTrades state backtest
@@ -4203,7 +4282,12 @@ export function ChartPanel({
       chart?.timeScale().unsubscribeVisibleTimeRangeChange(recompute);
       resizeObserver.disconnect();
     };
-  }, [symbol, timeframe]);
+    // `timeframe` deliberately excluded — this poll/recompute doesn't depend
+    // on it (getActiveNewsWindows takes no timeframe param, and `recompute`
+    // only reads `symbol`), so including it just tore down and restarted
+    // the poll/observer on every timeframe switch for no reason.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [symbol]);
 
   // Click-to-trade: while `trading.placementMode` is armed (from the order
   // ticket), a chart click converts its y-coordinate to a price and hands it
@@ -4829,16 +4913,32 @@ export function ChartPanel({
     };
   }
 
-  // The trade-history row clicked in TradeHistoryTable, if it's a closed
-  // trade on this symbol — same `activeHighlightedTicket` conduit as an open
-  // position/pending order (see the `highlightedTicket` prop doc), just
-  // looked up in `closedTrades` instead of `trading.positions` since a closed
-  // trade isn't there anymore.
+  // The trade-history row clicked in TradeHistoryTable, if it's an open or
+  // closed trade on this symbol — same `activeHighlightedTicket` conduit as an open
+  // position/pending order (see the `highlightedTicket` prop doc), looked up in
+  // `trading.positions` or `closedTrades` (which holds recent journal trade markers).
   function findHistoryTrade(): TradeMarker | null {
     if (activeHighlightedTicket === null) return null;
+    const pos = trading.positions.find((p) => p.ticket === Number(activeHighlightedTicket));
+    if (pos) {
+      return {
+        id: String(pos.ticket),
+        symbol: pos.symbol,
+        side: pos.side,
+        volume: pos.volume,
+        open_price: pos.open_price,
+        open_time: Math.floor(Date.parse(pos.open_time) / 1000),
+        sl: pos.sl,
+        tp: pos.tp,
+        close_price: null,
+        close_time: null,
+        profit: pos.profit,
+        comment: pos.comment,
+      };
+    }
     return (
       closedTrades.find(
-        (t) => Number(t.id) === activeHighlightedTicket && t.close_time !== null,
+        (t) => String(t.id) === String(activeHighlightedTicket),
       ) ?? null
     );
   }
@@ -6080,6 +6180,15 @@ export function ChartPanel({
             Loading history…
           </div>
         )}
+        {switchingChart && (
+          // The chart keeps rendering the *previous* symbol/timeframe's bars
+          // until fresh candles land (there's no cheap way to blank a
+          // lightweight-charts series without a flash) — without this badge
+          // a switch looks like it silently did nothing until data arrives.
+          <div className='pointer-events-none absolute left-1/2 top-2 z-10 -translate-x-1/2 rounded border border-line bg-panel px-2 py-1 text-xs text-ink-muted shadow-sm'>
+            Loading {timeframe}…
+          </div>
+        )}
         {(() => {
           const priceScaleWidth = candleSeriesRef.current?.priceScale().width() || 65;
           const priceLineSpecs = orderLineStyle.visible ? buildPriceLines() : [];
@@ -6286,6 +6395,71 @@ export function ChartPanel({
             </div>
           );
         })}
+        {(() => {
+          // Highlighted history-row "zone": a low-opacity rectangle spanning
+          // the trade's own open->close time window (x-axis) and its SL/TP
+          // price band (y-axis, falling back to the open/close price path
+          // when SL or TP wasn't set) — gives a clicked TradeHistoryTable row
+          // a visible "where this traded" box on the chart, on top of the
+          // exact-price dashed lines `buildHistoryTradeLines` already draws.
+          // Deliberately a plain absolute div (not a `Rectangle` drawing
+          // primitive) so it recomputes every render exactly like the
+          // backtest openClose segments below, instead of needing its own
+          // drawingManager add/remove lifecycle.
+          const t = findHistoryTrade();
+          if (!t) return null;
+          const chart = chartRef.current;
+          const series = candleSeriesRef.current;
+          if (!chart || !series) return null;
+          const candles = candlesRef.current;
+
+          // If close time or price are not set, it means the trade is open.
+          // We span the rectangle to the latest candle on the chart.
+          const lastCandle = candles[candles.length - 1];
+          const closeTime = t.close_time ?? (lastCandle ? lastCandle.time : Math.floor(Date.now() / 1000));
+          const closePrice = t.close_price ?? (lastCandle ? lastCandle.close : t.open_price);
+
+          const openSnap = nearestCandleTime(candles, t.open_time);
+          const closeSnap = nearestCandleTime(candles, closeTime);
+          if (openSnap === null || closeSnap === null) return null;
+          const x1 = chart.timeScale().timeToCoordinate(openSnap);
+          const x2 = chart.timeScale().timeToCoordinate(closeSnap);
+          if (x1 === null || x2 === null) return null;
+
+          const prices = [t.open_price, closePrice, t.sl, t.tp].filter(
+            (p): p is number => p !== null,
+          );
+          const yTop = series.priceToCoordinate(Math.max(...prices));
+          const yBottom = series.priceToCoordinate(Math.min(...prices));
+          if (yTop === null || yBottom === null) return null;
+          const color = (t.profit ?? 0) >= 0 ? cssVar('--color-ok') : cssVar('--color-err');
+
+          // Make fill color opacity more transparent to see the candles behind (e.g. 0.04), and highlighted border (0.8 opacity + glow)
+          const fillOpacity = 0.04;
+          const borderOpacity = 0.8;
+          const glowOpacity = 0.5;
+          const borderStyle = t.close_time === null ? 'dashed' : 'solid';
+
+          return (
+            <div
+              key={`history-zone-${t.id}`}
+              className='pointer-events-none absolute z-0 rounded border-2 transition-all'
+              style={{
+                left: `${Math.min(x1, x2)}px`,
+                width: `${Math.max(1, Math.abs(x2 - x1))}px`,
+                top: `${Math.min(yTop, yBottom)}px`,
+                height: `${Math.max(1, Math.abs(yBottom - yTop))}px`,
+                backgroundColor: hexToRgba(color, fillOpacity),
+                borderColor: hexToRgba(color, borderOpacity),
+                borderStyle: borderStyle,
+                boxShadow: `0 0 12px ${hexToRgba(color, glowOpacity)}`,
+              }}
+              title={`#${t.id} zone (${t.close_time === null ? 'OPEN' : 'CLOSED'}): ${t.side.toUpperCase()} ${t.open_price} → ${t.close_price ?? 'current'}${
+                t.sl !== null ? `, SL ${t.sl}` : ''
+              }${t.tp !== null ? `, TP ${t.tp}` : ''}`}
+            />
+          );
+        })()}
         {(() => {
           const openClose = buildSelectedTradeOpenClose();
           if (!openClose) return null;

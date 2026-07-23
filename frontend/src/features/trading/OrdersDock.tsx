@@ -57,8 +57,8 @@ export function OrdersDock({
   children: React.ReactNode;
   allPositions: AllPositions;
   /** Forwarded straight through to AllOrdersPanel — see its own prop doc. */
-  selectedTicket?: number | null;
-  onSelectTicket?: (ticket: number, symbol: string) => void;
+  selectedTicket?: string | number | null;
+  onSelectTicket?: (ticket: string | number, symbol: string) => void;
   onClearSelection?: () => void;
 }) {
   // Read persisted state after mount (not in useState initializers) so

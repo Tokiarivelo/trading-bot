@@ -38,6 +38,8 @@ from src.indicators.api.routes import router as indicators_router
 from src.journal.api.routes import router as journal_router
 from src.market_data.api.routes import router as market_data_router
 from src.market_data.api.ws import bind_auth, bind_candle_stream, bind_live_candle, sio
+from src.market_data.application.candle_stream import poll_lookback_for
+from src.market_data.domain.models import Timeframe
 from src.news.api.routes import router as news_router
 from src.shared.auth.api.routes import router as auth_router
 from src.shared.auth.dependencies import require_session
@@ -176,26 +178,48 @@ async def lifespan(app: FastAPI):
     log_listener = configure_logging(database_url=settings.database_url)
     container = build_container(settings)
     app.state.container = container
+    # Bound to the primary account only, same as every other route today —
+    # Phase 6/8 of MULTI_ACCOUNT_PLAN.md own real multi-account WS room
+    # routing; the other accounts' candle streams still run, just aren't
+    # reachable over this socket yet.
     bind_candle_stream(container.candle_stream)
     bind_live_candle(container.live_candle)
     bind_auth(container.session_issuer, lambda: container.settings.app_password)
-    # Reconnect with stored credentials if the gateway is already up, then
-    # start the candle streams — they idle harmlessly until login succeeds.
-    if await container.account.reconnect_from_stored():
-        # Catch any broker-side close (SL/TP fill) that happened while the
-        # backend was down — see broker/application/reconciliation.py.
-        try:
-            await container.reconciliation.reconcile_all()
-        except BrokerUnavailable as exc:
-            logger.warning("reconciliation failed at startup (broker unavailable): %s", exc)
-    else:
-        logger.info(
-            "reconnect from stored credentials skipped or failed; skipping startup reconciliation"
+    for runtime in container.accounts.values():
+        # Reconnect with stored credentials if the gateway is already up,
+        # then start the candle streams — they idle harmlessly until login
+        # succeeds.
+        if await runtime.account.reconnect_from_stored():
+            # Catch any broker-side close (SL/TP fill) that happened while
+            # the backend was down — see broker/application/reconciliation.py.
+            try:
+                await runtime.reconciliation.reconcile_all()
+            except BrokerUnavailable as exc:
+                logger.warning(
+                    "reconciliation failed at startup for account=%s (broker unavailable): %s",
+                    runtime.id,
+                    exc,
+                )
+        else:
+            logger.info(
+                "account=%s: reconnect from stored credentials skipped or failed; "
+                "skipping startup reconciliation",
+                runtime.id,
+            )
+        # Fill any hole left by a downtime longer than `poll_once` re-fetches
+        # on its own (OPTIMIZATION_CHECKLIST.md §1) before streaming resumes
+        # and starts trusting the DB as caught-up.
+        reconciled = await runtime.candle_history.reconcile_gaps(
+            runtime.symbols, list(Timeframe), poll_lookback_for
         )
-    container.candle_stream.start()
-    container.live_candle.start()
+        if reconciled:
+            logger.info(
+                "account=%s: startup gap reconciliation backfilled: %s", runtime.id, reconciled
+            )
+        runtime.candle_stream.start()
+        runtime.live_candle.start()
+        runtime.health_monitor.start()
     container.news_window_service.start()
-    container.health_monitor.start()
     yield
     await container.aclose()
     if log_listener is not None:

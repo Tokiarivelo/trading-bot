@@ -20,7 +20,25 @@ from src.shared.security.keyring_store import (
     keyring_key_provider,
 )
 
-__all__ = ["KEYRING_KEY_NAME", "KEYRING_SERVICE", "FernetCredentialStore", "keyring_key_provider"]
+__all__ = [
+    "KEYRING_KEY_NAME",
+    "KEYRING_SERVICE",
+    "FernetCredentialStore",
+    "credentials_path_for",
+    "keyring_key_provider",
+]
+
+_CREDENTIALS_DIR = Path("data/credentials")
+
+
+def credentials_path_for(account_id: str) -> Path:
+    """Per-account credential file — `data/credentials/{account_id}.enc`.
+
+    One file per account (not one keyed file) so a corrupt write only loses
+    that account's credentials, not every account's (MULTI_ACCOUNT_PLAN.md
+    Phase 2). The OS-keyring Fernet key stays global across accounts.
+    """
+    return _CREDENTIALS_DIR / f"{account_id}.enc"
 
 
 class FernetCredentialStore:

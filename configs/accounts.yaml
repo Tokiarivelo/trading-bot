@@ -1,0 +1,19 @@
+# Broker accounts this backend can run against. Each entry is one MT5
+# login, reached through its own gateway process (MT5 allows only one
+# logged-in account per OS process — see MULTI_ACCOUNT_PLAN.md).
+#
+# `id` is a short slug used everywhere downstream (API paths, DB rows,
+# credential files) as the account's identity — never the MT5 login number,
+# which is a credential, not an identity.
+#
+# `gateway_shared_secret_env` names the .env variable holding that gateway's
+# shared secret (e.g. TB_GATEWAY_SHARED_SECRET) — the secret itself is never
+# written here, per the project's "secrets only via .env / OS keyring" rule.
+accounts:
+  - id: default
+    label: "Primary MT5 account"
+    gateway_url: http://127.0.0.1:8787
+    gateway_shared_secret_env: TB_GATEWAY_SHARED_SECRET
+    mode: live # paper | live
+    enabled: true
+    risk_override_file: null

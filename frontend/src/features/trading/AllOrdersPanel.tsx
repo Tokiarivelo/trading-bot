@@ -37,11 +37,11 @@ export function AllOrdersPanel({
   /** Ticket currently highlighted on the chart (see page.tsx's
    * `selectedOrderTicket`) — used to mark the matching row so the table and
    * chart stay in sync however the selection changed. */
-  selectedTicket?: number | null;
+  selectedTicket?: string | number | null;
   /** Called with a row's ticket + symbol when clicked. The caller (page.tsx)
    * owns toggling selection off on a repeat click and switching the chart to
    * that symbol if it isn't already on screen. */
-  onSelectTicket?: (ticket: number, symbol: string) => void;
+  onSelectTicket?: (ticket: string | number, symbol: string) => void;
   /** Explicit clear, shown as a button next to the tabs whenever something
    * is selected — clicking the selected row again also clears it, but this
    * gives a visible way out without having to find that row again. */
@@ -124,8 +124,8 @@ function ActiveOrdersTables({
   onSelectTicket,
 }: {
   allPositions: AllPositions;
-  selectedTicket?: number | null;
-  onSelectTicket?: (ticket: number, symbol: string) => void;
+  selectedTicket?: string | number | null;
+  onSelectTicket?: (ticket: string | number, symbol: string) => void;
 }) {
   const { positions, pendingOrders, skillByTicket, refresh } = allPositions;
   const [busyTicket, setBusyTicket] = useState<number | null>(null);

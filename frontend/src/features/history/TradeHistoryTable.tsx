@@ -44,11 +44,11 @@ export function TradeHistoryTable({
   /** Ticket currently highlighted on the chart (see page.tsx's
    * `selectedOrderTicket`) — used to mark the matching row, same convention
    * as AllOrdersPanel's active-orders tables. */
-  selectedTicket?: number | null;
+  selectedTicket?: string | number | null;
   /** Called with a row's ticket + symbol when clicked. The caller owns
    * toggling selection off on a repeat click and switching the chart to that
    * symbol if it isn't already on screen. */
-  onSelectTicket?: (ticket: number, symbol: string) => void;
+  onSelectTicket?: (ticket: string | number, symbol: string) => void;
 }) {
   const groups = groupTrades(trades, groupBy);
 
@@ -80,8 +80,8 @@ function GroupSection({
   onSelectTicket,
 }: {
   group: TradeGroup;
-  selectedTicket?: number | null;
-  onSelectTicket?: (ticket: number, symbol: string) => void;
+  selectedTicket?: string | number | null;
+  onSelectTicket?: (ticket: string | number, symbol: string) => void;
 }) {
   const [collapsed, setCollapsed] = useState(false);
 
@@ -122,8 +122,8 @@ function TradesTable({
   onSelectTicket,
 }: {
   trades: TradeHistoryItem[];
-  selectedTicket?: number | null;
-  onSelectTicket?: (ticket: number, symbol: string) => void;
+  selectedTicket?: string | number | null;
+  onSelectTicket?: (ticket: string | number, symbol: string) => void;
 }) {
   const { sorted, sort, toggle } = useSortableRows<TradeHistoryItem, TradeSortKey>(
     trades,
@@ -153,7 +153,7 @@ function TradesTable({
       </thead>
       <tbody>
         {sorted.map((t) => {
-          const ticket = Number(t.id);
+          const ticket = isNaN(Number(t.id)) ? t.id : Number(t.id);
           const selected = selectedTicket === ticket;
           return (
           <tr

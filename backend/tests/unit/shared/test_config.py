@@ -35,3 +35,15 @@ def test_every_enabled_symbol_has_a_symbol_config():
 def test_missing_config_raises():
     with pytest.raises(FileNotFoundError):
         load_yaml_config("does-not-exist", CONFIGS_DIR)
+
+
+def test_accounts_config_has_at_least_one_account_with_required_fields():
+    cfg = load_yaml_config("accounts")
+    accounts = cfg["accounts"]
+    assert len(accounts) >= 1
+    for entry in accounts:
+        for key in ("id", "label", "gateway_url", "gateway_shared_secret_env", "mode"):
+            assert key in entry, f"accounts.yaml entry missing {key}"
+        assert entry["mode"] in ("paper", "live")
+    ids = [entry["id"] for entry in accounts]
+    assert len(ids) == len(set(ids)), "accounts.yaml has duplicate account ids"

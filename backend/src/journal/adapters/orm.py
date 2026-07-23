@@ -12,6 +12,7 @@ class TradeRow(Base):
     __tablename__ = "trades"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    account_id: Mapped[str] = mapped_column(String(64), index=True)
     symbol: Mapped[str] = mapped_column(String(16), index=True)
     side: Mapped[str] = mapped_column(String(4))
     volume: Mapped[float] = mapped_column(Float)

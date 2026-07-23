@@ -9,6 +9,7 @@ from pathlib import Path
 from src.ai.domain.models import RefinementConfig
 from src.ai.ports.llm import ProviderSpec
 from src.alerting.domain.models import AlertEventFlags, AlertingConfig
+from src.broker.domain.account import AccountConfig
 from src.broker.domain.symbol_config import SymbolTradingConfig
 from src.engine.domain.models import RiskCaps
 from src.news.domain.models import ImpactLevel, NewsConfig, TrackedEvent
@@ -91,6 +92,22 @@ def load_news_config(configs_dir: Path) -> NewsConfig:
         default_before_min=default_window.get("before_min", 30),
         default_after_min=default_window.get("after_min", 60),
     )
+
+
+def load_accounts_config(configs_dir: Path) -> list[AccountConfig]:
+    data = load_yaml_config("accounts", configs_dir)
+    return [
+        AccountConfig(
+            id=entry["id"],
+            label=entry["label"],
+            gateway_url=entry["gateway_url"],
+            gateway_shared_secret_env=entry["gateway_shared_secret_env"],
+            mode=entry["mode"],
+            enabled=entry.get("enabled", True),
+            risk_override_file=entry.get("risk_override_file"),
+        )
+        for entry in data.get("accounts", [])
+    ]
 
 
 def load_alerting_config(configs_dir: Path) -> AlertingConfig:

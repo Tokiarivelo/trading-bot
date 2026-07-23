@@ -24,8 +24,8 @@ class JournalRepository:
     def __init__(self, session_factory: sessionmaker[Session]) -> None:
         self._session_factory = session_factory
 
-    def save(self, record: TradeRecord) -> None:
-        row = _to_row(record)
+    def save(self, record: TradeRecord, account_id: str = "default") -> None:
+        row = _to_row(record, account_id)
         with self._session_factory() as session:
             session.merge(row)
             session.commit()
@@ -35,10 +35,12 @@ class JournalRepository:
             row = session.get(TradeRow, trade_id)
         return _to_domain(row) if row else None
 
-    def get_last_n(self, symbol: str, count: int) -> list[TradeRecord]:
+    def get_last_n(
+        self, symbol: str, count: int, account_id: str = "default"
+    ) -> list[TradeRecord]:
         query = (
             select(TradeRow)
-            .where(TradeRow.symbol == symbol)
+            .where(TradeRow.symbol == symbol, TradeRow.account_id == account_id)
             .order_by(TradeRow.open_time.desc())
             .limit(count)
         )
@@ -53,6 +55,7 @@ class JournalRepository:
         to: int | None = None,
         skill: str | None = None,
         limit: int = 1000,
+        account_id: str = "default",
     ) -> list[TradeRecord]:
         """`skill`, when given, scopes markers to one bot's own trades — lets
         the chart show a single bot's positions in isolation instead of every
@@ -63,7 +66,7 @@ class JournalRepository:
         history instead of staying constant."""
         query = (
             select(TradeRow)
-            .where(TradeRow.symbol == symbol)
+            .where(TradeRow.symbol == symbol, TradeRow.account_id == account_id)
             .order_by(TradeRow.open_time.desc())
             .limit(limit)
         )
@@ -79,10 +82,14 @@ class JournalRepository:
         # the previous unbounded `order_by(open_time)` query returned.
         return [_to_domain(row) for row in reversed(rows)]
 
-    def get_open(self, symbol: str | None = None) -> list[TradeRecord]:
+    def get_open(
+        self, symbol: str | None = None, account_id: str = "default"
+    ) -> list[TradeRecord]:
         """Trades journaled as opened but never journaled as closed —
         candidates for reconciliation on startup/reconnect (Phase 9)."""
-        query = select(TradeRow).where(TradeRow.close_time.is_(None))
+        query = select(TradeRow).where(
+            TradeRow.close_time.is_(None), TradeRow.account_id == account_id
+        )
         if symbol is not None:
             query = query.where(TradeRow.symbol == symbol)
         with self._session_factory() as session:
@@ -90,11 +97,15 @@ class JournalRepository:
         return [_to_domain(row) for row in rows]
 
     def get_last_n_closed(
-        self, symbol: str, count: int, skill: str | None = None
+        self, symbol: str, count: int, skill: str | None = None, account_id: str = "default"
     ) -> list[TradeRecord]:
         query = (
             select(TradeRow)
-            .where(TradeRow.symbol == symbol, TradeRow.close_time.is_not(None))
+            .where(
+                TradeRow.symbol == symbol,
+                TradeRow.close_time.is_not(None),
+                TradeRow.account_id == account_id,
+            )
             .order_by(TradeRow.close_time.desc())
             .limit(count)
         )
@@ -104,14 +115,20 @@ class JournalRepository:
             rows = session.scalars(query).all()
         return [_to_domain(row) for row in rows]
 
-    def count_closed(self, symbol: str, skill: str | None = None) -> int:
+    def count_closed(
+        self, symbol: str, skill: str | None = None, account_id: str = "default"
+    ) -> int:
         """`skill`, when given, scopes the count to one bot's trades on
         `symbol` — several bots trading the same symbol concurrently each
         get reviewed on their own 10-trade cadence, not a shared one."""
         query = (
             select(func.count())
             .select_from(TradeRow)
-            .where(TradeRow.symbol == symbol, TradeRow.close_time.is_not(None))
+            .where(
+                TradeRow.symbol == symbol,
+                TradeRow.close_time.is_not(None),
+                TradeRow.account_id == account_id,
+            )
         )
         if skill is not None:
             query = query.where(TradeRow.skill == skill)
@@ -134,10 +151,11 @@ class JournalRepository:
         order_dir: Literal["asc", "desc"] = "desc",
         limit: int = 50,
         offset: int = 0,
+        account_id: str = "default",
     ) -> tuple[list[TradeRecord], int]:
         """Filterable, paginated trade history query (any symbol, any field
         combination) — backs `GET /journal/history`."""
-        filters: list[ColumnElement] = []
+        filters: list[ColumnElement] = [TradeRow.account_id == account_id]
         if symbol is not None:
             filters.append(TradeRow.symbol == symbol)
         if side is not None:
@@ -205,9 +223,10 @@ def _snapshot_from_json(data: list[dict] | None) -> tuple[CandleSnapshot, ...]:
     )
 
 
-def _to_row(record: TradeRecord) -> TradeRow:
+def _to_row(record: TradeRecord, account_id: str) -> TradeRow:
     return TradeRow(
         id=record.id,
+        account_id=account_id,
         symbol=record.symbol,
         side=record.side,
         volume=record.volume,

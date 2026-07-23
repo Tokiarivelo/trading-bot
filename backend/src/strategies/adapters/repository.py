@@ -15,8 +15,8 @@ class StrategyVersionRepository:
     def __init__(self, session_factory: sessionmaker[Session]) -> None:
         self._session_factory = session_factory
 
-    def save(self, version: StrategyVersion) -> None:
-        row = _to_row(version)
+    def save(self, version: StrategyVersion, account_id: str = "default") -> None:
+        row = _to_row(version, account_id)
         with self._session_factory() as session:
             session.merge(row)
             session.commit()
@@ -48,10 +48,15 @@ class StrategyVersionRepository:
             session.commit()
 
     def list_all(
-        self, name: str | None = None, status: VersionStatus | None = None
+        self,
+        name: str | None = None,
+        status: VersionStatus | None = None,
+        account_id: str = "default",
     ) -> list[StrategyVersion]:
-        query = select(StrategyVersionRow).order_by(
-            StrategyVersionRow.name, StrategyVersionRow.version.desc()
+        query = (
+            select(StrategyVersionRow)
+            .where(StrategyVersionRow.account_id == account_id)
+            .order_by(StrategyVersionRow.name, StrategyVersionRow.version.desc())
         )
         if name is not None:
             query = query.where(StrategyVersionRow.name == name)
@@ -61,31 +66,39 @@ class StrategyVersionRepository:
             rows = session.scalars(query).all()
         return [_to_domain(row) for row in rows]
 
-    def latest_version_number(self, name: str) -> int:
+    def latest_version_number(self, name: str, account_id: str = "default") -> int:
         with self._session_factory() as session:
             rows = session.scalars(
-                select(StrategyVersionRow.version).where(StrategyVersionRow.name == name)
+                select(StrategyVersionRow.version).where(
+                    StrategyVersionRow.name == name, StrategyVersionRow.account_id == account_id
+                )
             ).all()
         return max(rows, default=0)
 
-    def get_active(self, name: str) -> StrategyVersion | None:
+    def get_active(self, name: str, account_id: str = "default") -> StrategyVersion | None:
         query = select(StrategyVersionRow).where(
-            StrategyVersionRow.name == name, StrategyVersionRow.status == VersionStatus.ACTIVE
+            StrategyVersionRow.name == name,
+            StrategyVersionRow.status == VersionStatus.ACTIVE,
+            StrategyVersionRow.account_id == account_id,
         )
         with self._session_factory() as session:
             row = session.scalars(query).first()
         return _to_domain(row) if row else None
 
-    def list_active(self) -> list[StrategyVersion]:
-        query = select(StrategyVersionRow).where(StrategyVersionRow.status == VersionStatus.ACTIVE)
+    def list_active(self, account_id: str = "default") -> list[StrategyVersion]:
+        query = select(StrategyVersionRow).where(
+            StrategyVersionRow.status == VersionStatus.ACTIVE,
+            StrategyVersionRow.account_id == account_id,
+        )
         with self._session_factory() as session:
             rows = session.scalars(query).all()
         return [_to_domain(row) for row in rows]
 
 
-def _to_row(version: StrategyVersion) -> StrategyVersionRow:
+def _to_row(version: StrategyVersion, account_id: str) -> StrategyVersionRow:
     return StrategyVersionRow(
         id=version.id,
+        account_id=account_id,
         name=version.name,
         version=version.version,
         file_path=version.file_path,

@@ -22,8 +22,9 @@ _SIGNAL_LOGGERS = ("src.engine.application.trade_loop", "src.broker.application.
 
 
 class ActivityLogService:
-    def __init__(self, repository: ActivityLogRepository) -> None:
+    def __init__(self, repository: ActivityLogRepository, account_id: str = "default") -> None:
         self._repository = repository
+        self._account_id = account_id
 
     async def get_bot_signals(
         self, *, skill: str, created_from: int | None = None, created_to: int | None = None
@@ -41,6 +42,7 @@ class ActivityLogService:
                 created_from=created_from,
                 created_to=created_to,
                 limit=5000,
+                account_id=self._account_id,
             )
             entries.extend(rows)
         entries.sort(key=lambda e: (e.created_at, e.id or 0))
@@ -66,10 +68,11 @@ class ActivityLogService:
             created_to=created_to,
             limit=limit,
             offset=offset,
+            account_id=self._account_id,
         )
 
     async def delete_by_ids(self, ids: list[int]) -> int:
-        return await asyncio.to_thread(self._repository.delete_by_ids, ids)
+        return await asyncio.to_thread(self._repository.delete_by_ids, ids, self._account_id)
 
     async def delete_by_filter(
         self,
@@ -87,4 +90,5 @@ class ActivityLogService:
             q=q,
             created_from=created_from,
             created_to=created_to,
+            account_id=self._account_id,
         )

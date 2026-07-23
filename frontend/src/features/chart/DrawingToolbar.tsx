@@ -128,6 +128,30 @@ const TOOLS: ToolDef[] = [
       </svg>
     ),
   },
+  {
+    type: "long-position",
+    label: "Long",
+    title: "Long Position — click entry, target, then stop loss",
+    icon: (
+      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
+        <rect x="2" y="2" width="12" height="6" fill="#26a69a" fillOpacity="0.35" stroke="#26a69a" strokeWidth="1" />
+        <rect x="2" y="8" width="12" height="6" fill="#ef5350" fillOpacity="0.35" stroke="#ef5350" strokeWidth="1" />
+        <line x1="2" y1="8" x2="14" y2="8" stroke="currentColor" strokeWidth="1.5" />
+      </svg>
+    ),
+  },
+  {
+    type: "short-position",
+    label: "Short",
+    title: "Short Position — click entry, target, then stop loss",
+    icon: (
+      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
+        <rect x="2" y="2" width="12" height="6" fill="#ef5350" fillOpacity="0.35" stroke="#ef5350" strokeWidth="1" />
+        <rect x="2" y="8" width="12" height="6" fill="#26a69a" fillOpacity="0.35" stroke="#26a69a" strokeWidth="1" />
+        <line x1="2" y1="8" x2="14" y2="8" stroke="currentColor" strokeWidth="1.5" />
+      </svg>
+    ),
+  },
 ];
 
 interface Props {

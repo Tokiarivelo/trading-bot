@@ -28,6 +28,9 @@ data/
 /logs/
 *.log
 
+# Per-account gateway PID files (make dev-gateway ACCOUNT=<id>)
+gateway/run/
+
 # Backtest outputs
 backend/src/backtest/reports/*
 !backend/src/backtest/reports/.gitkeep
