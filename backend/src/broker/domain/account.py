@@ -46,6 +46,12 @@ class AccountConfig:
     mode: str  # "paper" | "live"
     enabled: bool = True
     risk_override_file: str | None = None
+    # Path to this account's own terminal64.exe, relative to the Wine
+    # prefix's drive_c/ (e.g. "MT5-demo-1/terminal64.exe"). None for the
+    # primary account (attaches to whichever terminal is already running,
+    # unchanged pre-multi-account behavior) — required for any additional
+    # concurrent account, since MetaTrader5 allows one login per terminal.
+    mt5_terminal_subpath: str | None = None
 
 
 class BrokerUnavailable(Exception):

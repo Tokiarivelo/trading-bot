@@ -9,6 +9,14 @@
 # `gateway_shared_secret_env` names the .env variable holding that gateway's
 # shared secret (e.g. TB_GATEWAY_SHARED_SECRET) — the secret itself is never
 # written here, per the project's "secrets only via .env / OS keyring" rule.
+#
+# `mt5_terminal_subpath` (optional): path to this account's own
+# terminal64.exe, relative to the Wine prefix's drive_c/. MetaTrader5 only
+# supports one logged-in account per terminal instance, so every account
+# beyond the first needs its own portable terminal install and must set
+# this — otherwise its gateway attaches to whatever terminal is already
+# running and can silently log another account out. Omit for the primary
+# account (keeps today's single-terminal behavior).
 accounts:
   - id: default
     label: "Primary MT5 account"
@@ -17,3 +25,12 @@ accounts:
     mode: live # paper | live
     enabled: true
     risk_override_file: null
+
+  - id: demo-1
+    label: "Demo account 2"
+    gateway_url: http://127.0.0.1:8788
+    gateway_shared_secret_env: TB_GATEWAY_SHARED_SECRET_DEMO_1
+    mode: paper # paper | live
+    enabled: true
+    risk_override_file: null
+    mt5_terminal_subpath: "MT5-demo-1/terminal64.exe"

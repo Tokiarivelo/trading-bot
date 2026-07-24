@@ -129,17 +129,24 @@ dev-frontend: ## Run the Next.js dev server (default http://localhost:3000)
 WINE_PYTHON ?= $(WINEPREFIX)/drive_c/users/$(shell whoami)/AppData/Local/Programs/Python/Python312/python.exe
 
 .PHONY: dev-gateway
-dev-gateway: ## Run one account's MT5 gateway under Wine: make dev-gateway ACCOUNT=ftmo-1 (defaults to the first enabled account in configs/accounts.yaml); auto-starts the MT5 terminal first
+dev-gateway: ## Run one account's MT5 gateway under Wine: make dev-gateway ACCOUNT=ftmo-1 (defaults to the first enabled account in configs/accounts.yaml); auto-starts that account's MT5 terminal first
 	@mkdir -p $(GATEWAY_DIR)/run
 	@eval "$$(cd $(BACKEND_DIR) && $(UV) run python -m scripts.print_account_gateway_env $(ACCOUNT))" && \
 	SECRET=$$(grep -E "^$${TB_RESOLVED_GATEWAY_SECRET_ENV}=" .env 2>/dev/null | cut -d= -f2-) && \
-	if ! pgrep -x terminal64 > /dev/null; then \
-		echo "MT5 terminal not running — launching it now (give it ~10 s to connect)..."; \
-		WINEPREFIX=$(WINEPREFIX) WINEDEBUG=$(WINEDEBUG) wine "$(WINEPREFIX)/drive_c/Program Files/MetaTrader 5/terminal64.exe" & \
+	if [ -n "$$TB_RESOLVED_TERMINAL_SUBPATH" ]; then \
+		TERM_PATH="$(WINEPREFIX)/drive_c/$$TB_RESOLVED_TERMINAL_SUBPATH"; \
+		PGREP_ARGS="-f $$TERM_PATH"; \
+	else \
+		TERM_PATH="$(WINEPREFIX)/drive_c/Program Files/MetaTrader 5/terminal64.exe"; \
+		PGREP_ARGS="-x terminal64"; \
+	fi; \
+	if ! pgrep $$PGREP_ARGS > /dev/null; then \
+		echo "MT5 terminal not running for account '$$TB_RESOLVED_ACCOUNT_ID' — launching it now ($$TERM_PATH, give it ~10 s to connect)..."; \
+		WINEPREFIX=$(WINEPREFIX) WINEDEBUG=$(WINEDEBUG) wine "$$TERM_PATH" & \
 		sleep 10; \
 	fi; \
 	echo "starting gateway for account '$$TB_RESOLVED_ACCOUNT_ID' -> http://$$TB_RESOLVED_GATEWAY_HOST:$$TB_RESOLVED_GATEWAY_PORT (pid file: $(GATEWAY_DIR)/run/$$TB_RESOLVED_ACCOUNT_ID.pid)"; \
-	( cd $(GATEWAY_DIR) && WINEPREFIX=$(WINEPREFIX) WINEDEBUG=$(WINEDEBUG) GATEWAY_SHARED_SECRET=$$SECRET GATEWAY_HOST=$$TB_RESOLVED_GATEWAY_HOST GATEWAY_PORT=$$TB_RESOLVED_GATEWAY_PORT wine $(WINE_PYTHON) run_gateway.py & \
+	( cd $(GATEWAY_DIR) && WINEPREFIX=$(WINEPREFIX) WINEDEBUG=$(WINEDEBUG) GATEWAY_SHARED_SECRET=$$SECRET GATEWAY_HOST=$$TB_RESOLVED_GATEWAY_HOST GATEWAY_PORT=$$TB_RESOLVED_GATEWAY_PORT MT5_TERMINAL_SUBPATH=$$TB_RESOLVED_TERMINAL_SUBPATH wine $(WINE_PYTHON) run_gateway.py & \
 	  echo $$! > run/$$TB_RESOLVED_ACCOUNT_ID.pid; \
 	  wait $$! )
 
@@ -148,11 +155,6 @@ dev-gateway-all: ## Run every enabled account's gateway concurrently (Ctrl-C sto
 	@mkdir -p $(GATEWAY_DIR)/run
 	@ids=$$(cd $(BACKEND_DIR) && $(UV) run python -m scripts.print_account_gateway_env --list-ids) && \
 	if [ -z "$$ids" ]; then echo "no enabled accounts in configs/accounts.yaml"; exit 1; fi; \
-	if ! pgrep -x terminal64 > /dev/null; then \
-		echo "MT5 terminal not running — launching it now (give it ~10 s to connect)..."; \
-		WINEPREFIX=$(WINEPREFIX) WINEDEBUG=$(WINEDEBUG) wine "$(WINEPREFIX)/drive_c/Program Files/MetaTrader 5/terminal64.exe" & \
-		sleep 10; \
-	fi; \
 	trap 'kill 0' EXIT; \
 	for id in $$ids; do \
 		$(MAKE) dev-gateway ACCOUNT=$$id & \
@@ -160,8 +162,14 @@ dev-gateway-all: ## Run every enabled account's gateway concurrently (Ctrl-C sto
 	wait
 
 .PHONY: mt5-terminal
-mt5-terminal: ## Launch the MT5 terminal in the dedicated Wine prefix (leave it running)
-	WINEPREFIX=$(WINEPREFIX) WINEDEBUG=$(WINEDEBUG) wine "$(WINEPREFIX)/drive_c/Program Files/MetaTrader 5/terminal64.exe" &
+mt5-terminal: ## Launch an account's MT5 terminal in the dedicated Wine prefix (leave it running): make mt5-terminal ACCOUNT=ftmo-1 (defaults to the first enabled account's terminal)
+	@eval "$$(cd $(BACKEND_DIR) && $(UV) run python -m scripts.print_account_gateway_env $(ACCOUNT))" && \
+	if [ -n "$$TB_RESOLVED_TERMINAL_SUBPATH" ]; then \
+		TERM_PATH="$(WINEPREFIX)/drive_c/$$TB_RESOLVED_TERMINAL_SUBPATH"; \
+	else \
+		TERM_PATH="$(WINEPREFIX)/drive_c/Program Files/MetaTrader 5/terminal64.exe"; \
+	fi; \
+	WINEPREFIX=$(WINEPREFIX) WINEDEBUG=$(WINEDEBUG) wine "$$TERM_PATH" &
 
 .PHONY: mt5-login
 mt5-login: ## Log in to an account's gateway from the CLI: make mt5-login ACCOUNT=ftmo-1 LOGIN=123 PASSWORD=x SERVER=Broker-Demo (ACCOUNT defaults to the first enabled account)

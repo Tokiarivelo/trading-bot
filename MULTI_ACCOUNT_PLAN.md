@@ -642,6 +642,69 @@ account is configured on this machine.
 
 ## Phase 9 — Testing & rollout order
 
+**Gap found and fixed while bringing up a second real account (2026-07-24):**
+`gateway/src/gateway/mt5_client.py`'s `login()` called `mt5.initialize()` with
+no `path` argument, and the Makefile's terminal-launch check was a single
+flat `pgrep -x terminal64` shared across every account. MetaTrader5 only
+supports one logged-in account per terminal instance — with no `path`,
+`initialize()` attaches to *whatever* terminal is already running, so a
+second account's gateway would silently log the first account's terminal
+into itself instead of getting its own session. Phase 3's "no gateway
+source changes needed" conclusion only verified host/port env
+parameterization; it never exercised two concurrent terminal sessions
+(Phase 8 explicitly flagged this as untested, deferred here).
+
+Fix: `configs/accounts.yaml` gained an optional `mt5_terminal_subpath` field
+(path to that account's own `terminal64.exe`, relative to the Wine prefix's
+`drive_c/`) — unset for `default`, preserving its exact pre-fix behavior.
+`AccountConfig` (`backend/src/broker/domain/account.py`) and
+`load_accounts_config` (`backend/src/shared/config/loaders.py`) carry it
+through; `print_account_gateway_env.py` exports it as
+`TB_RESOLVED_TERMINAL_SUBPATH`. The Makefile's `dev-gateway`/`mt5-terminal`
+recipes resolve the right terminal path per account and switch their
+running-check from `pgrep -x terminal64` (name-only — wrong once 2+
+instances share that binary name) to `pgrep -f <path>` whenever a subpath is
+set, and pass `MT5_TERMINAL_SUBPATH` as an env var into the Wine Python
+gateway process. `mt5_client.py` reads that env var once at import time,
+builds the Windows-style path (`C:\` + subpath with `/` → `\`), and passes
+it to `mt5.initialize(path=...)` only when set — `default`'s gateway calls
+`mt5.initialize()` exactly as before. `configs/accounts.yaml` now has a
+`demo-1` entry (`mt5_terminal_subpath: "MT5-demo-1/terminal64.exe"`,
+`gateway_url: http://127.0.0.1:8788`, mode `paper`) for this rollout.
+
+**Still required, operator-side, before running `demo-1`'s gateway for
+real:** a second, separate portable MT5 terminal install at
+`$(WINEPREFIX)/drive_c/MT5-demo-1/terminal64.exe` (copy the existing
+install directory, or reinstall with `/PORTABLE` and a different target
+dir under the same Wine prefix) — two `terminal64.exe` processes launched
+from the *same* install directory would still contend over that
+directory's shared config/session state. Also add
+`TB_GATEWAY_SHARED_SECRET_DEMO_1` to `.env` (see `.env.example`) and,
+once the terminal exists, log in via the UI's AccountPanel (credentials
+are never stored in `.env` — encrypted via the existing per-account
+`FernetCredentialStore`, per Phase 2) or `make mt5-login ACCOUNT=demo-1
+LOGIN=... PASSWORD=... SERVER=...`.
+
+Verified this pass (no live MT5 involved): `uv run ruff check src tests
+scripts` clean in both `backend/` and `gateway/` (same one pre-existing
+unrelated collection failure as every prior phase); `uv run pytest` green
+in both (backend 1190, gateway 43); `load_accounts_config` resolves both
+`default` (subpath `None`, unchanged) and `demo-1` (subpath resolved,
+correct port 8788) from the real `configs/accounts.yaml`;
+`print_account_gateway_env.py demo-1` and its bare (default) form both
+export the right values; `make -n dev-gateway`/`dev-gateway
+ACCOUNT=demo-1`/`mt5-terminal ACCOUNT=demo-1` all resolve their recipes
+correctly.
+
+**Files:** `gateway/src/gateway/mt5_client.py`,
+`backend/src/broker/domain/account.py`,
+`backend/src/shared/config/loaders.py`,
+`backend/scripts/print_account_gateway_env.py`, `Makefile`
+(`dev-gateway`, `dev-gateway-all`, `mt5-terminal`), `configs/accounts.yaml`
+(new `demo-1` entry), `.env.example` (new
+`TB_GATEWAY_SHARED_SECRET_DEMO_1` placeholder).
+
+
 Smallest useful milestone: **Phases 1–6, backend-only**. Verify entirely
 through `uv run pytest` + manual OpenAPI-docs/`curl` checks against two real
 gateway processes pointed at two demo accounts — no frontend work until

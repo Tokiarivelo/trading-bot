@@ -12,6 +12,7 @@ the module stays importable for tests (which stub the `mt5` attribute).
 from __future__ import annotations
 
 import logging
+import os
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -21,6 +22,18 @@ try:
     import MetaTrader5 as mt5
 except ImportError:  # pragma: no cover - Linux dev machines
     mt5 = None
+
+# Set by the launcher (Makefile, from configs/accounts.yaml's
+# mt5_terminal_subpath) to this account's own terminal64.exe path, relative
+# to the Wine prefix's drive_c/ (forward slashes, e.g.
+# "MT5-demo-1/terminal64.exe"). Left unset for the primary/default account,
+# which keeps attaching to whatever terminal is already running — unchanged
+# from pre-multi-account behavior. Required for any second concurrent
+# account: MetaTrader5.initialize() with no path attaches to *any*
+# already-running terminal, so two gateway processes sharing one terminal
+# instance would silently log each other out.
+_TERMINAL_SUBPATH = os.environ.get("MT5_TERMINAL_SUBPATH") or None
+_TERMINAL_PATH = "C:\\" + _TERMINAL_SUBPATH.replace("/", "\\") if _TERMINAL_SUBPATH else None
 
 
 class Mt5Error(Exception):
@@ -104,7 +117,8 @@ class Mt5Client:
     def login(self, login: int, password: str, server: str) -> dict[str, Any]:
         if mt5 is None:
             raise Mt5Error("MetaTrader5 package unavailable — run the gateway on Windows/Wine")
-        if not mt5.initialize():
+        initialized = mt5.initialize(path=_TERMINAL_PATH) if _TERMINAL_PATH else mt5.initialize()
+        if not initialized:
             raise Mt5Error(f"terminal initialize failed: {_last_error()}")
         if not mt5.login(login, password=password, server=server):
             raise Mt5Error(f"login rejected: {_last_error()}")
