@@ -54,6 +54,8 @@ class OrderService:
         skill: str | None = None,
         magic: int = 0,
         max_spread_points: int | None = None,
+        reason: str = "",
+        confidence: float | None = None,
         zone_kind: str | None = None,
         zone_price_low: float | None = None,
         zone_price_high: float | None = None,
@@ -69,12 +71,12 @@ class OrderService:
         MT5 magic number identifying which bot placed the order — lets
         several bots trading the same symbol be told apart on open
         positions (`SkillDecision.magic`, §6.6); 0 for manual/API orders.
-        `zone_*`/`pattern`/`structure` are optional chart-annotation
-        passthrough from the strategy's Signal (see strategies/domain/models.py)
-        — kept as flat primitives here rather than importing that module's
-        domain types, so the broker layer stays independent of the
-        strategies module; they flow straight into the published
-        `PositionOpened` event unused by order placement itself."""
+        `reason`/`confidence`/`zone_*`/`pattern`/`structure` are optional
+        decision-context passthrough from the strategy's Signal (see
+        strategies/domain/models.py) — kept as flat primitives here rather
+        than importing that module's domain types, so the broker layer stays
+        independent of the strategies module; they flow straight into the
+        published `PositionOpened` event unused by order placement itself."""
         info = await self._market_data.get_symbol_info(symbol)
         reference_price = info.ask if side is Side.BUY else info.bid
         sl_distance = abs(reference_price - sl) if sl is not None else None
@@ -155,6 +157,8 @@ class OrderService:
                 comment=result.comment,
                 strategy_version=strategy_version,
                 skill=skill,
+                reason=reason,
+                confidence=confidence,
                 zone_kind=zone_kind,
                 zone_price_low=zone_price_low,
                 zone_price_high=zone_price_high,

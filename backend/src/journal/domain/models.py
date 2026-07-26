@@ -48,6 +48,19 @@ class TradeRecord:
     h1_entry_snapshot: tuple[CandleSnapshot, ...] = ()
     m5_exit_snapshot: tuple[CandleSnapshot, ...] = ()
     h1_exit_snapshot: tuple[CandleSnapshot, ...] = ()
+    # "Why" the bot took this trade — the strategy's Signal.reason/confidence
+    # and chart-annotation data (see strategies/domain/models.py), passed
+    # through PositionOpened. Empty/None for manually- or API-placed trades.
+    reason: str = ""
+    confidence: float | None = None
+    zone_kind: str | None = None  # "demand" | "supply"
+    zone_price_low: float | None = None
+    zone_price_high: float | None = None
+    zone_time_start: datetime | None = None
+    zone_time_end: datetime | None = None
+    pattern: str | None = None
+    structure: tuple[tuple[str, float, datetime], ...] = ()
+    """Swing points as (label, price, time), label one of HH/HL/LH/LL."""
 
     @property
     def is_open(self) -> bool:

@@ -289,6 +289,14 @@ export interface TradeHistoryItem {
   comment: string;
   strategy_version: string | null;
   skill: string | null;
+  /** Why the strategy took this trade, full text (unlike `comment`, which
+   * is truncated to MT5's 29-char limit). Empty for manual/API trades. */
+  reason: string;
+  /** Strategy's confidence in this signal, 0..1. Null for manual/API trades. */
+  confidence: number | null;
+  zone: Zone | null;
+  pattern: string | null;
+  structure: StructurePoint[];
 }
 
 export interface TradeHistoryPage {
@@ -327,6 +335,77 @@ export const getTradeHistory = (accountId: string, filters: TradeHistoryFilters 
   const qs = params.toString();
   return api.get<TradeHistoryPage>(acctPath(accountId, `/journal/history${qs ? `?${qs}` : ""}`));
 };
+
+// ── Journal analytics (per-symbol and per-bot performance) ─────────────────
+
+export interface SymbolAnalytics {
+  symbol: string;
+  trade_count: number;
+  open_count: number;
+  closed_count: number;
+  win_count: number;
+  loss_count: number;
+  breakeven_count: number;
+  win_rate: number; // 0..1
+  total_profit: number;
+  gross_profit: number;
+  gross_loss: number; // positive number
+  profit_factor: number | null; // null when there are no losing trades yet
+  avg_win: number;
+  avg_loss: number; // positive number
+  avg_profit_per_trade: number;
+  largest_win: number;
+  largest_loss: number; // negative or zero
+  total_volume: number;
+  bot_count: number;
+  first_trade_time: number | null; // epoch seconds UTC
+  last_trade_time: number | null;
+}
+
+export interface BotEquityPoint {
+  trade_id: string;
+  close_time: number; // epoch seconds UTC
+  profit: number;
+  cumulative_profit: number;
+}
+
+export interface BotAnalytics {
+  skill: string;
+  bot_name: string;
+  symbol: string;
+  strategy_version: string | null;
+  trade_count: number;
+  open_count: number;
+  closed_count: number;
+  win_count: number;
+  loss_count: number;
+  breakeven_count: number;
+  win_rate: number; // 0..1
+  total_profit: number;
+  gross_profit: number;
+  gross_loss: number;
+  profit_factor: number | null;
+  avg_win: number;
+  avg_loss: number;
+  expectancy: number;
+  largest_win: number;
+  largest_loss: number;
+  max_drawdown: number; // positive number
+  avg_trade_duration_seconds: number | null;
+  first_trade_time: number | null;
+  last_trade_time: number | null;
+  equity_curve: BotEquityPoint[];
+}
+
+/** Per-symbol aggregate stats (any bot, or manual) — sorted by total_profit
+ * descending. Powers the analytics page's symbol comparison table. */
+export const getSymbolAnalytics = (accountId: string) =>
+  api.get<SymbolAnalytics[]>(acctPath(accountId, "/journal/analytics/symbols"));
+
+/** Per-bot aggregate stats plus equity curves — sorted by total_profit
+ * descending. Trades with no `skill` (manual/API) are excluded. */
+export const getBotAnalytics = (accountId: string) =>
+  api.get<BotAnalytics[]>(acctPath(accountId, "/journal/analytics/bots"));
 
 // ── Activity log (persisted "what is the bot doing and why") ───────────────
 

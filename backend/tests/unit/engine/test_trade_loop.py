@@ -124,6 +124,8 @@ class FakeOrderService:
         skill=None,
         magic=0,
         max_spread_points=None,
+        reason="",
+        confidence=None,
         zone_kind=None,
         zone_price_low=None,
         zone_price_high=None,
@@ -147,6 +149,8 @@ class FakeOrderService:
                 skill=skill,
                 magic=magic,
                 max_spread_points=max_spread_points,
+                reason=reason,
+                confidence=confidence,
                 zone_kind=zone_kind,
                 zone_price_low=zone_price_low,
                 zone_price_high=zone_price_high,
@@ -331,6 +335,8 @@ async def test_successful_entry_opens_position_with_strategy_and_skill():
     assert order["strategy_version"] == "fake:v1"
     assert order["skill"] == "normal/xauusd/fake"
     assert order["magic"] == 999
+    assert order["reason"] == "test buy"
+    assert order["confidence"] == 1.0
     assert risk_manager.status.trades_today == 1
     assert position_manager.calls == ["XAUUSD"]
 

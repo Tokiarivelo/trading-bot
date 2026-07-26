@@ -1,0 +1,7 @@
+name: normal/btcusd/rbr_dbd_zones_scalp_m5_btcusd
+symbol: BTCUSD
+strategy: rbr_dbd_zones_scalp_m5_btcusd
+risk_multiplier: 1.0
+sessions: []
+param_overrides: {}
+htf_veto_override: null

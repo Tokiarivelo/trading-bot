@@ -7,6 +7,30 @@ from __future__ import annotations
 from pydantic import BaseModel, Field
 
 
+class ZoneOut(BaseModel):
+    """The supply/demand rectangle the strategy identified before entering
+    this trade, for drawing on the chart. Only present for strategies that
+    report one (e.g. `pob_price_action_snd`)."""
+
+    kind: str = Field(description="'demand' (buy zone) or 'supply' (sell zone).")
+    price_low: float = Field(description="Lower bound of the zone rectangle.")
+    price_high: float = Field(description="Upper bound of the zone rectangle.")
+    time_start: int = Field(description="Epoch seconds UTC — left edge of the zone rectangle.")
+    time_end: int = Field(
+        description="Epoch seconds UTC — right edge of the zone rectangle (the entry candle)."
+    )
+
+
+class StructurePointOut(BaseModel):
+    """A single labeled swing point from the window the strategy used to
+    validate this trade's entry — chart annotation only, not used to gate
+    the trade itself."""
+
+    label: str = Field(description="Swing-structure label: 'HH', 'HL', 'LH', or 'LL'.")
+    price: float = Field(description="Price of the swing high/low.")
+    time: int = Field(description="Epoch seconds UTC of the swing bar.")
+
+
 class TradeRecordOut(BaseModel):
     """One journaled trade — used both as a chart marker (`/markers`) and in
     the trade history list (`/trades`)."""
@@ -31,12 +55,142 @@ class TradeRecordOut(BaseModel):
     skill: str | None = Field(
         default=None, description="Bot skill that selected this trade, e.g. 'normal/xauusd'."
     )
+    reason: str = Field(
+        default="",
+        description=(
+            "Why the strategy took this trade, in its own words (`Signal.reason`) — the full, "
+            "untruncated text; `comment` is the same reason truncated to MT5's 29-char comment "
+            "limit. Empty for manually/API-placed trades."
+        ),
+    )
+    confidence: float | None = Field(
+        default=None,
+        description="Strategy's confidence in this signal, 0..1. Null for manual/API trades.",
+    )
+    zone: ZoneOut | None = Field(
+        default=None,
+        description="Supply/demand zone this trade was taken from, if the strategy reports one.",
+    )
+    pattern: str | None = Field(
+        default=None,
+        description="Confirming candlestick pattern, e.g. 'bullish_engulfing', if reported.",
+    )
+    structure: list[StructurePointOut] = Field(
+        default_factory=list,
+        description=(
+            "Labeled swing points (HH/HL/LH/LL) from the window the strategy used to validate "
+            "this trade's entry, for chart annotation."
+        ),
+    )
 
 
 class TradeHistoryPage(BaseModel):
     """One page of the filtered trade history (`GET /journal/history`)."""
 
     items: list[TradeRecordOut] = Field(description="Trades matching the filters, one page.")
-    total: int = Field(
-        description="Total number of trades matching the filters, across all pages."
+    total: int = Field(description="Total number of trades matching the filters, across all pages.")
+
+
+class SymbolAnalyticsOut(BaseModel):
+    """Aggregate performance of every trade (any bot, or manual) on one
+    symbol — one entry per symbol on `GET /journal/analytics/symbols`."""
+
+    symbol: str = Field(description="Broker symbol, e.g. 'XAUUSD'.")
+    trade_count: int = Field(description="Total trades (open + closed) on this symbol.")
+    open_count: int = Field(description="Currently open trades on this symbol.")
+    closed_count: int = Field(description="Closed trades on this symbol.")
+    win_count: int = Field(description="Closed trades with profit > 0.")
+    loss_count: int = Field(description="Closed trades with profit < 0.")
+    breakeven_count: int = Field(description="Closed trades with profit == 0.")
+    win_rate: float = Field(description="win_count / closed_count, 0..1. 0 if no closed trades.")
+    total_profit: float = Field(description="Sum of realized profit across closed trades.")
+    gross_profit: float = Field(description="Sum of profit across winning trades only.")
+    gross_loss: float = Field(
+        description="Sum of |profit| across losing trades only, as a positive number."
+    )
+    profit_factor: float | None = Field(
+        description="gross_profit / gross_loss. Null when there are no losing trades yet "
+        "(undefined rather than infinite)."
+    )
+    avg_win: float = Field(description="gross_profit / win_count. 0 if no wins.")
+    avg_loss: float = Field(
+        description="gross_loss / loss_count, as a positive number. 0 if no losses."
+    )
+    avg_profit_per_trade: float = Field(
+        description="total_profit / closed_count. 0 if no closed trades."
+    )
+    largest_win: float = Field(description="Largest single-trade profit, or 0 if no wins.")
+    largest_loss: float = Field(
+        description="Largest single-trade loss (negative), or 0 if no losses."
+    )
+    total_volume: float = Field(description="Sum of lot volume across all trades on this symbol.")
+    bot_count: int = Field(
+        description="Number of distinct bots (skills) that have traded this symbol."
+    )
+    first_trade_time: int | None = Field(description="Earliest open_time, epoch seconds UTC.")
+    last_trade_time: int | None = Field(description="Latest open_time, epoch seconds UTC.")
+
+
+class EquityPointOut(BaseModel):
+    """One step of a bot's cumulative-profit curve, ordered by close time —
+    plots directly as a `lightweight-charts` line series."""
+
+    trade_id: str = Field(description="Broker position ticket, as a string.")
+    close_time: int = Field(description="Epoch seconds UTC.")
+    profit: float = Field(description="This trade's realized profit.")
+    cumulative_profit: float = Field(
+        description="Running sum of profit up to and including this trade."
+    )
+
+
+class BotAnalyticsOut(BaseModel):
+    """Aggregate performance of one bot (skill), plus its equity curve — one
+    entry per bot on `GET /journal/analytics/bots`. Trades placed manually
+    or via the API (no `skill`) are excluded, since they aren't
+    attributable to any bot."""
+
+    skill: str = Field(description="Bot's full id, e.g. 'normal/xauusd/breakout_v1'.")
+    bot_name: str = Field(description="This bot's short id — the last segment of `skill`.")
+    symbol: str = Field(description="Broker symbol this bot trades.")
+    strategy_version: str | None = Field(
+        description="This bot's most recent trade's strategy version, e.g. 'breakout_v1:v1'."
+    )
+    trade_count: int = Field(description="Total trades (open + closed) placed by this bot.")
+    open_count: int = Field(description="Currently open trades placed by this bot.")
+    closed_count: int = Field(description="Closed trades placed by this bot.")
+    win_count: int = Field(description="Closed trades with profit > 0.")
+    loss_count: int = Field(description="Closed trades with profit < 0.")
+    breakeven_count: int = Field(description="Closed trades with profit == 0.")
+    win_rate: float = Field(description="win_count / closed_count, 0..1. 0 if no closed trades.")
+    total_profit: float = Field(description="Sum of realized profit across closed trades.")
+    gross_profit: float = Field(description="Sum of profit across winning trades only.")
+    gross_loss: float = Field(
+        description="Sum of |profit| across losing trades only, as a positive number."
+    )
+    profit_factor: float | None = Field(
+        description="gross_profit / gross_loss. Null when there are no losing trades yet "
+        "(undefined rather than infinite)."
+    )
+    avg_win: float = Field(description="gross_profit / win_count. 0 if no wins.")
+    avg_loss: float = Field(
+        description="gross_loss / loss_count, as a positive number. 0 if no losses."
+    )
+    expectancy: float = Field(
+        description="total_profit / closed_count — average profit per closed trade."
+    )
+    largest_win: float = Field(description="Largest single-trade profit, or 0 if no wins.")
+    largest_loss: float = Field(
+        description="Largest single-trade loss (negative), or 0 if no losses."
+    )
+    max_drawdown: float = Field(
+        description="Largest peak-to-trough drop in cumulative profit across this bot's "
+        "equity curve, as a positive number. 0 if the curve never fell below a prior peak."
+    )
+    avg_trade_duration_seconds: float | None = Field(
+        description="Average close_time - open_time across closed trades. Null if no closed trades."
+    )
+    first_trade_time: int | None = Field(description="Earliest open_time, epoch seconds UTC.")
+    last_trade_time: int | None = Field(description="Latest open_time, epoch seconds UTC.")
+    equity_curve: list[EquityPointOut] = Field(
+        description="Cumulative-profit curve over this bot's closed trades, oldest first."
     )

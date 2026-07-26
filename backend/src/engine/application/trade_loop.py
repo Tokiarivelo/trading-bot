@@ -383,6 +383,8 @@ class TradeEngine:
                 skill=decision.skill_name,
                 magic=decision.magic,
                 max_spread_points=decision.max_spread_points,
+                reason=signal.reason,
+                confidence=signal.confidence,
                 zone_kind=zone.kind.value if zone is not None else None,
                 zone_price_low=zone.price_low if zone is not None else None,
                 zone_price_high=zone.price_high if zone is not None else None,

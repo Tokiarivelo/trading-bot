@@ -34,6 +34,11 @@ class PositionOpened(Event):
     comment: str = ""
     strategy_version: str | None = None
     skill: str | None = None
+    # Full signal reason and confidence, for the journal's "why did the bot
+    # take this trade" record — unlike `comment`, not truncated to MT5's
+    # 29-char comment limit (see engine/application/trade_loop.py).
+    reason: str = ""
+    confidence: float | None = None  # Signal.confidence, 0..1; None for manual/API orders
     # Optional chart-annotation data from the strategy's Signal (see
     # strategies/domain/models.py: PriceZone/StructurePoint). Flattened to
     # primitives rather than importing those domain types, same as `side`

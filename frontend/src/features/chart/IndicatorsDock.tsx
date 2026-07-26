@@ -28,7 +28,7 @@ import {
   listIndicators,
   type IndicatorSummary,
 } from '@/shared/api/client';
-import type { ManualIndicator, ManualIndicatorType } from './ChartPanel';
+import type { ManualIndicator, ManualIndicatorType } from './types';
 import { IndicatorCodePeek } from './IndicatorCodePeek';
 
 const PRESET_COLORS = [
@@ -51,6 +51,8 @@ const TYPE_LABELS: Record<ManualIndicatorType, string> = {
   structure: "Structure (HH/HL/LH/LL)",
   qml: "Quasimodo (QML / inversed)",
   snd: "S&D zones (RBR/DBD/RBD/DBR)",
+  snd_v2: "S&D zones v2 (bases + ranges)",
+  base: "Base ranges (2 lines)",
   patterns: "Candlestick patterns",
   custom: "Custom (saved indicator)",
 };
@@ -71,6 +73,11 @@ const TYPE_DEFAULTS: Record<ManualIndicatorType, { period: number; editablePerio
   // period here is the max base-candle count of a zone, same meaning as
   // maxBaseCandles in sndZones() (indicators.ts).
   snd: { period: 3, editablePeriod: true },
+  // period is maxBaseCandles for sndZonesV2 — larger so wide low-timeframe
+  // range bases are captured whole (bounded by ATR, not by count alone).
+  snd_v2: { period: 20, editablePeriod: true },
+  // period is the base's minimum candle count for detectBases().
+  base: { period: 5, editablePeriod: true },
   patterns: { period: 0, editablePeriod: false }, // fixed thresholds, no period
   // Params come from the saved indicator's own default_params (edit them on
   // /indicators, or from the code-peek panel below) rather than this dock.
@@ -92,6 +99,10 @@ function indicatorLabel(type: ManualIndicatorType, period: number): string {
       return `Quasimodo (lookback ${period})`;
     case "snd":
       return `S&D zones (base ≤ ${period})`;
+    case "snd_v2":
+      return `S&D zones v2 (base ≤ ${period})`;
+    case "base":
+      return `Base ranges (min ${period}c)`;
     case "patterns":
       return "Candlestick patterns";
     default:

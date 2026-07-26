@@ -11,7 +11,7 @@
  */
 
 import { useState } from "react";
-import type { DrawingToolType } from "./ChartPanel";
+import type { DrawingToolType } from "./types";
 
 const PRESET_COLORS = [
   "#2962ff", // Blue

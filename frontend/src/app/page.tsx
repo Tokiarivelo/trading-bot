@@ -10,7 +10,7 @@ import {
   Separator as ResizableSeparator,
 } from "react-resizable-panels";
 import { AccountPanel } from "@/features/account/AccountPanel";
-import { ChartPanel } from "@/features/chart/ChartPanel";
+import { MultiChartLayout } from "@/features/chart/MultiChartLayout";
 import { SymbolPicker } from "@/features/chart/SymbolPicker";
 import { EngineControlPanel } from "@/features/engine/EngineControlPanel";
 import { ActiveNewsWindowsSummary } from "@/features/news/ActiveNewsWindowsSummary";
@@ -402,7 +402,7 @@ export default function Home() {
               onClearSelection={() => setSelectedOrderTicket(null)}
             >
               {symbol ? (
-                <ChartPanel
+                <MultiChartLayout
                   symbol={symbol}
                   trading={trading}
                   activeStrategy={activeStrategy}

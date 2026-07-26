@@ -97,6 +97,41 @@ async def test_on_position_opened_journals_entry_with_snapshot(service, reposito
     assert market_context.calls == ["XAUUSD"]
 
 
+async def test_on_position_opened_journals_decision_context(service, repository):
+    event = PositionOpened(
+        symbol="XAUUSD",
+        position_id="1",
+        side="buy",
+        volume=0.1,
+        price=2400.35,
+        sl=2390.0,
+        tp=2420.0,
+        spread_points=25,
+        comment="RBR base retest",
+        skill="normal/xauusd/breakout_v1",
+        reason="RBR base retest + M15 bullish engulf confirmation",
+        confidence=0.82,
+        zone_kind="demand",
+        zone_price_low=2395.0,
+        zone_price_high=2398.5,
+        zone_time_start=datetime(2026, 7, 10, 10, 0, tzinfo=UTC),
+        zone_time_end=datetime(2026, 7, 10, 13, 45, tzinfo=UTC),
+        pattern="bullish_engulfing",
+        structure=(("HL", 2397.2, datetime(2026, 7, 10, 13, 30, tzinfo=UTC)),),
+    )
+
+    await service.on_position_opened(event)
+
+    record = repository.get("1")
+    assert record.reason == "RBR base retest + M15 bullish engulf confirmation"
+    assert record.confidence == 0.82
+    assert record.zone_kind == "demand"
+    assert record.zone_price_low == 2395.0
+    assert record.zone_price_high == 2398.5
+    assert record.pattern == "bullish_engulfing"
+    assert record.structure == (("HL", 2397.2, datetime(2026, 7, 10, 13, 30, tzinfo=UTC)),)
+
+
 async def test_on_position_closed_updates_existing_record(service, repository):
     await service.on_position_opened(opened_event())
     await service.on_position_closed(closed_event())

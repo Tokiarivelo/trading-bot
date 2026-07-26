@@ -1,10 +1,11 @@
-from datetime import UTC, datetime
+from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 
 from src.broker.domain.trading import ExecutionResult, OrderType, PendingOrder, Position, Side
 from src.engine.application.position_manager import PositionManager
 from src.engine.application.risk_manager import RiskManager
 from src.engine.domain.models import RiskCaps
-from src.market_data.domain.models import SymbolInfo
+from src.market_data.domain.models import Candle, SymbolInfo, Timeframe
 
 CAPS = RiskCaps(
     risk_per_trade_pct=0.5,
@@ -145,11 +146,57 @@ def _pending_order(**overrides) -> PendingOrder:
 
 
 class FakeMarketData:
-    def __init__(self, info: SymbolInfo = INFO) -> None:
+    def __init__(self, info: SymbolInfo = INFO, candles: list[Candle] | None = None) -> None:
         self.info = info
+        self.candles = candles or []
 
     async def get_symbol_info(self, symbol: str) -> SymbolInfo:
         return self.info
+
+    async def get_candles(
+        self, symbol: str, timeframe: Timeframe, count: int, before: datetime | None = None
+    ) -> list[Candle]:
+        return self.candles[-count:]
+
+
+def _candle(i: int, o: float, h: float, low: float, c: float) -> Candle:
+    return Candle(
+        symbol="XAUUSD",
+        timeframe=Timeframe.M5,
+        time=datetime(2026, 1, 1, tzinfo=UTC) + i * timedelta(minutes=5),
+        open=o,
+        high=h,
+        low=low,
+        close=c,
+        tick_volume=1000,
+        spread_points=20,
+    )
+
+
+def _flat_candles(n: int) -> list[Candle]:
+    return [_candle(i, 100.0, 100.6, 99.4, 100.4) for i in range(n)]
+
+
+def _demand_base_candles() -> list[Candle]:
+    """35 flat warmup candles, then a clean RBR base [103.6, 104.4],
+    unbroken — same geometry proven in test_rbr_dbd_zones_scalp_xauusd's
+    `test_detect_zones_finds_rbr_with_retest`."""
+    bars = _flat_candles(35)
+    i = len(bars)
+    bars.append(_candle(i, 100.4, 104.2, 100.0, 104.0))  # rally in
+    bars.append(_candle(i + 1, 104.0, 104.4, 103.6, 104.1))  # base
+    bars.append(_candle(i + 2, 104.1, 108.3, 104.0, 108.0))  # rally out
+    return bars
+
+
+def _supply_base_candles() -> list[Candle]:
+    """Mirror of `_demand_base_candles`: a clean DBD base [95.6, 96.4]."""
+    bars = _flat_candles(35)
+    i = len(bars)
+    bars.append(_candle(i, 100.0, 100.0, 95.8, 96.0))  # drop in
+    bars.append(_candle(i + 1, 96.0, 96.4, 95.6, 95.9))  # base
+    bars.append(_candle(i + 2, 95.9, 95.9, 91.7, 92.0))  # drop out
+    return bars
 
 
 async def test_moves_sl_to_breakeven_once_risk_is_covered():
@@ -185,6 +232,100 @@ async def test_time_stop_closes_position_without_progress():
     await manager.on_candle_closed("XAUUSD")
 
     assert order_service.closed == [1]
+
+
+# ---- secure-on-base-clear (bot-agnostic profit protection) -------------------
+
+
+async def test_secures_profit_when_fresh_base_is_cleared():
+    # RBR base at [103.6, 104.4]; bid 108.0 clears it. Also satisfies +1R
+    # breakeven (progress 8 >= risk 5), but the secure candidate
+    # (100 + 5*0.2 = 101.0) is more protective than plain breakeven (100.0)
+    # and must win.
+    position = _position(open_price=100.0, sl=95.0)
+    info = replace(INFO, bid=108.0, ask=108.2)
+    order_service = FakeOrderService([position])
+    manager = PositionManager(
+        order_service, FakeMarketData(info=info, candles=_demand_base_candles())
+    )
+
+    await manager.on_candle_closed("XAUUSD")
+
+    assert order_service.modified == [(1, 101.0, 2420.0)]
+
+
+async def test_secures_profit_independent_of_breakeven_rule():
+    # risk = 10; progress = 4.5 < risk -> +1R breakeven does NOT trigger, but
+    # the base [103.6, 104.4] is already cleared by bid 104.5 -> secure rule
+    # fires on its own: 100 + 10*0.2 = 102.0.
+    position = _position(open_price=100.0, sl=90.0)
+    info = replace(INFO, bid=104.5, ask=104.7)
+    order_service = FakeOrderService([position])
+    manager = PositionManager(
+        order_service, FakeMarketData(info=info, candles=_demand_base_candles())
+    )
+
+    await manager.on_candle_closed("XAUUSD")
+
+    assert order_service.modified == [(1, 102.0, 2420.0)]
+
+
+async def test_no_secure_when_base_not_yet_cleared():
+    # bid 104.0 is inside the base [103.6, 104.4], not clear of it yet.
+    position = _position(open_price=100.0, sl=90.0)
+    info = replace(INFO, bid=104.0, ask=104.2)
+    order_service = FakeOrderService([position])
+    manager = PositionManager(
+        order_service, FakeMarketData(info=info, candles=_demand_base_candles())
+    )
+
+    await manager.on_candle_closed("XAUUSD")
+
+    assert order_service.modified == []
+
+
+async def test_no_secure_without_any_base():
+    # Flat history has no RBR/DBD/RBD/DBR structure at all -> nothing to
+    # secure against even though price (bid) has run up.
+    position = _position(open_price=100.0, sl=90.0)
+    info = replace(INFO, bid=108.0, ask=108.2)
+    order_service = FakeOrderService([position])
+    manager = PositionManager(order_service, FakeMarketData(info=info, candles=_flat_candles(60)))
+
+    await manager.on_candle_closed("XAUUSD")
+
+    assert order_service.modified == []
+
+
+async def test_secure_rule_never_loosens_an_already_better_sl():
+    # sl already at 103.0 -- better than the secure candidate (102.0) for a
+    # buy -- so the base-clear rule must not move it backward.
+    position = _position(open_price=100.0, sl=103.0)
+    info = replace(INFO, bid=104.5, ask=104.7)
+    order_service = FakeOrderService([position])
+    manager = PositionManager(
+        order_service, FakeMarketData(info=info, candles=_demand_base_candles())
+    )
+
+    await manager.on_candle_closed("XAUUSD")
+
+    assert order_service.modified == []
+
+
+async def test_secures_profit_for_sell_side():
+    # DBD base at [95.6, 96.4]; ask 90.0 clears it below. risk = 10;
+    # progress = 100 - 90 = 10 >= risk -> breakeven candidate is 100.0, but
+    # secure candidate (100 - 10*0.2 = 98.0) is more protective and wins.
+    position = _position(side=Side.SELL, open_price=100.0, sl=110.0, tp=80.0)
+    info = replace(INFO, bid=89.8, ask=90.0)
+    order_service = FakeOrderService([position])
+    manager = PositionManager(
+        order_service, FakeMarketData(info=info, candles=_supply_base_candles())
+    )
+
+    await manager.on_candle_closed("XAUUSD")
+
+    assert order_service.modified == [(1, 98.0, 80.0)]
 
 
 async def test_no_sl_means_position_is_left_alone():

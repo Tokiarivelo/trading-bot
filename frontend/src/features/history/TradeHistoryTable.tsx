@@ -5,6 +5,7 @@ import type { TradeHistoryItem } from "@/shared/api/client";
 import { StatusBadge } from "@/features/strategies/StatusBadge";
 import { useSortableRows } from "@/shared/hooks/useSortableRows";
 import { SortTh } from "@/shared/ui/SortTh";
+import { TradeDecisionModal } from "@/shared/ui/TradeDecisionModal";
 import { type GroupBy, type TradeGroup, groupTrades, outcomeOf } from "./groupTrades";
 
 type TradeSortKey =
@@ -130,12 +131,14 @@ function TradesTable({
     tradeSortValue,
     { key: "open_time", dir: "desc" },
   );
+  const [whyTrade, setWhyTrade] = useState<TradeHistoryItem | null>(null);
 
   if (trades.length === 0) {
     return <p className="px-3 py-2 text-sm text-ink-muted">No trades.</p>;
   }
   return (
-    <table className="w-full min-w-[960px] border-collapse text-sm">
+    <>
+    <table className="w-full min-w-[1020px] border-collapse text-sm">
       <thead>
         <tr className="border-b border-line text-left text-xs text-ink-muted">
           <SortTh className="px-3 py-2 font-medium" label="Symbol" sortKey="symbol" sort={sort} onSort={toggle} />
@@ -149,12 +152,15 @@ function TradesTable({
           <SortTh className="px-3 py-2 font-medium" label="Strategy" sortKey="strategy_version" sort={sort} onSort={toggle} />
           <SortTh className="px-3 py-2 font-medium" label="Skill" sortKey="skill" sort={sort} onSort={toggle} />
           <SortTh className="px-3 py-2 font-medium" label="Outcome" sortKey="outcome" sort={sort} onSort={toggle} />
+          <th className="px-3 py-2 font-medium">Why</th>
         </tr>
       </thead>
       <tbody>
         {sorted.map((t) => {
           const ticket = isNaN(Number(t.id)) ? t.id : Number(t.id);
           const selected = selectedTicket === ticket;
+          const hasDecisionContext =
+            t.reason !== "" || t.confidence !== null || t.zone !== null || t.pattern !== null;
           return (
           <tr
             key={t.id}
@@ -179,11 +185,27 @@ function TradesTable({
             <Td>
               <StatusBadge status={outcomeOf(t)} />
             </Td>
+            <Td align="right">
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setWhyTrade(t);
+                }}
+                disabled={!hasDecisionContext}
+                className="cursor-pointer text-ink-muted hover:text-accent disabled:cursor-default disabled:opacity-30"
+                title={hasDecisionContext ? "Why the bot took this trade" : "No decision context"}
+              >
+                ⓘ
+              </button>
+            </Td>
           </tr>
           );
         })}
       </tbody>
     </table>
+    {whyTrade && <TradeDecisionModal trade={whyTrade} onClose={() => setWhyTrade(null)} />}
+    </>
   );
 }
 

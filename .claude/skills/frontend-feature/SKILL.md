@@ -39,6 +39,15 @@ frontend stack: **Next.js (App Router) + Tailwind CSS + TypeScript**.
    component files and `use*.ts` hook files sit directly in the folder, no
    nested `components/`/`hooks/` subfolders (see `features/strategies/` or
    `features/backtest/` for the pattern).
+1a. If the feature's main component is likely to accumulate several
+    unrelated state concerns (data fetching, third-party library lifecycle,
+    multiple UI toggle groups, popovers/menus) or grow large, plan the split
+    up front: one flat `use*.ts` hook per concern (pattern:
+    `features/trading/useAllPositions.ts`), presentational pieces as their
+    own memoized `.tsx` files with narrow props, and shared types in a
+    feature-level `types.ts`. Don't let one file accumulate multiple
+    concerns "temporarily" — extract as soon as a second unrelated concern
+    is added, not after the file is already large.
 2. Components that use hooks, browser APIs, or `lightweight-charts` need
    `"use client"`; keep server components the default otherwise.
 3. Talk to the backend through `src/shared/api/client.ts` (REST, proxied under

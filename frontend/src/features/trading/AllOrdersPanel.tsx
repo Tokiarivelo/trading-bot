@@ -19,11 +19,13 @@ import {
   closePosition,
   type PendingOrderOut,
   type PositionOut,
+  type TradeHistoryItem,
 } from "@/shared/api/client";
 import { TradeHistoryList } from "@/features/history/TradeHistoryList";
 import { useActiveAccount } from "@/shared/api/account-context";
 import { useSortableRows } from "@/shared/hooks/useSortableRows";
 import { SortTh } from "@/shared/ui/SortTh";
+import { TradeDecisionModal } from "@/shared/ui/TradeDecisionModal";
 import type { AllPositions } from "./useAllPositions";
 
 type Tab = "active" | "history";
@@ -129,10 +131,11 @@ function ActiveOrdersTables({
   onSelectTicket?: (ticket: string | number, symbol: string) => void;
 }) {
   const accountId = useActiveAccount();
-  const { positions, pendingOrders, skillByTicket, refresh } = allPositions;
+  const { positions, pendingOrders, skillByTicket, openTradeByTicket, refresh } = allPositions;
   const [busyTicket, setBusyTicket] = useState<number | null>(null);
   const [closingSymbol, setClosingSymbol] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [whyTrade, setWhyTrade] = useState<TradeHistoryItem | null>(null);
 
   function skillLabel(ticket: number): string {
     const skill = skillByTicket.get(String(ticket));
@@ -279,12 +282,14 @@ function ActiveOrdersTables({
                     sort={positionSort}
                     onSort={togglePositionSort}
                   />
+                  <th className="px-2 py-1">Why</th>
                   <th className="px-2 py-1" />
                 </tr>
               </thead>
               <tbody>
                 {sortedPositions.map((p) => {
                   const selected = selectedTicket === p.ticket;
+                  const openTrade = openTradeByTicket.get(String(p.ticket));
                   return (
                     <tr
                       key={p.ticket}
@@ -309,6 +314,24 @@ function ActiveOrdersTables({
                       <td className="px-2 py-1 text-ink-muted" title={p.open_time}>
                         {formatIsoTime(p.open_time)}
                       </td>
+                      <td className="px-2 py-1 text-center">
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            if (openTrade) setWhyTrade(openTrade);
+                          }}
+                          disabled={!openTrade}
+                          className="cursor-pointer text-ink-muted hover:text-accent disabled:cursor-default disabled:opacity-30"
+                          title={
+                            openTrade
+                              ? "Why the bot took this trade"
+                              : "Decision context not available"
+                          }
+                        >
+                          ⓘ
+                        </button>
+                      </td>
                       <td className="px-2 py-1 text-right">
                         <button
                           onClick={(e) => {
@@ -330,6 +353,7 @@ function ActiveOrdersTables({
           </div>
         </div>
       )}
+      {whyTrade && <TradeDecisionModal trade={whyTrade} onClose={() => setWhyTrade(null)} />}
       {pendingOrders.length > 0 && (
         <div className="flex flex-col gap-1">
           <span className="text-ink-muted">Pending orders ({pendingOrders.length})</span>

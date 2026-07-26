@@ -71,6 +71,16 @@ Read `IMPLEMENTATION_PLAN.md` for the full design. These rules are binding.
   `package-lock.json` / `yarn.lock`.
 - Before declaring any frontend task done, run `make lint-frontend` and
   `make build-frontend` (or from `frontend/`: `pnpm lint` and `pnpm build`).
+- Keep components and hooks single-concern: when a component's state grows
+  to mix multiple unrelated concerns (e.g. data-fetching + UI toggles + a
+  third-party engine's lifecycle), extract each concern into its own flat
+  `use*.ts` hook in the feature folder (see `features/trading/useAllPositions.ts`
+  for the pattern: no props required, owns its own state/effects internally,
+  exports a `ReturnType<typeof useX>` type alias for consumers). Extract
+  substantial presentational JSX into its own memoized component with a
+  narrow typed `Props` interface rather than growing one file. Shared types
+  used by more than one file in a feature live in that feature's `types.ts`,
+  not re-exported from a component file.
 
 ## Conventions
 - Python 3.12, `uv` for dependency management, `ruff` for lint+format.

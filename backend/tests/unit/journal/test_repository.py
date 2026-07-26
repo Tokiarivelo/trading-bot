@@ -55,6 +55,26 @@ def test_roundtrip_preserves_snapshots(repository):
     assert stored.h1_entry_snapshot == snapshot
 
 
+def test_roundtrip_preserves_decision_context(repository):
+    record = make_record(
+        "1",
+        reason="RBR base retest + M15 bullish engulf",
+        confidence=0.82,
+        zone_kind="demand",
+        zone_price_low=2395.0,
+        zone_price_high=2398.5,
+        zone_time_start=utc(2026, 7, 10, 10, 0),
+        zone_time_end=utc(2026, 7, 10, 13, 45),
+        pattern="bullish_engulfing",
+        structure=(
+            ("HL", 2397.2, utc(2026, 7, 10, 13, 30)),
+            ("HH", 2401.0, utc(2026, 7, 10, 13, 45)),
+        ),
+    )
+    repository.save(record)
+    assert repository.get("1") == record
+
+
 def test_get_returns_none_for_unknown_id(repository):
     assert repository.get("missing") is None
 

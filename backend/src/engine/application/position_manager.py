@@ -8,12 +8,35 @@ detects and reconciles the fill afterward.
 Runs after every M5 `CandleClosed`, once per symbol, over that symbol's open
 positions (from `BrokerPort.get_positions`) rather than the journal, since a
 manually-opened position (via the broker API) must be managed too.
+
+Two independent SL-tightening rules apply to every position regardless of
+which strategy opened it (bot-agnostic, applies even to manually-opened
+positions):
+
+  - Breakeven at +1R: once unrealized progress reaches the initial risk
+    distance, SL moves to the exact entry price.
+  - Secure-on-base-clear: once a fresh RBR/DBD/RBD/DBR base has formed on
+    `secure_timeframe` and price has since closed clear of it in the trade's
+    favor, SL moves to entry + a small real profit buffer
+    (`secure_buffer_r_mult` x R) — so a position that reverses after
+    confirming trend continuation locks in a scratch-plus rather than a full
+    round-trip back to a loss. Detected independently of the strategy that
+    opened the position (`engine.domain.zone_detection`, a trusted
+    engine-side counterpart to the same geometry duplicated across sandboxed
+    strategy files), so it also protects strategies with no zone concept of
+    their own (breakout_v1, mean_reversion_v1, ...).
+
+Both rules only ever tighten SL (never loosen it) — see `_improves` — so
+whichever rule's candidate is currently more protective wins, and neither
+rule fights a tighter level already set by the other.
 """
 
 from __future__ import annotations
 
 import logging
 from datetime import UTC, datetime
+
+import numpy as np
 
 from src.broker.application.order_service import OrderService
 from src.broker.application.reconciliation import ReconciliationService
@@ -25,11 +48,16 @@ from src.broker.domain.trading import (
     pending_order_triggered,
 )
 from src.engine.application.risk_manager import RiskManager
+from src.engine.domain.zone_detection import DEFAULT_ATR_PERIOD, Base, BaseKind, atr, detect_bases
+from src.market_data.domain.models import MarketDataUnavailable, Timeframe
 from src.market_data.ports.market_data import MarketDataPort
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_TIME_STOP_CANDLES = 48  # 4 hours of M5 bars with no progress
+DEFAULT_SECURE_TIMEFRAME = Timeframe.M5
+DEFAULT_SECURE_LOOKBACK_BARS = 200
+DEFAULT_SECURE_BUFFER_R_MULT = 0.2  # locked-in profit once a base is cleared, as a fraction of R
 
 
 class PositionManager:
@@ -40,12 +68,18 @@ class PositionManager:
         reconciliation: ReconciliationService | None = None,
         risk_manager: RiskManager | None = None,
         time_stop_candles: int = DEFAULT_TIME_STOP_CANDLES,
+        secure_timeframe: Timeframe = DEFAULT_SECURE_TIMEFRAME,
+        secure_lookback_bars: int = DEFAULT_SECURE_LOOKBACK_BARS,
+        secure_buffer_r_mult: float = DEFAULT_SECURE_BUFFER_R_MULT,
     ) -> None:
         self._order_service = order_service
         self._market_data = market_data
         self._reconciliation = reconciliation
         self._risk_manager = risk_manager
         self._time_stop_candles = time_stop_candles
+        self._secure_timeframe = secure_timeframe
+        self._secure_lookback_bars = secure_lookback_bars
+        self._secure_buffer_r_mult = secure_buffer_r_mult
         self._candles_since_open: dict[int, int] = {}
         # symbol -> {ticket: order}, as of the last candle close — kept so a
         # vanished ticket's side/volume is still known when reconciling.
@@ -63,14 +97,35 @@ class PositionManager:
         if vanished and self._reconciliation is not None:
             await self._reconciliation.reconcile_vanished(symbol, set(vanished))
 
-        for position in positions:
-            self._candles_since_open[position.ticket] = (
-                self._candles_since_open.get(position.ticket, 0) + 1
-            )
-            await self._manage(position)
+        if positions:
+            bases = await self._detect_bases(symbol)
+            for position in positions:
+                self._candles_since_open[position.ticket] = (
+                    self._candles_since_open.get(position.ticket, 0) + 1
+                )
+                await self._manage(position, bases)
 
         if self._risk_manager is not None:
             await self._manage_pending_orders(symbol)
+
+    async def _detect_bases(self, symbol: str) -> list[Base]:
+        """One zone scan per symbol per candle close, shared by every open
+        position on that symbol — cheaper than re-fetching/re-detecting per
+        position, and `on_candle_closed` is already scoped to one symbol."""
+        try:
+            candles = await self._market_data.get_candles(
+                symbol, self._secure_timeframe, self._secure_lookback_bars
+            )
+        except MarketDataUnavailable:
+            return []
+        if len(candles) < DEFAULT_ATR_PERIOD * 2 + 10:
+            return []
+        opens_arr = np.array([c.open for c in candles])
+        highs_arr = np.array([c.high for c in candles])
+        lows_arr = np.array([c.low for c in candles])
+        closes_arr = np.array([c.close for c in candles])
+        atr_values = atr(highs_arr, lows_arr, closes_arr, DEFAULT_ATR_PERIOD)
+        return detect_bases(opens_arr, highs_arr, lows_arr, closes_arr, atr_values)
 
     async def _manage_pending_orders(self, symbol: str) -> None:
         pending = await self._order_service.get_pending_orders(symbol)
@@ -124,7 +179,37 @@ class PositionManager:
             if filled:
                 risk_manager.record_trade_opened(datetime.now(UTC))
 
-    async def _manage(self, position: Position) -> None:
+    def _select_secure_base(
+        self, bases: list[Base], side: Side, mark: float
+    ) -> Base | None:
+        """Most recent unbroken base, matching the position's direction,
+        that price has already closed clear of — "a base was created and
+        price passed that base." Iterates most-recent-first so an older,
+        already-superseded base never wins over a fresher one."""
+        demand_wanted = side is Side.BUY
+        for base in reversed(bases):
+            if base.broken:
+                continue
+            if (base.kind == BaseKind.DEMAND) != demand_wanted:
+                continue
+            proximal = base.price_high if demand_wanted else base.price_low
+            cleared = mark > proximal if demand_wanted else mark < proximal
+            if not cleared:
+                continue
+            return base
+        return None
+
+    @staticmethod
+    def _improves(candidate: float | None, current_sl: float, direction: int) -> bool:
+        """Whether moving SL to `candidate` tightens it in the position's
+        favor — buys only ever move SL up, sells only ever move it down.
+        Both SL rules use this so neither ever loosens a level the other
+        already set."""
+        if candidate is None:
+            return False
+        return (candidate - current_sl) * direction > 0
+
+    async def _manage(self, position: Position, bases: list[Base]) -> None:
         if position.sl is None:
             return
         info = await self._market_data.get_symbol_info(position.symbol)
@@ -133,15 +218,33 @@ class PositionManager:
         risk = abs(position.open_price - position.sl)
         progress = (mark - position.open_price) * direction
 
-        already_at_breakeven = position.sl == position.open_price
-        if not already_at_breakeven and risk > 0 and progress >= risk:
-            await self._order_service.modify_position(
-                position.ticket, sl=position.open_price, tp=position.tp
-            )
+        target_sl: float | None = None
+
+        # Rule 1: breakeven at +1R.
+        if risk > 0 and progress >= risk:
+            candidate = position.open_price
+            if self._improves(candidate, position.sl, direction):
+                target_sl = candidate
+
+        # Rule 2: secure a small real profit once a fresh base has been
+        # cleared, bot-agnostic (works even without a matching Rule 1 trigger,
+        # and independently of Rule 1's own candidate — whichever is more
+        # protective wins).
+        if risk > 0:
+            secure_base = self._select_secure_base(bases, position.side, mark)
+            if secure_base is not None:
+                candidate = position.open_price + direction * risk * self._secure_buffer_r_mult
+                floor = target_sl if target_sl is not None else position.sl
+                if self._improves(candidate, floor, direction):
+                    target_sl = candidate
+
+        if target_sl is not None:
+            await self._order_service.modify_position(position.ticket, sl=target_sl, tp=position.tp)
             logger.info(
-                "breakeven: ticket=%d %s sl moved to entry %.5f",
+                "sl secured: ticket=%d %s sl moved to %.5f (entry %.5f)",
                 position.ticket,
                 position.symbol,
+                target_sl,
                 position.open_price,
             )
             return

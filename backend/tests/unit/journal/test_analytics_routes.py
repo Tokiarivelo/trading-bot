@@ -1,0 +1,154 @@
+"""GET /journal/analytics/symbols and /journal/analytics/bots."""
+
+from __future__ import annotations
+
+from datetime import UTC, datetime
+from types import SimpleNamespace
+
+import httpx
+import pytest
+from fastapi import FastAPI
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+
+from src.journal.adapters.repository import JournalRepository
+from src.journal.api.routes import router
+from src.journal.domain.models import TradeRecord
+from src.shared.db.base import Base
+from src.shared.events.bus import EventBus
+
+
+def utc(*args) -> datetime:
+    return datetime(*args, tzinfo=UTC)
+
+
+def make_record(id: str, symbol: str = "XAUUSD", **kw) -> TradeRecord:
+    defaults = dict(
+        id=id,
+        symbol=symbol,
+        side="buy",
+        volume=0.1,
+        open_price=2400.35,
+        open_time=utc(2026, 7, 10, 14, 0),
+        sl=2390.0,
+        tp=2420.0,
+        spread_points_at_entry=25,
+        comment="",
+    )
+    return TradeRecord(**{**defaults, **kw})
+
+
+@pytest.fixture
+def repository(tmp_path) -> JournalRepository:
+    engine = create_engine(f"sqlite:///{tmp_path}/test.db")
+    Base.metadata.create_all(engine)
+    return JournalRepository(sessionmaker(bind=engine, expire_on_commit=False))
+
+
+class FakeMarketContext:
+    async def capture(self, symbol):
+        raise AssertionError("market context should not be hit by analytics")
+
+
+@pytest.fixture
+async def api(repository):
+    from src.journal.application.trade_journal import TradeJournalService
+
+    trade_journal = TradeJournalService(
+        repository=repository, market_context=FakeMarketContext(), event_bus=EventBus()
+    )
+    app = FastAPI()
+    app.include_router(router)
+    app.state.container = SimpleNamespace(
+        accounts={"default": SimpleNamespace(trade_journal=trade_journal)}
+    )
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://backend") as client:
+        yield client
+
+
+@pytest.fixture(autouse=True)
+def _seed(repository):
+    repository.save(
+        make_record(
+            "1",
+            symbol="XAUUSD",
+            skill="normal/xauusd/breakout_v1",
+            strategy_version="breakout_v1:v1",
+            open_time=utc(2026, 7, 10, 14, 0),
+            close_time=utc(2026, 7, 10, 15, 0),
+            profit=10.0,
+        )
+    )
+    repository.save(
+        make_record(
+            "2",
+            symbol="XAUUSD",
+            skill="normal/xauusd/breakout_v1",
+            strategy_version="breakout_v1:v1",
+            open_time=utc(2026, 7, 10, 15, 0),
+            close_time=utc(2026, 7, 10, 16, 0),
+            profit=-4.0,
+        )
+    )
+    repository.save(
+        make_record(
+            "3",
+            symbol="EURUSD",
+            skill=None,
+            open_time=utc(2026, 7, 10, 16, 0),
+            close_time=utc(2026, 7, 10, 17, 0),
+            profit=2.0,
+        )
+    )
+
+
+async def test_symbol_analytics_returns_one_entry_per_symbol(api):
+    response = await api.get("/accounts/default/journal/analytics/symbols")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert {r["symbol"] for r in body} == {"XAUUSD", "EURUSD"}
+    xau = next(r for r in body if r["symbol"] == "XAUUSD")
+    assert xau["closed_count"] == 2
+    assert xau["win_count"] == 1
+    assert xau["loss_count"] == 1
+    assert xau["total_profit"] == 6.0
+    assert xau["profit_factor"] == 2.5
+
+
+async def test_bot_analytics_excludes_manual_trades_and_includes_equity_curve(api):
+    response = await api.get("/accounts/default/journal/analytics/bots")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert len(body) == 1
+    bot = body[0]
+    assert bot["skill"] == "normal/xauusd/breakout_v1"
+    assert bot["bot_name"] == "breakout_v1"
+    assert bot["total_profit"] == 6.0
+    assert [p["cumulative_profit"] for p in bot["equity_curve"]] == [10.0, 6.0]
+
+
+async def test_analytics_endpoints_empty_when_no_trades(api, repository, tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path}/empty.db")
+    Base.metadata.create_all(engine)
+    empty_repo = JournalRepository(sessionmaker(bind=engine, expire_on_commit=False))
+
+    from src.journal.application.trade_journal import TradeJournalService
+
+    empty_journal = TradeJournalService(
+        repository=empty_repo, market_context=FakeMarketContext(), event_bus=EventBus()
+    )
+    app = FastAPI()
+    app.include_router(router)
+    app.state.container = SimpleNamespace(
+        accounts={"default": SimpleNamespace(trade_journal=empty_journal)}
+    )
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://backend") as client:
+        symbols = await client.get("/accounts/default/journal/analytics/symbols")
+        bots = await client.get("/accounts/default/journal/analytics/bots")
+
+    assert symbols.json() == []
+    assert bots.json() == []

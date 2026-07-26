@@ -355,13 +355,11 @@ export interface SndZone {
   priceLow: number;
   /** First base candle — where the zone rectangle starts on the chart. */
   baseStartTime: UTCTimestamp;
-  /** First candle back inside the zone after the leg-out, if any — the
-   * retest entry (buy for demand, sell for supply). Undefined when price
-   * hasn't returned yet or broke through the zone first. */
-  retestTime?: UTCTimestamp;
-  /** Candle that CLOSED through the far side of the zone, voiding it —
-   * where the rectangle ends. Undefined while the zone is still live. */
-  brokenTime?: UTCTimestamp;
+  /** First candle to trade back into the band after the leg-out — the TOUCH
+   * that consumes the zone: it is the entry (buy demand / sell supply) AND
+   * where the rectangle ends, because a touched zone is no longer valid.
+   * Undefined while the zone is still fresh (untouched, extends to now). */
+  touchedTime?: UTCTimestamp;
 }
 
 export interface SndParams {
@@ -378,6 +376,65 @@ export const DEFAULT_SND_PARAMS: SndParams = {
   legTravelAtrMult: 1.0,
   baseBodyAtrMult: 0.5,
 };
+
+/**
+ * PoB "basing candle" height rule — the shared way both `sndZones` (v1) and
+ * `sndZonesV2` (v2) size a zone's band. The tradable zone is NOT the full base
+ * range (which draws far too tall on a multi-candle base) but the LAST candle
+ * of the OPPOSITE colour to the departure:
+ *   demand (up departure: RBR/DBR)   -> last RED (bearish) base candle;
+ *   supply (down departure: DBD/RBD) -> last GREEN (bullish) base candle.
+ * That candle's high/low is the band. Falls back to the full base high/low
+ * when the base has no opposite-colour candle (all one colour / all doji).
+ *
+ * `demand` is the departure direction (true = up/rally, false = down/drop);
+ * `baseStart`/`baseEnd` are inclusive candle indices of the base.
+ */
+export function basingCandleBand(
+  candles: Candle[],
+  baseStart: number,
+  baseEnd: number,
+  demand: boolean,
+): { high: number; low: number } {
+  for (let j = baseEnd; j >= baseStart; j--) {
+    const bullish = candles[j].close > candles[j].open;
+    const bearish = candles[j].close < candles[j].open;
+    if (demand ? bearish : bullish) {
+      return { high: candles[j].high, low: candles[j].low };
+    }
+  }
+  // Fallback: no opposite-colour candle in the base — use its full extent.
+  let high = -Infinity;
+  let low = Infinity;
+  for (let j = baseStart; j <= baseEnd; j++) {
+    if (candles[j].high > high) high = candles[j].high;
+    if (candles[j].low < low) low = candles[j].low;
+  }
+  return { high, low };
+}
+
+/**
+ * First candle at/after `from` whose range enters the `[low, high]` band —
+ * the TOUCH that consumes a fresh S&D zone. A zone is valid only until price
+ * first trades back into it; on that touch it stops being drawn and is no
+ * longer tradable (a demand/supply level is "used up" the first time it is
+ * hit, well before price would fully break through it). Shared by both
+ * `sndZones` (v1) and `sndZonesV2` (v2); returns undefined while the zone is
+ * still untouched.
+ */
+export function firstBandTouch(
+  candles: Candle[],
+  from: number,
+  low: number,
+  high: number,
+): UTCTimestamp | undefined {
+  for (let j = from; j < candles.length; j++) {
+    if (candles[j].high >= low && candles[j].low <= high) {
+      return candles[j].time as UTCTimestamp;
+    }
+  }
+  return undefined;
+}
 
 /**
  * PoB supply & demand zones — the "only 4 types of Entry Point" from the
@@ -409,11 +466,11 @@ export const DEFAULT_SND_PARAMS: SndParams = {
  * down-base-down = DBD, up-base-down = RBD. Adjacent pairs share legs, so
  * stacked zones (rally → base → rally → base → rally) all detect.
  *
- * Lifecycle mirrors the QML indicator: after the leg-out run, the first
- * candle trading back into the band is the retest entry; a candle *closing*
- * beyond the far side of the band breaks the zone (rectangle ends there).
- * Unlike QML there is no separate confirmation step — the leg-out is itself
- * the confirmation.
+ * Validity: after the leg-out run, the first candle trading back into the
+ * (refined) band is the TOUCH — the entry and the end of the zone, which is
+ * consumed there (`firstBandTouch`, shared with v2); it does not wait for a
+ * full break. `touchedTime` undefined means still fresh. Unlike QML there is
+ * no separate confirmation step — the leg-out is itself the confirmation.
  */
 export function sndZones(
   candles: Candle[],
@@ -488,14 +545,17 @@ export function sndZones(
     const baseCount = baseEnd - baseStart + 1;
     if (baseCount < 1 || baseCount > maxBaseCandles) continue;
 
-    let priceHigh = -Infinity;
-    let priceLow = Infinity;
-    for (let j = baseStart; j <= baseEnd; j++) {
-      if (candles[j].high > priceHigh) priceHigh = candles[j].high;
-      if (candles[j].low < priceLow) priceLow = candles[j].low;
-    }
-
     const legOutUp = legOut.cls === 1;
+    // Zone height uses the shared PoB "basing candle" rule (same as
+    // sndZonesV2): the last opposite-colour base candle, not the full base
+    // range — so a multi-candle base still draws a tight, one-candle band.
+    const { high: priceHigh, low: priceLow } = basingCandleBand(
+      candles,
+      baseStart,
+      baseEnd,
+      legOutUp,
+    );
+
     // Confirmation: the first leg-out candle whose close actually departs
     // the base band — a momentum run that never clears the base is still
     // consolidation, not a zone.
@@ -512,20 +572,10 @@ export function sndZones(
       legIn.cls === 1 ? (legOutUp ? "RBR" : "RBD") : legOutUp ? "DBR" : "DBD";
     const kind: SndKind = legOutUp ? "demand" : "supply";
 
-    // Retest/break scan starts after the whole leg-out run — its own early
-    // candles' wicks still overlap the base and are not a return to it.
-    let retestTime: UTCTimestamp | undefined;
-    let brokenTime: UTCTimestamp | undefined;
-    for (let j = legOut.end + 1; j < n; j++) {
-      const c = candles[j];
-      if (retestTime === undefined && (kind === "demand" ? c.low <= priceHigh : c.high >= priceLow)) {
-        retestTime = c.time as UTCTimestamp;
-      }
-      if (kind === "demand" ? c.close < priceLow : c.close > priceHigh) {
-        brokenTime = c.time as UTCTimestamp;
-        break;
-      }
-    }
+    // Validity ends at the first TOUCH — price trading back into the band.
+    // The scan starts after the whole leg-out run, whose own early candles'
+    // wicks still overlap the base and are not a genuine return to it.
+    const touchedTime = firstBandTouch(candles, legOut.end + 1, priceLow, priceHigh);
 
     zones.push({
       time: candles[confIdx].time as UTCTimestamp,
@@ -534,11 +584,265 @@ export function sndZones(
       priceHigh,
       priceLow,
       baseStartTime: candles[baseStart].time as UTCTimestamp,
-      retestTime,
-      brokenTime,
+      touchedTime,
     });
   }
   return zones;
+}
+
+// A zone is "fresh" (valid, still drawn to the right edge) until price first
+// touches it; that touch flips it to "touched" — consumed and no longer valid.
+export type SndZoneStateV2 = "fresh" | "touched";
+
+export interface SndZoneV2 {
+  time: UTCTimestamp;            // confirmation candle
+  kind: SndKind;                // "demand" | "supply" (SndKind already exported)
+  priceHigh: number;            // drawn band top (after refinement)
+  priceLow: number;             // drawn band bottom (after refinement)
+  proximal: number;             // edge price returns to first
+  distal: number;               // far break edge
+  baseStartTime: UTCTimestamp;  // rectangle left edge
+  baseCandles: number;
+  hasLegIn: boolean;
+  pattern: SndPattern | "DZ" | "SZ";   // SndPattern already exported ("RBR"|"DBD"|"RBD"|"DBR")
+  /** First touch — the entry AND where the rectangle ends (the zone is
+   * consumed here). Undefined while still fresh. */
+  touchedTime?: UTCTimestamp;
+  state: SndZoneStateV2;
+}
+
+export interface SndParamsV2 {
+  impulseAtrMult: number;   // departure leg net travel >= this * ATR
+  baseBodyAtrMult: number;  // body <= this * ATR => "quiet" (base-class)
+  baseRangeAtrMult: number; // whole base band <= this * ATR (lets a range count)
+}
+
+export const DEFAULT_SND_PARAMS_V2: SndParamsV2 = {
+  impulseAtrMult: 1.2,
+  baseBodyAtrMult: 0.8,
+  baseRangeAtrMult: 3.0,
+};
+
+/**
+ * PoB supply & demand zones, v2 — a DEPARTURE-FIRST rewrite of `sndZones`.
+ *
+ * Where v1 requires TWO qualifying impulse legs (leg-in AND leg-out) with the
+ * base read as whatever sits *between* them — and caps that base at ~3 candles
+ * — this misses two whole classes of real zones: origin bases (the very first
+ * consolidation of a move, which has no leg-in before it) and wide ranges
+ * (a base that consolidated across more than a few candles). v2 fixes both by
+ * inverting the search order:
+ *
+ *   1. Find the DEPARTURE impulse first — a single directional run whose net
+ *      travel (open of its first candle to close of its last) reaches
+ *      `impulseAtrMult × ATR`. This is the leg-out; it is the only leg the
+ *      zone strictly needs.
+ *   2. Read the base BACKWARDS from the candle just before the departure,
+ *      extending through quiet/consolidation candles until either a leg-in
+ *      impulse is hit (base starts there) or the accumulated band would grow
+ *      wider than `baseRangeAtrMult × ATR` (past that it is trending, not
+ *      basing). The leg-in is therefore OPTIONAL — when one exists the pattern
+ *      names it (RBR/DBR/RBD/DBD), when none does the zone is an origin base
+ *      (DZ for demand, SZ for supply).
+ *
+ * Weak same-direction runs split by a short pause still merge into one impulse
+ * (same refinement as v1) so a rally printing sub-leg candles around a doji
+ * reads as a single departure.
+ *
+ * HEIGHT REFINEMENT (the "basing candle" rule from PoB, and the key fix for
+ * the "zone height too large" complaint): the drawn band is NOT the full base
+ * range. It is the single LAST candle of the OPPOSITE colour to the departure
+ * — the last red candle before an up departure (demand), the last green candle
+ * before a down departure (supply) — which is the actual origin candle price
+ * reacts from. Only when the base has no opposite-colour candle (all one
+ * colour / all doji) does it fall back to the full base band. This keeps the
+ * zone roughly one candle's range tall instead of the whole consolidation.
+ *
+ * VALIDITY: a zone is only good until it is first TOUCHED. After the departure
+ * run, the first candle trading back into the (refined) band consumes the zone
+ * — that touch is both the entry and the end of the drawing (see
+ * `firstBandTouch`, shared with v1). There is no "counting retests" or waiting
+ * for a full break: state is just `fresh` (untouched, still drawn to now) or
+ * `touched` (consumed, invalid, rectangle ends at the touch).
+ */
+export function sndZonesV2(
+  candles: Candle[],
+  maxBaseCandles: number,
+  atrPeriod: number,
+  params: SndParamsV2 = DEFAULT_SND_PARAMS_V2,
+): SndZoneV2[] {
+  const n = candles.length;
+  const atrPoints = atr(candles, atrPeriod);
+  if (atrPoints.length === 0) return [];
+  const atrAt = new Array<number>(n).fill(atrPoints[0].value);
+  for (let k = 0; k < atrPoints.length; k++) atrAt[atrPeriod + k] = atrPoints[k].value;
+
+  const classify = (i: number): -1 | 0 | 1 => {
+    if (Math.abs(candles[i].close - candles[i].open) <= params.baseBodyAtrMult * atrAt[i]) return 0;
+    return candles[i].close >= candles[i].open ? 1 : -1;
+  };
+
+  interface Run { cls: -1 | 0 | 1; start: number; end: number; }
+  const runs: Run[] = [];
+  for (let i = 0; i < n; i++) {
+    const cls = classify(i);
+    const last = runs[runs.length - 1];
+    if (last && last.cls === cls) last.end = i;
+    else runs.push({ cls, start: i, end: i });
+  }
+
+  const isLeg = (r: Run): boolean =>
+    r.cls !== 0 &&
+    Math.abs(candles[r.end].close - candles[r.start].open) >= params.impulseAtrMult * atrAt[r.end];
+
+  // merge weak same-direction runs split by a short pause into one impulse
+  let mergedSomething = true;
+  while (mergedSomething) {
+    mergedSomething = false;
+    for (let k = 0; k + 2 < runs.length; k++) {
+      const d1 = runs[k], pause = runs[k + 1], d2 = runs[k + 2];
+      if (d1.cls === 0 || pause.cls !== 0 || d2.cls !== d1.cls) continue;
+      if (pause.end - pause.start + 1 > maxBaseCandles) continue;
+      if (isLeg(d1) && isLeg(d2)) continue;
+      runs.splice(k, 3, { cls: d1.cls, start: d1.start, end: d2.end });
+      mergedSomething = true;
+      break;
+    }
+  }
+
+  const runOf = new Array<number>(n).fill(-1);
+  runs.forEach((r, ri) => { for (let i = r.start; i <= r.end; i++) runOf[i] = ri; });
+
+  const zones: SndZoneV2[] = [];
+  const seen = new Set<string>();
+
+  for (let ri = 0; ri < runs.length; ri++) {
+    const legOut = runs[ri];
+    if (!isLeg(legOut)) continue;
+    const departUp = legOut.cls === 1;
+
+    const anchor = legOut.start - 1;
+    if (anchor < 0 || isLeg(runs[runOf[anchor]])) continue; // impulse straight into impulse = no base
+
+    const atrHere = atrAt[legOut.start];
+    let hi = candles[anchor].high, lo = candles[anchor].low, baseStart = anchor;
+    for (let j = anchor - 1; j >= 0 && anchor - j < maxBaseCandles; j--) {
+      if (isLeg(runs[runOf[j]])) break;                    // reached the leg-in
+      const nhi = Math.max(hi, candles[j].high), nlo = Math.min(lo, candles[j].low);
+      if (nhi - nlo > params.baseRangeAtrMult * atrHere) break;  // wider than a base = trending
+      hi = nhi; lo = nlo; baseStart = j;
+    }
+    const baseEnd = anchor;
+    const baseCount = baseEnd - baseStart + 1;
+
+    // Zone height uses the shared PoB "basing candle" rule — the last
+    // opposite-colour base candle, not the full base range (which draws far
+    // too tall). See basingCandleBand; sndZones (v1) uses the same helper.
+    const { high: bandHi, low: bandLo } = basingCandleBand(
+      candles,
+      baseStart,
+      baseEnd,
+      departUp,
+    );
+
+    let confIdx = -1;
+    for (let j = legOut.start; j <= legOut.end; j++) {
+      if (departUp ? candles[j].close > bandHi : candles[j].close < bandLo) { confIdx = j; break; }
+    }
+    if (confIdx === -1) continue;
+
+    const key = `${baseStart}:${baseEnd}:${departUp ? "d" : "s"}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+
+    const legInRun = baseStart > 0 && isLeg(runs[runOf[baseStart - 1]]) ? runs[runOf[baseStart - 1]] : undefined;
+    const hasLegIn = legInRun !== undefined;
+    const kind: SndKind = departUp ? "demand" : "supply";
+    const pattern: SndPattern | "DZ" | "SZ" = legInRun
+      ? legInRun.cls === 1 ? (departUp ? "RBR" : "RBD") : (departUp ? "DBR" : "DBD")
+      : (departUp ? "DZ" : "SZ");
+
+    const proximal = departUp ? bandHi : bandLo;
+    const distal = departUp ? bandLo : bandHi;
+
+    // Validity ends at the first TOUCH back into the band — not at a full
+    // break. Once touched the zone is consumed and stops being drawn.
+    const touchedTime = firstBandTouch(candles, legOut.end + 1, bandLo, bandHi);
+    const state: SndZoneStateV2 = touchedTime ? "touched" : "fresh";
+
+    zones.push({
+      time: candles[confIdx].time as UTCTimestamp,
+      kind, priceHigh: bandHi, priceLow: bandLo, proximal, distal,
+      baseStartTime: candles[baseStart].time as UTCTimestamp,
+      baseCandles: baseCount, hasLegIn, pattern, touchedTime, state,
+    });
+  }
+  return zones;
+}
+
+export interface BaseRange {
+  startTime: UTCTimestamp;   // first candle of the base
+  endTime: UTCTimestamp;     // last candle of the base
+  high: number;              // top boundary (range high)
+  low: number;               // bottom boundary (range low)
+  candles: number;
+}
+
+/**
+ * Consolidation-base detector, independent of any departure impulse (unlike
+ * `sndZones`/`sndZonesV2`, which only surface a base once price has left it).
+ * A base is a maximal run of consecutive candles whose whole span
+ * (max high − min low) stays within `rangeAtrMult × ATR` AND lasts at least
+ * `minCandles` candles — i.e. price stayed range-bound rather than trending.
+ *
+ * The scan greedily extends the current window one candle at a time while the
+ * range bound still holds; when a candle would blow the band wider than the
+ * ATR bound, the window closes. It is emitted as a base only if it reached
+ * `minCandles`, and the scan then resumes from the breaking candle either way,
+ * so the returned bases are non-overlapping and ordered oldest-first. Reuses
+ * the same `atr()` + warmup-padded `atrAt[]` pattern as `sndZonesV2`.
+ */
+export function detectBases(
+  candles: Candle[],
+  minCandles: number,
+  atrPeriod: number,
+  rangeAtrMult = 2.5,
+): BaseRange[] {
+  const n = candles.length;
+  const atrPoints = atr(candles, atrPeriod);
+  if (atrPoints.length === 0) return [];
+  const atrAt = new Array<number>(n).fill(atrPoints[0].value);
+  for (let k = 0; k < atrPoints.length; k++) atrAt[atrPeriod + k] = atrPoints[k].value;
+
+  const bases: BaseRange[] = [];
+  let i = 0;
+  while (i < n) {
+    let hi = candles[i].high;
+    let lo = candles[i].low;
+    let j = i;
+    // Greedily extend while the window's whole range stays within the bound.
+    while (j + 1 < n) {
+      const nhi = Math.max(hi, candles[j + 1].high);
+      const nlo = Math.min(lo, candles[j + 1].low);
+      if (nhi - nlo > rangeAtrMult * atrAt[j + 1]) break;
+      hi = nhi;
+      lo = nlo;
+      j += 1;
+    }
+    const count = j - i + 1;
+    if (count >= minCandles) {
+      bases.push({
+        startTime: candles[i].time as UTCTimestamp,
+        endTime: candles[j].time as UTCTimestamp,
+        high: hi,
+        low: lo,
+        candles: count,
+      });
+    }
+    // Resume from the breaking candle (j + 1) either way: non-overlapping.
+    i = j + 1;
+  }
+  return bases;
 }
 
 export type PatternLabel =

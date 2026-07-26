@@ -15,6 +15,15 @@
      position's entry line reads as its own thing on the chart. */
   --color-buy: #42a5f5;
   --color-sell: #ff9800;
+  /* Categorical ramp for multi-series charts (per-bot equity curves, etc).
+     Fixed order — validated CVD-safe on the dark panel surface; assign in
+     this order and never cycle/reassign by rank. */
+  --color-series-1: #3987e5;
+  --color-series-2: #d95926;
+  --color-series-3: #199e70;
+  --color-series-4: #c98500;
+  --color-series-5: #d55181;
+  --color-series-6: #9085e9;
 }
 
 :root {
@@ -29,6 +38,12 @@
   --color-err: #ef5350;
   --color-buy: #42a5f5;
   --color-sell: #ff9800;
+  --color-series-1: #3987e5;
+  --color-series-2: #d95926;
+  --color-series-3: #199e70;
+  --color-series-4: #c98500;
+  --color-series-5: #d55181;
+  --color-series-6: #9085e9;
 }
 
 /* Color picker input custom styling */

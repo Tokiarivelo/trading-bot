@@ -13,6 +13,12 @@ from dataclasses import replace
 from typing import Literal
 
 from src.journal.adapters.repository import JournalRepository, OrderField, Outcome
+from src.journal.domain.analytics import (
+    BotAnalytics,
+    SymbolAnalytics,
+    compute_bot_analytics,
+    compute_symbol_analytics,
+)
 from src.journal.domain.models import TradeRecord
 from src.journal.ports.market_context import MarketContextPort
 from src.shared.events.bus import EventBus
@@ -53,6 +59,15 @@ class TradeJournalService:
             skill=event.skill,
             m5_entry_snapshot=snapshot.m5,
             h1_entry_snapshot=snapshot.h1,
+            reason=event.reason,
+            confidence=event.confidence,
+            zone_kind=event.zone_kind,
+            zone_price_low=event.zone_price_low,
+            zone_price_high=event.zone_price_high,
+            zone_time_start=event.zone_time_start,
+            zone_time_end=event.zone_time_end,
+            pattern=event.pattern,
+            structure=event.structure,
         )
         await asyncio.to_thread(self._repository.save, record, self._account_id)
         logger.info(
@@ -136,6 +151,14 @@ class TradeJournalService:
 
     async def get_open_trades(self, symbol: str | None = None) -> list[TradeRecord]:
         return await asyncio.to_thread(self._repository.get_open, symbol, self._account_id)
+
+    async def get_symbol_analytics(self) -> list[SymbolAnalytics]:
+        trades = await asyncio.to_thread(self._repository.get_all, self._account_id)
+        return compute_symbol_analytics(trades)
+
+    async def get_bot_analytics(self) -> list[BotAnalytics]:
+        trades = await asyncio.to_thread(self._repository.get_all, self._account_id)
+        return compute_bot_analytics(trades)
 
     async def search_trades(
         self,

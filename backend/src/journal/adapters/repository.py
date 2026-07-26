@@ -82,6 +82,15 @@ class JournalRepository:
         # the previous unbounded `order_by(open_time)` query returned.
         return [_to_domain(row) for row in reversed(rows)]
 
+    def get_all(self, account_id: str = "default") -> list[TradeRecord]:
+        """Every trade (open and closed) for the account — used for the
+        analytics dashboard's aggregation, which needs the full history to
+        group by symbol/bot rather than a bounded recent window."""
+        query = select(TradeRow).where(TradeRow.account_id == account_id)
+        with self._session_factory() as session:
+            rows = session.scalars(query).all()
+        return [_to_domain(row) for row in rows]
+
     def get_open(
         self, symbol: str | None = None, account_id: str = "default"
     ) -> list[TradeRecord]:
@@ -223,6 +232,21 @@ def _snapshot_from_json(data: list[dict] | None) -> tuple[CandleSnapshot, ...]:
     )
 
 
+def _structure_to_json(structure: tuple[tuple[str, float, datetime], ...]) -> list[dict]:
+    return [
+        {"label": label, "price": price, "time": int(time.timestamp())}
+        for label, price, time in structure
+    ]
+
+
+def _structure_from_json(data: list[dict] | None) -> tuple[tuple[str, float, datetime], ...]:
+    if not data:
+        return ()
+    return tuple(
+        (d["label"], d["price"], datetime.fromtimestamp(d["time"], tz=UTC)) for d in data
+    )
+
+
 def _to_row(record: TradeRecord, account_id: str) -> TradeRow:
     return TradeRow(
         id=record.id,
@@ -245,6 +269,17 @@ def _to_row(record: TradeRecord, account_id: str) -> TradeRow:
         h1_entry_snapshot=_snapshot_to_json(record.h1_entry_snapshot),
         m5_exit_snapshot=_snapshot_to_json(record.m5_exit_snapshot),
         h1_exit_snapshot=_snapshot_to_json(record.h1_exit_snapshot),
+        reason=record.reason,
+        confidence=record.confidence,
+        zone_kind=record.zone_kind,
+        zone_price_low=record.zone_price_low,
+        zone_price_high=record.zone_price_high,
+        zone_time_start=int(record.zone_time_start.timestamp())
+        if record.zone_time_start
+        else None,
+        zone_time_end=int(record.zone_time_end.timestamp()) if record.zone_time_end else None,
+        pattern=record.pattern,
+        structure=_structure_to_json(record.structure),
     )
 
 
@@ -269,4 +304,17 @@ def _to_domain(row: TradeRow) -> TradeRecord:
         h1_entry_snapshot=_snapshot_from_json(row.h1_entry_snapshot),
         m5_exit_snapshot=_snapshot_from_json(row.m5_exit_snapshot),
         h1_exit_snapshot=_snapshot_from_json(row.h1_exit_snapshot),
+        reason=row.reason,
+        confidence=row.confidence,
+        zone_kind=row.zone_kind,
+        zone_price_low=row.zone_price_low,
+        zone_price_high=row.zone_price_high,
+        zone_time_start=datetime.fromtimestamp(row.zone_time_start, tz=UTC)
+        if row.zone_time_start
+        else None,
+        zone_time_end=datetime.fromtimestamp(row.zone_time_end, tz=UTC)
+        if row.zone_time_end
+        else None,
+        pattern=row.pattern,
+        structure=_structure_from_json(row.structure),
     )

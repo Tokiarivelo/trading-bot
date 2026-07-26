@@ -6,8 +6,17 @@ from typing import Literal
 
 from fastapi import APIRouter, Query
 
-from src.journal.api.schemas import TradeHistoryPage, TradeRecordOut
+from src.journal.api.schemas import (
+    BotAnalyticsOut,
+    EquityPointOut,
+    StructurePointOut,
+    SymbolAnalyticsOut,
+    TradeHistoryPage,
+    TradeRecordOut,
+    ZoneOut,
+)
 from src.journal.application.trade_journal import TradeJournalService
+from src.journal.domain.analytics import BotAnalytics, SymbolAnalytics
 from src.journal.domain.models import TradeRecord
 from src.shared.api.dependencies import AccountRuntimeDep
 
@@ -19,6 +28,21 @@ def _service(account: AccountRuntimeDep) -> TradeJournalService:
 
 
 def _trade_out(record: TradeRecord) -> TradeRecordOut:
+    zone = (
+        ZoneOut(
+            kind=record.zone_kind,
+            price_low=record.zone_price_low,
+            price_high=record.zone_price_high,
+            time_start=int(record.zone_time_start.timestamp()),
+            time_end=int(record.zone_time_end.timestamp()),
+        )
+        if record.zone_kind is not None
+        and record.zone_price_low is not None
+        and record.zone_price_high is not None
+        and record.zone_time_start is not None
+        and record.zone_time_end is not None
+        else None
+    )
     return TradeRecordOut(
         id=record.id,
         symbol=record.symbol,
@@ -34,6 +58,14 @@ def _trade_out(record: TradeRecord) -> TradeRecordOut:
         comment=record.comment,
         strategy_version=record.strategy_version,
         skill=record.skill,
+        reason=record.reason,
+        confidence=record.confidence,
+        zone=zone,
+        pattern=record.pattern,
+        structure=[
+            StructurePointOut(label=label, price=price, time=int(time.timestamp()))
+            for label, price, time in record.structure
+        ],
     )
 
 
@@ -148,3 +180,102 @@ async def get_history(
         offset=offset,
     )
     return TradeHistoryPage(items=[_trade_out(r) for r in records], total=total)
+
+
+def _symbol_analytics_out(a: SymbolAnalytics) -> SymbolAnalyticsOut:
+    return SymbolAnalyticsOut(
+        symbol=a.symbol,
+        trade_count=a.trade_count,
+        open_count=a.open_count,
+        closed_count=a.closed_count,
+        win_count=a.win_count,
+        loss_count=a.loss_count,
+        breakeven_count=a.breakeven_count,
+        win_rate=a.win_rate,
+        total_profit=a.total_profit,
+        gross_profit=a.gross_profit,
+        gross_loss=a.gross_loss,
+        profit_factor=a.profit_factor,
+        avg_win=a.avg_win,
+        avg_loss=a.avg_loss,
+        avg_profit_per_trade=a.avg_profit_per_trade,
+        largest_win=a.largest_win,
+        largest_loss=a.largest_loss,
+        total_volume=a.total_volume,
+        bot_count=a.bot_count,
+        first_trade_time=a.first_trade_time,
+        last_trade_time=a.last_trade_time,
+    )
+
+
+def _bot_analytics_out(a: BotAnalytics) -> BotAnalyticsOut:
+    return BotAnalyticsOut(
+        skill=a.skill,
+        bot_name=a.bot_name,
+        symbol=a.symbol,
+        strategy_version=a.strategy_version,
+        trade_count=a.trade_count,
+        open_count=a.open_count,
+        closed_count=a.closed_count,
+        win_count=a.win_count,
+        loss_count=a.loss_count,
+        breakeven_count=a.breakeven_count,
+        win_rate=a.win_rate,
+        total_profit=a.total_profit,
+        gross_profit=a.gross_profit,
+        gross_loss=a.gross_loss,
+        profit_factor=a.profit_factor,
+        avg_win=a.avg_win,
+        avg_loss=a.avg_loss,
+        expectancy=a.expectancy,
+        largest_win=a.largest_win,
+        largest_loss=a.largest_loss,
+        max_drawdown=a.max_drawdown,
+        avg_trade_duration_seconds=a.avg_trade_duration_seconds,
+        first_trade_time=a.first_trade_time,
+        last_trade_time=a.last_trade_time,
+        equity_curve=[
+            EquityPointOut(
+                trade_id=p.trade_id,
+                close_time=p.close_time,
+                profit=p.profit,
+                cumulative_profit=p.cumulative_profit,
+            )
+            for p in a.equity_curve
+        ],
+    )
+
+
+@router.get(
+    "/analytics/symbols",
+    response_model=list[SymbolAnalyticsOut],
+    summary="Get per-symbol trading analytics",
+    description=(
+        "Aggregates every journaled trade (any bot, or manual) grouped by symbol: trade "
+        "counts, win rate, profit factor, gross/net profit, average win/loss, volume, and how "
+        "many distinct bots have traded it. Sorted by total_profit descending. Powers the "
+        "analytics dashboard's symbol comparison view — use `GET /journal/analytics/bots` "
+        "instead to compare individual bots rather than symbols."
+    ),
+)
+async def get_symbol_analytics(account: AccountRuntimeDep) -> list[SymbolAnalyticsOut]:
+    analytics = await _service(account).get_symbol_analytics()
+    return [_symbol_analytics_out(a) for a in analytics]
+
+
+@router.get(
+    "/analytics/bots",
+    response_model=list[BotAnalyticsOut],
+    summary="Get per-bot trading analytics and equity curves",
+    description=(
+        "Aggregates every journaled trade grouped by bot (`skill`): trade counts, win rate, "
+        "profit factor, expectancy, max drawdown, average trade duration, and a full "
+        "cumulative-profit equity curve. Sorted by total_profit descending, so the best- and "
+        "worst-performing bots sort to the ends. Trades placed manually or via the API (no "
+        "`skill`) are excluded, since they aren't attributable to any bot. Powers the analytics "
+        "dashboard's bot comparison and equity-curve charts."
+    ),
+)
+async def get_bot_analytics(account: AccountRuntimeDep) -> list[BotAnalyticsOut]:
+    analytics = await _service(account).get_bot_analytics()
+    return [_bot_analytics_out(a) for a in analytics]

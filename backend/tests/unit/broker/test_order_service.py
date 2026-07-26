@@ -180,6 +180,23 @@ async def test_open_position_fills_and_publishes_event():
     assert event.spread_points == 25
 
 
+async def test_open_position_passes_reason_and_confidence_to_event():
+    service, _, _, published = make_service()
+    await service.open_position(
+        "XAUUSD",
+        Side.BUY,
+        0.1,
+        sl=2390.0,
+        tp=2420.0,
+        comment="RBR retest",
+        reason="RBR base retest + M15 bullish engulf confirmation",
+        confidence=0.82,
+    )
+    event = published[0]
+    assert event.reason == "RBR base retest + M15 bullish engulf confirmation"
+    assert event.confidence == 0.82
+
+
 async def test_broker_rejection_propagates_and_is_logged(caplog):
     # Regression: a broker/MT5-level rejection (stops too close, market
     # closed, filling mode, ...) — as opposed to the spread/RR gate above —
