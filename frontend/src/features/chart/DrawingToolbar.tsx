@@ -152,6 +152,27 @@ const TOOLS: ToolDef[] = [
       </svg>
     ),
   },
+  {
+    type: "price-label",
+    label: "PL",
+    title: "Price Label — click to mark a price level with a badge",
+    icon: (
+      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
+        <path d="M2 4h7l4 4-4 4H2V4z" strokeLinejoin="round" />
+        <circle cx="5" cy="8" r="1" fill="currentColor" stroke="none" />
+      </svg>
+    ),
+  },
+  {
+    type: "text-annotation",
+    label: "TXT",
+    title: "Text Label — click to add a text annotation on the chart",
+    icon: (
+      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
+        <path d="M3 4h10M8 4v9M5 13h6" strokeLinecap="round" strokeLinejoin="round" />
+      </svg>
+    ),
+  },
 ];
 
 interface Props {

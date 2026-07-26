@@ -649,6 +649,16 @@ export function useCandleData(params: UseCandleDataParams): ChartRenderControlle
         if (!isCandleMessage(message)) return;
         if (!historyLoadedRef.current) return;
         const { candle } = message;
+        // The socket carries every open room's events on one connection —
+        // Socket.IO room scoping only filters what the *server* emits, not
+        // which of a client's several `.on(event, ...)` handlers a given
+        // message reaches. A multi-chart layout (this chart + `useMiniCandleData`
+        // instances) or the brief overlap window during a symbol/timeframe
+        // switch means this handler can be called with another room's candle.
+        // Without this check that candle gets spliced into `bars` and pushed
+        // into the chart series regardless of scale, producing exactly the
+        // out-of-order drops/crashes this file's other guards are catching.
+        if (candle.symbol !== symbol || candle.timeframe !== timeframe) return;
         const bars = candlesRef.current;
         const lastTime =
           bars.length > 0 ? bars[bars.length - 1].time : undefined;
@@ -786,12 +796,12 @@ export function useCandleData(params: UseCandleDataParams): ChartRenderControlle
 
     function recompute() {
       if (!chart || !container) {
-        setNewsBands([]);
+        setNewsBands((prev) => (prev.length === 0 ? prev : []));
         return;
       }
       const visible = chart.timeScale().getVisibleRange();
       if (!visible) {
-        setNewsBands([]);
+        setNewsBands((prev) => (prev.length === 0 ? prev : []));
         return;
       }
       const from = visible.from as number;
@@ -815,7 +825,23 @@ export function useCandleData(params: UseCandleDataParams): ChartRenderControlle
           phase: w.phase,
         });
       }
-      setNewsBands(bands);
+      setNewsBands((prev) => {
+        if (prev.length === 0 && bands.length === 0) return prev;
+        if (
+          prev.length === bands.length &&
+          prev.every(
+            (b, i) =>
+              b.key === bands[i].key &&
+              b.left === bands[i].left &&
+              b.width === bands[i].width &&
+              b.label === bands[i].label &&
+              b.phase === bands[i].phase,
+          )
+        ) {
+          return prev;
+        }
+        return bands;
+      });
     }
 
     function pollNews() {
@@ -826,7 +852,7 @@ export function useCandleData(params: UseCandleDataParams): ChartRenderControlle
           recompute();
         })
         .catch(() => {
-          if (!cancelled) setNewsBands([]);
+          if (!cancelled) setNewsBands((prev) => (prev.length === 0 ? prev : []));
         });
     }
 

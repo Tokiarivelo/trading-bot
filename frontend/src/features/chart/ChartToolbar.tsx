@@ -4,8 +4,10 @@ import {
   ChevronDown,
   ChevronsRight,
   Code,
+  Columns2,
   Eye,
   EyeOff,
+  Grid2x2,
   History,
   Layers,
   Pencil,
@@ -74,6 +76,10 @@ export interface ChartToolbarProps {
   drawingTool: DrawingToolType | null;
   pendingAnchorCount: number;
   spreadPoints: number | null;
+
+  // Split-window controls (when rendered as master toolbar in MultiChartLayout)
+  windowCount?: number;
+  onSelectWindowCount?: (count: number) => void;
 }
 
 /** Top toolbar row of the chart panel: symbol tag, timeframe pills/dropdown,
@@ -121,11 +127,62 @@ export const ChartToolbar = memo(function ChartToolbar({
   drawingTool,
   pendingAnchorCount,
   spreadPoints,
+  windowCount,
+  onSelectWindowCount,
 }: ChartToolbarProps) {
   return (
     <header className='flex items-center justify-between flex-wrap gap-2 border-b border-line bg-panel/90 px-3 py-1.5 backdrop-blur-sm z-20'>
       {/* Left Section: Symbol, Timeframes, Navigation */}
       <div className='flex items-center gap-2 flex-wrap'>
+        {/* Split Window Selector */}
+        {onSelectWindowCount && (
+          <>
+            <div className='flex items-center bg-bg/70 border border-line rounded-md p-0.5 text-xs shadow-2xs'>
+              <button
+                type='button'
+                onClick={() => onSelectWindowCount(1)}
+                title='Single chart'
+                className={`cursor-pointer rounded p-1 transition-all ${
+                  windowCount === 1 ? 'bg-accent text-white shadow-xs font-bold' : 'text-ink-muted hover:text-accent hover:bg-line/40'
+                }`}
+              >
+                <Square size={14} />
+              </button>
+              <button
+                type='button'
+                onClick={() => onSelectWindowCount(2)}
+                title='Split into 2 windows'
+                className={`cursor-pointer rounded p-1 transition-all ${
+                  windowCount === 2 ? 'bg-accent text-white shadow-xs font-bold' : 'text-ink-muted hover:text-accent hover:bg-line/40'
+                }`}
+              >
+                <Columns2 size={14} />
+              </button>
+              <button
+                type='button'
+                onClick={() => onSelectWindowCount(3)}
+                title='Split into 3 windows'
+                className={`cursor-pointer rounded px-1.5 py-0.5 text-[11px] font-bold transition-all ${
+                  windowCount === 3 ? 'bg-accent text-white shadow-xs' : 'text-ink-muted hover:text-accent hover:bg-line/40'
+                }`}
+              >
+                3
+              </button>
+              <button
+                type='button'
+                onClick={() => onSelectWindowCount(4)}
+                title='Split into 4 windows'
+                className={`cursor-pointer rounded p-1 transition-all ${
+                  windowCount === 4 ? 'bg-accent text-white shadow-xs font-bold' : 'text-ink-muted hover:text-accent hover:bg-line/40'
+                }`}
+              >
+                <Grid2x2 size={14} />
+              </button>
+            </div>
+            <div className='h-4 w-px bg-line/60 mx-0.5 hidden sm:block' />
+          </>
+        )}
+
         {/* Symbol Tag */}
         <div className='flex items-center gap-1.5 font-bold text-xs text-ink bg-line/40 border border-line/60 rounded px-2.5 py-1 select-none shadow-2xs'>
           <span className='tracking-wide'>{symbol}</span>

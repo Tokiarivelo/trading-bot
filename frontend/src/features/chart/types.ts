@@ -27,11 +27,16 @@ export type ManualIndicatorType =
   | 'patterns'
   | 'custom';
 
+export type IndicatorLineStyle = 'solid' | 'dashed' | 'dotted';
+export type IndicatorLineWidth = 1 | 2 | 3 | 4;
+
 export interface ManualIndicator {
   id: string;
   type: ManualIndicatorType;
   period: number;
   color: string;
+  lineStyle?: IndicatorLineStyle;
+  lineWidth?: IndicatorLineWidth;
   label: string;
   /** Set only when type === 'custom': the saved backend indicator's id
    * (GET /indicators/{id}) whose compute() output this instance plots.
@@ -54,18 +59,59 @@ export type DrawingToolType =
   | 'parallel-channel'
   | 'circle'
   | 'long-position'
-  | 'short-position';
+  | 'short-position'
+  | 'price-label'
+  | 'text-annotation';
 
 /** Multi-chart layout (split-window §): the primary ChartPanel's replay
  * session/cursor, mirrored into secondary MiniChartPanel windows so they
  * follow the same replayed period at their own timeframe. `sessionPeriod` is
- * null both while not replaying and during a backtest-report replay (which
- * has no explicit from/to, only a report id) — secondary windows treat both
- * the same way: nothing to sync, fall back to their own live view. */
+ * an ad-hoc session replay's picked from/to, or — while viewing a saved
+ * backtest report — that report's own trades'/signals' time bounds
+ * (`useBacktestData.ts`'s `backtestPeriod`); either way secondary windows
+ * fetch and cursor-clip it the same way. Null only while nothing is being
+ * replayed (or during the live-bot eye view), meaning secondary windows have
+ * nothing to sync to and fall back to their own live view. */
 export interface SharedReplaySession {
   active: boolean;
   sessionPeriod: { from: number; to: number } | null;
   cursorTime: number | null;
+  /** In multi-window layouts, identifies which window index initiated and drives the master replay clock. */
+  masterIndex?: number;
+}
+
+export interface ReplayUIState {
+  showPicker: boolean;
+  pickerProps: {
+    fromValue: string;
+    toValue: string;
+    onFromChange: (val: string) => void;
+    onToChange: (val: string) => void;
+    estimate: {
+      candles: number;
+      pages: number;
+      level: 'ok' | 'warn' | 'block';
+    } | null;
+    onCancel: () => void;
+    onStart: () => void;
+  } | null;
+  sessionPeriod: { from: number; to: number } | null;
+  loadingPage: { page: number; loaded: number } | null;
+  replayActive: boolean;
+  replayControlsProps: {
+    playing: boolean;
+    onPlayPause: () => void;
+    onStepBack: () => void;
+    onStepForward: () => void;
+    speed: number;
+    onSpeedChange: (speed: number) => void;
+    cursorIndex: number;
+    totalBars: number;
+    currentTime: string;
+    onSeek: (index: number) => void;
+    following: boolean;
+    onRecenter: () => void;
+  } | null;
 }
 
 export interface NewsBand {

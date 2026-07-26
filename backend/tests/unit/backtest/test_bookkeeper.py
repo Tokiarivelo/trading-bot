@@ -56,6 +56,8 @@ async def test_zone_pattern_structure_survive_open_to_close():
             zone_time_end=T_OPEN,
             pattern="bullish_engulfing",
             structure=(("HH", 105.0, ZONE_START), ("LL", 95.0, T_OPEN)),
+            reason="demand zone retest + bullish engulfing confirmation",
+            confidence=0.82,
         )
     )
     clock_box["now"] = T_CLOSE
@@ -74,6 +76,8 @@ async def test_zone_pattern_structure_survive_open_to_close():
     assert trade.zone.time_end == T_OPEN
     assert trade.pattern == "bullish_engulfing"
     assert trade.structure == (("HH", 105.0, ZONE_START), ("LL", 95.0, T_OPEN))
+    assert trade.reason == "demand zone retest + bullish engulfing confirmation"
+    assert trade.confidence == 0.82
 
 
 @pytest.mark.asyncio
@@ -101,3 +105,5 @@ async def test_no_zone_defaults_to_none():
     assert trade.zone is None
     assert trade.pattern is None
     assert trade.structure == ()
+    assert trade.reason == ""
+    assert trade.confidence is None

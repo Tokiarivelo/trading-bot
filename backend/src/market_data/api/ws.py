@@ -51,11 +51,12 @@ _candle_streams: dict[str, CandleStreamService] = {}
 _live_candles: dict[str, LiveCandleService] = {}
 _session_issuer: SessionTokenIssuer | None = None
 _password_getter: Callable[[], str] | None = None
-# Rooms each connected client currently has open — needed to unwatch the
-# right symbols/rooms on disconnect, since Socket.IO leaves rooms
-# automatically but doesn't tell us what to release on our side.
-_sid_symbols: dict[str, set[tuple[str, str]]] = {}
-_sid_rooms: dict[str, set[tuple[str, str, Timeframe]]] = {}
+# Rooms and symbols each connected client currently has open, ref-counted per sid
+# so that closing or switching timeframes on one window in a multi-window layout
+# does not unwatch a symbol or leave a room while another window on the same
+# connection is actively streaming it.
+_sid_symbols: dict[str, dict[tuple[str, str], int]] = {}
+_sid_rooms: dict[str, dict[tuple[str, str, Timeframe], int]] = {}
 
 
 def bind_candle_stream(account_id: str, candle_stream: CandleStreamService) -> None:
@@ -116,16 +117,18 @@ async def disconnect(sid: str) -> None:
     logger.info("ws client disconnected sid=%s", sid)
     symbols = _sid_symbols.pop(sid, None)
     if symbols:
-        for account_id, symbol in symbols:
-            candle_stream = _candle_streams.get(account_id)
-            if candle_stream is not None:
-                candle_stream.unwatch(symbol)
+        for (account_id, symbol), count in symbols.items():
+            if count > 0:
+                candle_stream = _candle_streams.get(account_id)
+                if candle_stream is not None:
+                    candle_stream.unwatch(symbol)
     rooms = _sid_rooms.pop(sid, None)
     if rooms:
-        for account_id, symbol, timeframe in rooms:
-            live_candle = _live_candles.get(account_id)
-            if live_candle is not None:
-                live_candle.unwatch(symbol, timeframe)
+        for (account_id, symbol, timeframe), count in rooms.items():
+            if count > 0:
+                live_candle = _live_candles.get(account_id)
+                if live_candle is not None:
+                    live_candle.unwatch(symbol, timeframe)
 
 
 @sio.on("subscribe")
@@ -149,18 +152,18 @@ async def subscribe(sid: str, data: dict[str, str]) -> None:
     room = _room(account_id, symbol, timeframe.value)
     await sio.enter_room(sid, room)
 
-    sid_symbols = _sid_symbols.setdefault(sid, set())
+    sid_symbols = _sid_symbols.setdefault(sid, {})
     symbol_key = (account_id, symbol)
-    if symbol_key not in sid_symbols:
-        sid_symbols.add(symbol_key)
+    sid_symbols[symbol_key] = sid_symbols.get(symbol_key, 0) + 1
+    if sid_symbols[symbol_key] == 1:
         candle_stream = _candle_streams.get(account_id)
         if candle_stream is not None:
             candle_stream.watch(symbol)
 
-    sid_rooms = _sid_rooms.setdefault(sid, set())
+    sid_rooms = _sid_rooms.setdefault(sid, {})
     room_key = (account_id, symbol, timeframe)
-    if room_key not in sid_rooms:
-        sid_rooms.add(room_key)
+    sid_rooms[room_key] = sid_rooms.get(room_key, 0) + 1
+    if sid_rooms[room_key] == 1:
         live_candle = _live_candles.get(account_id)
         if live_candle is not None:
             live_candle.watch(symbol, timeframe)
@@ -182,23 +185,29 @@ async def unsubscribe(sid: str, data: dict[str, str]) -> None:
     symbol = data["symbol"]
     timeframe = Timeframe(data["timeframe"])
     room = _room(account_id, symbol, timeframe.value)
-    await sio.leave_room(sid, room)
-
-    sid_symbols = _sid_symbols.get(sid)
-    symbol_key = (account_id, symbol)
-    if sid_symbols and symbol_key in sid_symbols:
-        sid_symbols.discard(symbol_key)
-        candle_stream = _candle_streams.get(account_id)
-        if candle_stream is not None:
-            candle_stream.unwatch(symbol)
 
     sid_rooms = _sid_rooms.get(sid)
     room_key = (account_id, symbol, timeframe)
     if sid_rooms and room_key in sid_rooms:
-        sid_rooms.discard(room_key)
-        live_candle = _live_candles.get(account_id)
-        if live_candle is not None:
-            live_candle.unwatch(symbol, timeframe)
+        sid_rooms[room_key] -= 1
+        if sid_rooms[room_key] <= 0:
+            del sid_rooms[room_key]
+            await sio.leave_room(sid, room)
+            live_candle = _live_candles.get(account_id)
+            if live_candle is not None:
+                live_candle.unwatch(symbol, timeframe)
+    else:
+        await sio.leave_room(sid, room)
+
+    sid_symbols = _sid_symbols.get(sid)
+    symbol_key = (account_id, symbol)
+    if sid_symbols and symbol_key in sid_symbols:
+        sid_symbols[symbol_key] -= 1
+        if sid_symbols[symbol_key] <= 0:
+            del sid_symbols[symbol_key]
+            candle_stream = _candle_streams.get(account_id)
+            if candle_stream is not None:
+                candle_stream.unwatch(symbol)
 
 
 class WsBroadcaster:

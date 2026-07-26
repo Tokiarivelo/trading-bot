@@ -11,6 +11,8 @@ import {
   Circle,
   LongPosition,
   ShortPosition,
+  PriceLabel,
+  TextAnnotation,
 } from 'lightweight-charts-drawing';
 import type {
   BacktestSignal,
@@ -55,6 +57,10 @@ export function createDrawingInstance(
       return new LongPosition(id, anchors, style);
     case 'short-position':
       return new ShortPosition(id, anchors, style);
+    case 'price-label':
+      return new PriceLabel(id, anchors, style);
+    case 'text-annotation':
+      return new TextAnnotation(id, anchors, style, { text: 'Label', fontSize: 14 });
     default:
       return null;
   }

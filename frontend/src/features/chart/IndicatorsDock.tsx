@@ -28,7 +28,12 @@ import {
   listIndicators,
   type IndicatorSummary,
 } from '@/shared/api/client';
-import type { ManualIndicator, ManualIndicatorType } from './types';
+import type {
+  IndicatorLineStyle,
+  IndicatorLineWidth,
+  ManualIndicator,
+  ManualIndicatorType,
+} from './types';
 import { IndicatorCodePeek } from './IndicatorCodePeek';
 
 const PRESET_COLORS = [
@@ -129,15 +134,18 @@ interface Props {
   indicators: ManualIndicator[];
   onAdd: (indicator: ManualIndicator) => void;
   onRemove: (id: string) => void;
+  onUpdate?: (id: string, patch: Partial<ManualIndicator>) => void;
   /** Called after the code-peek panel saves an edit to a saved indicator's
    * code, so the chart can recompute every chip currently using it. */
   onCustomIndicatorCodeSaved: () => void;
 }
 
-export function IndicatorsDock({ indicators, onAdd, onRemove, onCustomIndicatorCodeSaved }: Props) {
+export function IndicatorsDock({ indicators, onAdd, onRemove, onUpdate, onCustomIndicatorCodeSaved }: Props) {
   const [type, setType] = useState<ManualIndicatorType>("ema");
   const [period, setPeriod] = useState<number>(TYPE_DEFAULTS.ema.period);
   const [color, setColor] = useState<string>(PRESET_COLORS[0]);
+  const [lineStyle, setLineStyle] = useState<IndicatorLineStyle>("solid");
+  const [lineWidth, setLineWidth] = useState<IndicatorLineWidth>(1);
   const [customIndicators, setCustomIndicators] = useState<IndicatorSummary[]>([]);
   const [selectedCustomId, setSelectedCustomId] = useState<string | null>(null);
   const [peekIndicator, setPeekIndicator] = useState<{ id: string; name: string } | null>(null);
@@ -181,6 +189,8 @@ export function IndicatorsDock({ indicators, onAdd, onRemove, onCustomIndicatorC
         type,
         period: 0,
         color,
+        lineStyle,
+        lineWidth,
         label: chosen.name,
         indicatorId: chosen.id,
       });
@@ -192,6 +202,8 @@ export function IndicatorsDock({ indicators, onAdd, onRemove, onCustomIndicatorC
       type,
       period: resolvedPeriod,
       color,
+      lineStyle,
+      lineWidth,
       label: indicatorLabel(type, resolvedPeriod),
     });
   }
@@ -209,6 +221,8 @@ export function IndicatorsDock({ indicators, onAdd, onRemove, onCustomIndicatorC
       type: 'custom',
       period: 0,
       color,
+      lineStyle,
+      lineWidth,
       label: 'Preview (unsaved)',
       previewCode: newCode,
     });
@@ -229,6 +243,8 @@ export function IndicatorsDock({ indicators, onAdd, onRemove, onCustomIndicatorC
         type: 'custom',
         period: 0,
         color,
+        lineStyle,
+        lineWidth,
         label: created.name,
         indicatorId: created.id,
       });
@@ -362,6 +378,33 @@ export function IndicatorsDock({ indicators, onAdd, onRemove, onCustomIndicatorC
           />
         </div>
 
+        <label style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 11, color: "var(--color-ink-muted)" }}>
+          Type
+          <select
+            value={lineStyle}
+            onChange={(e) => setLineStyle(e.target.value as IndicatorLineStyle)}
+            className="cursor-pointer rounded border border-line bg-panel px-1.5 py-1 text-xs text-ink"
+          >
+            <option value="solid">Solid</option>
+            <option value="dashed">Dashed</option>
+            <option value="dotted">Dotted</option>
+          </select>
+        </label>
+
+        <label style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 11, color: "var(--color-ink-muted)" }}>
+          Size
+          <select
+            value={lineWidth}
+            onChange={(e) => setLineWidth(Number(e.target.value) as IndicatorLineWidth)}
+            className="cursor-pointer rounded border border-line bg-panel px-1.5 py-1 text-xs text-ink"
+          >
+            <option value={1}>1px</option>
+            <option value={2}>2px</option>
+            <option value={3}>3px</option>
+            <option value={4}>4px</option>
+          </select>
+        </label>
+
         {!writingNewCode && (
           <button
             onClick={handleAdd}
@@ -471,16 +514,44 @@ export function IndicatorsDock({ indicators, onAdd, onRemove, onCustomIndicatorC
                 color: "var(--color-ink)",
               }}
             >
-              <span
+              <input
+                type="color"
+                value={ind.color}
+                onChange={(e) => onUpdate?.(ind.id, { color: e.target.value })}
+                title="Change color"
+                className="cursor-pointer"
                 style={{
-                  width: 8,
-                  height: 8,
+                  width: 14,
+                  height: 14,
+                  border: "none",
+                  padding: 0,
+                  background: "transparent",
                   borderRadius: "50%",
-                  backgroundColor: ind.color,
                   flexShrink: 0,
                 }}
               />
-              {ind.label}
+              <span>{ind.label}</span>
+              <select
+                value={ind.lineStyle ?? 'solid'}
+                onChange={(e) => onUpdate?.(ind.id, { lineStyle: e.target.value as IndicatorLineStyle })}
+                className="cursor-pointer rounded border border-line bg-panel px-1 py-0 text-[10px] text-ink-muted hover:text-ink"
+                title="Line style"
+              >
+                <option value="solid">Solid</option>
+                <option value="dashed">Dashed</option>
+                <option value="dotted">Dotted</option>
+              </select>
+              <select
+                value={ind.lineWidth ?? 1}
+                onChange={(e) => onUpdate?.(ind.id, { lineWidth: Number(e.target.value) as IndicatorLineWidth })}
+                className="cursor-pointer rounded border border-line bg-panel px-1 py-0 text-[10px] text-ink-muted hover:text-ink"
+                title="Line thickness"
+              >
+                <option value={1}>1px</option>
+                <option value={2}>2px</option>
+                <option value={3}>3px</option>
+                <option value={4}>4px</option>
+              </select>
               {ind.type === "custom" && ind.indicatorId && (
                 <button
                   title="View/edit this indicator's code"

@@ -15,6 +15,8 @@ export const REQUIRED_ANCHORS: Record<DrawingToolType, number> = {
   circle: 2,
   'long-position': 3,
   'short-position': 3,
+  'price-label': 1,
+  'text-annotation': 1,
 };
 
 export const TIMEFRAMES: Candle['timeframe'][] = [

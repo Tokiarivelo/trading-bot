@@ -11,6 +11,8 @@ import {
   Circle,
   LongPosition,
   ShortPosition,
+  PriceLabel,
+  TextAnnotation,
 } from 'lightweight-charts-drawing';
 import type { Candle } from '@/shared/api/client';
 import type { ManualIndicator, OrderLineStyle } from './types';
@@ -96,6 +98,10 @@ export function loadDrawingsFromStorage(
           return new LongPosition(d.id, d.anchors, d.style, d.options);
         case 'short-position':
           return new ShortPosition(d.id, d.anchors, d.style, d.options);
+        case 'price-label':
+          return new PriceLabel(d.id, d.anchors, d.style, d.options);
+        case 'text-annotation':
+          return new TextAnnotation(d.id, d.anchors, d.style, d.options);
         default:
           return null;
       }

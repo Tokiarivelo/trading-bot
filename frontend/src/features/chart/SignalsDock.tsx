@@ -9,19 +9,59 @@
  */
 
 import { useState } from "react";
-import { Clock, Search, MapPin } from "lucide-react";
+import { Clock, Search, MapPin, HelpCircle } from "lucide-react";
 import { SIGNAL_OUTCOME_META } from "@/features/backtest/signalOutcome";
-import type { BacktestSignal, BacktestTrade, IndicatorSpec } from "@/shared/api/client";
+import { TradeDecisionModal } from "@/shared/ui/TradeDecisionModal";
+import type {
+  BacktestSignal,
+  BacktestTrade,
+  IndicatorSpec,
+  TradeHistoryItem,
+} from "@/shared/api/client";
+
+/** Builds the `TradeHistoryItem` shape `TradeDecisionModal` expects (shared
+ * with the live Active Orders/History tables) out of a backtest report's
+ * `BacktestTrade` + the report's own strategy/symbol — the "Why" button's
+ * only consumer, so the synthesized object never leaves this module. */
+function toTradeHistoryItem(
+  trade: BacktestTrade,
+  index: number,
+  meta: { strategy: string; symbol: string } | null,
+): TradeHistoryItem {
+  return {
+    id: String(index),
+    symbol: meta?.symbol ?? "",
+    side: trade.side as "buy" | "sell",
+    volume: trade.volume,
+    open_price: trade.open_price,
+    open_time: trade.open_time,
+    sl: trade.sl,
+    tp: trade.tp,
+    close_price: trade.close_price,
+    close_time: trade.close_time,
+    profit: trade.profit,
+    comment: "",
+    strategy_version: meta?.strategy ?? null,
+    skill: null,
+    reason: trade.reason,
+    confidence: trade.confidence,
+    zone: trade.zone,
+    pattern: trade.pattern,
+    structure: trade.structure,
+  };
+}
 
 export function SignalsDock({
   signals,
   trades,
   indicators,
+  backtestMeta = null,
   selectedTradeIndex = null,
   onSelectTrade,
   onNavigateTrade,
   selectedSignalIndex = null,
   onSelectSignal,
+  replayCursorTime = null,
 }: {
   signals: BacktestSignal[];
   trades: BacktestTrade[];
@@ -29,6 +69,10 @@ export function SignalsDock({
    * — undefined hides the tab entirely (e.g. no version resolved yet), an
    * empty array shows the tab with an empty state. */
   indicators?: IndicatorSpec[];
+  /** The report's own strategy/symbol — fed to the "Why" button's
+   * `TradeDecisionModal`. Null hides nothing (the modal just shows "—" for
+   * strategy), only used for display. */
+  backtestMeta?: { strategy: string; symbol: string } | null;
   /** Index (into the original, unsorted `trades` array) of the trade
    * currently highlighted on the chart with entry/SL/TP/close lines — drives
    * this row's selected style. Null when nothing's selected. */
@@ -46,7 +90,15 @@ export function SignalsDock({
   /** Row click: toggles the signal's chart highlight off if it's already
    * selected, otherwise selects it and jumps the chart to its time. */
   onSelectSignal?: (index: number) => void;
+  /** The replay cursor bar's time while replaying a backtest report — null
+   * outside replay (or the live-bot eye view). When set, the Trades tab
+   * splits into "Active orders" (opened, not yet closed as of the cursor)
+   * and "History" (closed as of the cursor), same labels as the live
+   * Active Orders panel, and hides trades not yet opened — the same
+   * "no lookahead" contract the chart's own markers already enforce. */
+  replayCursorTime?: number | null;
 }) {
+  const [whyTrade, setWhyTrade] = useState<TradeHistoryItem | null>(null);
   const [activeTab, setActiveTab] = useState<"signals" | "trades" | "indicators">("signals");
   
   // Search & Filter state
@@ -79,6 +131,25 @@ export function SignalsDock({
       return true;
     })
     .sort((a, b) => b.open_time - a.open_time);
+
+  // While replaying, hide trades the strategy hasn't opened yet as of the
+  // cursor (same "no lookahead" contract the chart's own markers enforce —
+  // see useBacktestData.ts) and split the rest into "Active orders"
+  // (opened, not yet closed) vs "History" (closed) — same two labels the
+  // live Active Orders panel uses. Outside replay, `replayCursorTime` is
+  // null and everything renders as one flat list, unchanged from before.
+  const visibleTrades =
+    replayCursorTime === null
+      ? filteredTrades
+      : filteredTrades.filter((t) => t.open_time <= replayCursorTime);
+  const activeTrades =
+    replayCursorTime === null
+      ? []
+      : visibleTrades.filter((t) => t.close_time > replayCursorTime);
+  const historyTrades =
+    replayCursorTime === null
+      ? visibleTrades
+      : visibleTrades.filter((t) => t.close_time <= replayCursorTime);
 
   return (
     <div className="w-[340px] border-l border-line bg-panel flex flex-col h-full shrink-0 min-w-0">
@@ -270,95 +341,183 @@ export function SignalsDock({
               })}
             </ul>
           )
+        ) : filteredTrades.length === 0 ? (
+          <p className="px-3 py-4 text-xs text-ink-muted text-center">
+            {trades.length === 0
+              ? "No trades recorded for this report."
+              : "No matching trades found."}
+          </p>
+        ) : replayCursorTime === null ? (
+          <ul className="divide-y divide-line">
+            {historyTrades.map((t) => (
+              <TradeCard
+                key={`${t.open_time}-${t.originalIndex}`}
+                trade={t}
+                isOpen={false}
+                selected={selectedTradeIndex === t.originalIndex}
+                onSelect={() => onSelectTrade?.(t.originalIndex)}
+                onNavigate={(time) => onNavigateTrade?.(t.originalIndex, time)}
+                onWhy={() => setWhyTrade(toTradeHistoryItem(t, t.originalIndex, backtestMeta))}
+              />
+            ))}
+          </ul>
         ) : (
-          filteredTrades.length === 0 ? (
-            <p className="px-3 py-4 text-xs text-ink-muted text-center">
-              {trades.length === 0
-                ? "No trades recorded for this report."
-                : "No matching trades found."}
-            </p>
-          ) : (
-            <ul className="divide-y divide-line">
-              {filteredTrades.map((t) => (
-                <li key={`${t.open_time}-${t.originalIndex}`}>
-                  <div
-                    onClick={() => onSelectTrade?.(t.originalIndex)}
-                    title="Highlight this trade's entry/SL/TP/close on the chart"
-                    className={`p-2.5 hover:bg-accent/5 transition-colors flex flex-col gap-1.5 relative border-l-2 cursor-pointer ${
-                      selectedTradeIndex === t.originalIndex
-                        ? "bg-accent/10 border-accent"
-                        : "border-transparent"
-                    }`}
-                  >
-                    {/* Header info */}
-                    <div className="flex items-center gap-1.5 text-[10px] text-ink-muted">
-                      <span className="font-semibold text-ink">
-                        Trade #{t.originalIndex + 1}
-                      </span>
-                      <span>•</span>
-                      <span>{formatTime(t.open_time)}</span>
-                      <span className={`ml-auto font-mono font-bold ${t.profit >= 0 ? "text-ok" : "text-err"}`}>
-                        {t.profit >= 0 ? "+" : ""}{t.profit.toFixed(2)} USD
-                      </span>
-                    </div>
-
-                    {/* Volume and price */}
-                    <div className="flex items-center gap-1.5">
-                      <span className={`text-[10px] font-bold px-1 rounded ${
-                        t.side === "buy"
-                          ? "bg-ok/10 text-ok border border-ok/20"
-                          : "bg-err/10 text-err border border-err/20"
-                      }`}>
-                        {t.side.toUpperCase()}
-                      </span>
-                      <span className="text-[11px] text-ink-muted">
-                        {t.volume.toFixed(2)} lots @ {t.open_price.toFixed(2)}
-                      </span>
-                      {t.r_multiple !== null && (
-                        <span className="text-[10px] font-medium px-1 rounded bg-panel-dark/50 border border-line">
-                          {t.r_multiple.toFixed(1)} R
-                        </span>
-                      )}
-                    </div>
-
-                    {/* Pattern/Reason if present */}
-                    {t.pattern && (
-                      <div className="text-[10px] text-ink-muted truncate font-mono bg-panel-dark/30 p-1.5 rounded border border-line/30">
-                        {t.pattern}
-                      </div>
-                    )}
-
-                    {/* Navigation buttons */}
-                    <div className="flex items-center gap-1.5 mt-1 border-t border-line/25 pt-1.5">
-                      <button
-                        type="button"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          onNavigateTrade?.(t.originalIndex, t.open_time);
-                        }}
-                        className="flex-1 py-1 px-2 rounded bg-panel border border-line text-[10px] text-ink hover:text-accent hover:border-accent transition-colors flex items-center justify-center gap-1 cursor-pointer"
-                      >
-                        <MapPin size={10} /> Entry
-                      </button>
-                      <button
-                        type="button"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          onNavigateTrade?.(t.originalIndex, t.close_time);
-                        }}
-                        className="flex-1 py-1 px-2 rounded bg-panel border border-line text-[10px] text-ink hover:text-accent hover:border-accent transition-colors flex items-center justify-center gap-1 cursor-pointer"
-                      >
-                        <MapPin size={10} /> Exit
-                      </button>
-                    </div>
-                  </div>
-                </li>
-              ))}
-            </ul>
-          )
+          <>
+            <div className="px-2.5 py-1.5 text-[10px] font-bold uppercase tracking-wider text-ink-muted bg-panel-dark/30 sticky top-0">
+              Active orders ({activeTrades.length})
+            </div>
+            {activeTrades.length === 0 ? (
+              <p className="px-3 py-3 text-xs text-ink-muted text-center">Nothing open yet.</p>
+            ) : (
+              <ul className="divide-y divide-line">
+                {activeTrades.map((t) => (
+                  <TradeCard
+                    key={`${t.open_time}-${t.originalIndex}`}
+                    trade={t}
+                    isOpen
+                    selected={selectedTradeIndex === t.originalIndex}
+                    onSelect={() => onSelectTrade?.(t.originalIndex)}
+                    onNavigate={(time) => onNavigateTrade?.(t.originalIndex, time)}
+                    onWhy={() => setWhyTrade(toTradeHistoryItem(t, t.originalIndex, backtestMeta))}
+                  />
+                ))}
+              </ul>
+            )}
+            <div className="px-2.5 py-1.5 text-[10px] font-bold uppercase tracking-wider text-ink-muted bg-panel-dark/30 sticky top-0">
+              History ({historyTrades.length})
+            </div>
+            {historyTrades.length === 0 ? (
+              <p className="px-3 py-3 text-xs text-ink-muted text-center">Nothing closed yet.</p>
+            ) : (
+              <ul className="divide-y divide-line">
+                {historyTrades.map((t) => (
+                  <TradeCard
+                    key={`${t.open_time}-${t.originalIndex}`}
+                    trade={t}
+                    isOpen={false}
+                    selected={selectedTradeIndex === t.originalIndex}
+                    onSelect={() => onSelectTrade?.(t.originalIndex)}
+                    onNavigate={(time) => onNavigateTrade?.(t.originalIndex, time)}
+                    onWhy={() => setWhyTrade(toTradeHistoryItem(t, t.originalIndex, backtestMeta))}
+                  />
+                ))}
+              </ul>
+            )}
+          </>
         )}
       </div>
+      {whyTrade && <TradeDecisionModal trade={whyTrade} onClose={() => setWhyTrade(null)} />}
     </div>
+  );
+}
+
+function TradeCard({
+  trade: t,
+  isOpen,
+  selected,
+  onSelect,
+  onNavigate,
+  onWhy,
+}: {
+  trade: BacktestTrade & { originalIndex: number };
+  /** True while replaying and this trade hasn't closed as of the cursor yet
+   * — shows an "OPEN" badge instead of the (not yet known) profit. */
+  isOpen: boolean;
+  selected: boolean;
+  onSelect: () => void;
+  onNavigate: (time: number) => void;
+  onWhy: () => void;
+}) {
+  return (
+    <li>
+      <div
+        onClick={onSelect}
+        title="Highlight this trade's entry/SL/TP/close on the chart"
+        className={`p-2.5 hover:bg-accent/5 transition-colors flex flex-col gap-1.5 relative border-l-2 cursor-pointer ${
+          selected ? "bg-accent/10 border-accent" : "border-transparent"
+        }`}
+      >
+        {/* Header info */}
+        <div className="flex items-center gap-1.5 text-[10px] text-ink-muted">
+          <span className="font-semibold text-ink">Trade #{t.originalIndex + 1}</span>
+          <span>•</span>
+          <span>{formatTime(t.open_time)}</span>
+          {isOpen ? (
+            <span className="ml-auto font-mono font-bold text-accent">OPEN</span>
+          ) : (
+            <span className={`ml-auto font-mono font-bold ${t.profit >= 0 ? "text-ok" : "text-err"}`}>
+              {t.profit >= 0 ? "+" : ""}
+              {t.profit.toFixed(2)} USD
+            </span>
+          )}
+        </div>
+
+        {/* Volume and price */}
+        <div className="flex items-center gap-1.5">
+          <span
+            className={`text-[10px] font-bold px-1 rounded ${
+              t.side === "buy"
+                ? "bg-ok/10 text-ok border border-ok/20"
+                : "bg-err/10 text-err border border-err/20"
+            }`}
+          >
+            {t.side.toUpperCase()}
+          </span>
+          <span className="text-[11px] text-ink-muted">
+            {t.volume.toFixed(2)} lots @ {t.open_price.toFixed(2)}
+          </span>
+          {!isOpen && t.r_multiple !== null && (
+            <span className="text-[10px] font-medium px-1 rounded bg-panel-dark/50 border border-line">
+              {t.r_multiple.toFixed(1)} R
+            </span>
+          )}
+        </div>
+
+        {/* Pattern/Reason if present */}
+        {t.pattern && (
+          <div className="text-[10px] text-ink-muted truncate font-mono bg-panel-dark/30 p-1.5 rounded border border-line/30">
+            {t.pattern}
+          </div>
+        )}
+
+        {/* Navigation buttons */}
+        <div className="flex items-center gap-1.5 mt-1 border-t border-line/25 pt-1.5">
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              onNavigate(t.open_time);
+            }}
+            className="flex-1 py-1 px-2 rounded bg-panel border border-line text-[10px] text-ink hover:text-accent hover:border-accent transition-colors flex items-center justify-center gap-1 cursor-pointer"
+          >
+            <MapPin size={10} /> Entry
+          </button>
+          {!isOpen && (
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                onNavigate(t.close_time);
+              }}
+              className="flex-1 py-1 px-2 rounded bg-panel border border-line text-[10px] text-ink hover:text-accent hover:border-accent transition-colors flex items-center justify-center gap-1 cursor-pointer"
+            >
+              <MapPin size={10} /> Exit
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              onWhy();
+            }}
+            title="Why did the bot take this trade?"
+            className="flex-1 py-1 px-2 rounded bg-panel border border-line text-[10px] text-ink hover:text-accent hover:border-accent transition-colors flex items-center justify-center gap-1 cursor-pointer"
+          >
+            <HelpCircle size={10} /> Why
+          </button>
+        </div>
+      </div>
+    </li>
   );
 }
 

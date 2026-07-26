@@ -27,7 +27,12 @@ const WS_BASE = process.env.NEXT_PUBLIC_WS_URL ?? "http://127.0.0.1:8000";
 let socket: Socket | null = null;
 // Rooms currently wanted by at least one subscribeRoom() caller, re-sent to
 // the server on every `connect` event (initial connect + every reconnect).
-const activeRooms = new Map<string, { accountId: string; symbol: string; timeframe: string }>();
+// Ref-counted so multiple components or multi-window charts subscribed to the
+// same room don't unsubscribe when only one component unmounts or switches.
+const activeRooms = new Map<
+  string,
+  { room: { accountId: string; symbol: string; timeframe: string }; count: number }
+>();
 
 function roomKey(room: { accountId: string; symbol: string; timeframe: string }): string {
   return `${room.accountId}:${room.symbol}:${room.timeframe}`;
@@ -45,7 +50,7 @@ function getSocket(): Socket {
     // the Next.js /api rewrite that attaches the header for REST calls.
     socket = io(WS_BASE, { autoConnect: true, reconnection: true, auth: { token: getToken() } });
     socket.on("connect", () => {
-      for (const room of activeRooms.values()) socket?.emit("subscribe", subscribePayload(room));
+      for (const { room } of activeRooms.values()) socket?.emit("subscribe", subscribePayload(room));
     });
   }
   return socket;
@@ -90,13 +95,24 @@ export function subscribeRoom(
   const handler = (payload: unknown) => onMessage(payload);
   const key = roomKey(room);
 
-  activeRooms.set(key, room);
-  s.emit("subscribe", subscribePayload(room));
+  let entry = activeRooms.get(key);
+  if (!entry) {
+    entry = { room, count: 0 };
+    activeRooms.set(key, entry);
+    s.emit("subscribe", subscribePayload(room));
+  }
+  entry.count += 1;
   for (const event of eventNames) s.on(event, handler);
 
   return () => {
     for (const event of eventNames) s.off(event, handler);
-    activeRooms.delete(key);
-    s.emit("unsubscribe", subscribePayload(room));
+    const existing = activeRooms.get(key);
+    if (existing) {
+      existing.count -= 1;
+      if (existing.count <= 0) {
+        activeRooms.delete(key);
+        s.emit("unsubscribe", subscribePayload(room));
+      }
+    }
   };
 }

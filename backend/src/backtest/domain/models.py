@@ -41,6 +41,13 @@ class BacktestTrade:
     pattern: str | None = None  # confirming candlestick pattern, e.g. "bullish_engulfing"
     structure: tuple[tuple[str, float, datetime], ...] = ()
     """Swing points as (label, price, time), label one of HH/HL/LH/LL."""
+    # The strategy's own Signal.reason/confidence that led to this trade — same
+    # fields the live journal's TradeRecord carries (see PositionOpened),
+    # threaded through BacktestBookkeeper so the report/UI can always show why
+    # a trade was taken, not just its zone/pattern chart annotations. Defaults
+    # keep report JSON files predating this field loadable.
+    reason: str = ""
+    confidence: float | None = None
 
 
 @dataclass(frozen=True, kw_only=True)

@@ -59,6 +59,17 @@ class BacktestTradeOut(BaseModel):
             "validate this trade's zone, for chart annotation."
         ),
     )
+    reason: str = Field(
+        default="",
+        description=(
+            "The strategy's own Signal.reason that led to this trade — pattern, zone, "
+            "entry/SL/TP lines. Empty for report files predating this field."
+        ),
+    )
+    confidence: float | None = Field(
+        default=None,
+        description="Strategy's confidence in this signal, 0..1. Null if not reported.",
+    )
 
 
 class EquityPointOut(BaseModel):

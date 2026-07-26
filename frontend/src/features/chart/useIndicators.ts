@@ -38,6 +38,7 @@ import {
 import {
   HistogramSeries,
   LineSeries,
+  LineStyle,
   type ISeriesApi,
   type SeriesMarker,
   type Time,
@@ -402,11 +403,26 @@ export function useIndicators(params: UseIndicatorsParams) {
         return points;
       };
       for (const manualIndicator of manualIndicatorsRef.current) {
+        const lineStyleVal =
+          manualIndicator.lineStyle === 'dashed'
+            ? LineStyle.Dashed
+            : manualIndicator.lineStyle === 'dotted'
+              ? LineStyle.Dotted
+              : LineStyle.Solid;
+        const lineWidthVal = (manualIndicator.lineWidth ?? 1) as any;
+        const lineDashVal =
+          manualIndicator.lineStyle === 'dashed'
+            ? [4, 4]
+            : manualIndicator.lineStyle === 'dotted'
+              ? [2, 2]
+              : undefined;
+
         switch (manualIndicator.type) {
           case 'ema': {
             const series = chart.addSeries(LineSeries, {
               color: manualIndicator.color,
-              lineWidth: 1,
+              lineWidth: lineWidthVal,
+              lineStyle: lineStyleVal,
               priceLineVisible: false,
               lastValueVisible: false,
               title: manualIndicator.label,
@@ -418,7 +434,8 @@ export function useIndicators(params: UseIndicatorsParams) {
           case 'sma': {
             const series = chart.addSeries(LineSeries, {
               color: manualIndicator.color,
-              lineWidth: 1,
+              lineWidth: lineWidthVal,
+              lineStyle: lineStyleVal,
               priceLineVisible: false,
               lastValueVisible: false,
               title: manualIndicator.label,
@@ -430,7 +447,8 @@ export function useIndicators(params: UseIndicatorsParams) {
           case 'vwap': {
             const series = chart.addSeries(LineSeries, {
               color: manualIndicator.color,
-              lineWidth: 1,
+              lineWidth: lineWidthVal,
+              lineStyle: lineStyleVal,
               priceLineVisible: false,
               lastValueVisible: false,
               title: manualIndicator.label,
@@ -442,7 +460,8 @@ export function useIndicators(params: UseIndicatorsParams) {
           case 'rsi': {
             const series = chart.addSeries(LineSeries, {
               color: manualIndicator.color,
-              lineWidth: 1,
+              lineWidth: lineWidthVal,
+              lineStyle: lineStyleVal,
               priceScaleId: 'strategy-rsi',
               priceLineVisible: false,
               lastValueVisible: false,
@@ -464,7 +483,8 @@ export function useIndicators(params: UseIndicatorsParams) {
           case 'atr': {
             const series = chart.addSeries(LineSeries, {
               color: manualIndicator.color,
-              lineWidth: 1,
+              lineWidth: lineWidthVal,
+              lineStyle: lineStyleVal,
               priceScaleId: 'manual-atr',
               priceLineVisible: false,
               lastValueVisible: false,
@@ -486,7 +506,8 @@ export function useIndicators(params: UseIndicatorsParams) {
             const { macdLine, signalLine, histogram } = macd(candles, 12, 26, 9);
             const macdSeries = chart.addSeries(LineSeries, {
               color: manualIndicator.color,
-              lineWidth: 1,
+              lineWidth: lineWidthVal,
+              lineStyle: lineStyleVal,
               priceScaleId: 'strategy-macd',
               priceLineVisible: false,
               lastValueVisible: false,
@@ -494,7 +515,8 @@ export function useIndicators(params: UseIndicatorsParams) {
             });
             const signalSeries = chart.addSeries(LineSeries, {
               color: '#ef5350',
-              lineWidth: 1,
+              lineWidth: lineWidthVal,
+              lineStyle: lineStyleVal,
               priceScaleId: 'strategy-macd',
               priceLineVisible: false,
               lastValueVisible: false,
@@ -531,7 +553,8 @@ export function useIndicators(params: UseIndicatorsParams) {
             ] as const) {
               const series = chart.addSeries(LineSeries, {
                 color: hexToRgba(manualIndicator.color, opacity),
-                lineWidth: 1,
+                lineWidth: lineWidthVal,
+                lineStyle: lineStyleVal,
                 priceLineVisible: false,
                 lastValueVisible: false,
                 title: manualIndicator.label,
@@ -585,7 +608,8 @@ export function useIndicators(params: UseIndicatorsParams) {
                   ],
                   {
                     lineColor: zoneColor,
-                    lineWidth: 1,
+                    lineWidth: lineWidthVal,
+                    lineDash: lineDashVal,
                     fillColor: hexToRgba(zoneColor, 0.15),
                   },
                   { filled: true, locked: true },
@@ -648,7 +672,8 @@ export function useIndicators(params: UseIndicatorsParams) {
                     ],
                     {
                       lineColor: zoneColor,
-                      lineWidth: 1,
+                      lineWidth: lineWidthVal,
+                      lineDash: lineDashVal,
                       fillColor: hexToRgba(zoneColor, 0.15),
                     },
                     { filled: true, locked: true },
@@ -702,7 +727,8 @@ export function useIndicators(params: UseIndicatorsParams) {
                     ],
                     {
                       lineColor,
-                      lineWidth: 1,
+                      lineWidth: lineWidthVal,
+                      lineDash: lineDashVal,
                       fillColor,
                     },
                     { filled: true, locked: true },
@@ -743,6 +769,8 @@ export function useIndicators(params: UseIndicatorsParams) {
             const anchorTime = candles[0].time as UTCTimestamp;
             const bases = detectBases(candles, manualIndicator.period, STRUCTURE_ATR_PERIOD);
             const baseColor = cssVar('--color-ink-muted');
+            const targetColor = manualIndicator.color || baseColor;
+            const targetDash = manualIndicator.lineStyle === 'solid' ? undefined : manualIndicator.lineStyle === 'dotted' ? [2, 2] : [4, 4];
             bases.slice(-3).forEach((base, baseIdx) => {
               for (const [edge, price, labelText] of [
                 ['hi', base.high, 'Base high'],
@@ -754,9 +782,9 @@ export function useIndicators(params: UseIndicatorsParams) {
                     price,
                     anchorTime,
                     {
-                      lineColor: baseColor,
-                      lineWidth: 1,
-                      lineDash: [4, 4],
+                      lineColor: targetColor,
+                      lineWidth: lineWidthVal,
+                      lineDash: targetDash,
                     },
                     {
                       locked: true,
@@ -898,9 +926,17 @@ export function useIndicators(params: UseIndicatorsParams) {
             }
           }
           if (lineData.length === 0) continue;
+          const lineStyleVal =
+            manualIndicator.lineStyle === 'dashed'
+              ? LineStyle.Dashed
+              : manualIndicator.lineStyle === 'dotted'
+                ? LineStyle.Dotted
+                : LineStyle.Solid;
+          const lineWidthVal = (manualIndicator.lineWidth ?? 1) as any;
           const series = chart.addSeries(LineSeries, {
             color: hexToRgba(manualIndicator.color, colorIdx === 0 ? 1 : 0.6),
-            lineWidth: 1,
+            lineWidth: lineWidthVal,
+            lineStyle: lineStyleVal,
             priceLineVisible: false,
             lastValueVisible: false,
             title: `${manualIndicator.label} ${seriesName}`,
@@ -1124,12 +1160,21 @@ export function useIndicators(params: UseIndicatorsParams) {
     });
   }
 
+  function updateManualIndicator(id: string, patch: Partial<ManualIndicator>) {
+    setManualIndicators((prev) => {
+      const next = prev.map((ind) => (ind.id === id ? { ...ind, ...patch } : ind));
+      saveManualIndicators(symbolRef.current, next);
+      return next;
+    });
+  }
+
   return {
     manualIndicators,
     setManualIndicators,
     manualIndicatorsRef,
     addManualIndicator,
     removeManualIndicator,
+    updateManualIndicator,
     showIndicatorsDock,
     setShowIndicatorsDock,
     liveBotIndicators,

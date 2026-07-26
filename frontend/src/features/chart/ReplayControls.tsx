@@ -12,6 +12,7 @@
  */
 
 import { ChevronsLeft, ChevronsRight, Crosshair, Pause, Play } from "lucide-react";
+import type { ReactNode } from "react";
 
 const SPEED_OPTIONS = [0.25, 0.5, 1, 2, 4, 8, 16];
 
@@ -28,6 +29,7 @@ export function ReplayControls({
   onSeek,
   following,
   onRecenter,
+  prefixContent,
 }: {
   playing: boolean;
   onPlayPause: () => void;
@@ -44,12 +46,15 @@ export function ReplayControls({
    * once the user drags/zooms manually, back on via the button below. */
   following: boolean;
   onRecenter: () => void;
+  /** Optional extra nodes rendered on the far left (e.g. multi-window sync selectors). */
+  prefixContent?: ReactNode;
 }) {
   const atStart = cursorIndex <= 0;
   const atEnd = cursorIndex >= totalBars - 1;
 
   return (
     <div className="flex flex-wrap items-center gap-2 border-b border-line bg-panel px-3 py-1.5 text-xs">
+      {prefixContent}
       <button
         className="flex cursor-pointer items-center justify-center rounded border border-line p-1 text-ink hover:border-accent hover:text-accent disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:border-line disabled:hover:text-ink"
         onClick={onStepBack}

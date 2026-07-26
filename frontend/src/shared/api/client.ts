@@ -491,6 +491,11 @@ export interface BacktestTrade {
   zone: Zone | null;
   pattern: string | null;
   structure: StructurePoint[];
+  /** Why the strategy took this trade, full text. Empty for report files
+   * predating this field. */
+  reason: string;
+  /** Strategy's confidence in this signal, 0..1. Null if not reported. */
+  confidence: number | null;
 }
 
 export interface EquityPoint {

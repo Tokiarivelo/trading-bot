@@ -16,6 +16,7 @@ import { type IDrawing } from 'lightweight-charts-drawing';
 import {
   Play,
   Square,
+  X,
 } from 'lucide-react';
 import Link from 'next/link';
 import { useEffect, useRef, useState } from 'react';
@@ -36,7 +37,7 @@ import { SIGNAL_OUTCOME_META } from '@/features/backtest/signalOutcome';
 import { ActivityLogDock } from './ActivityLogDock';
 import { ChartContextMenu } from './ChartContextMenu';
 import { ChartOrderPopover } from './ChartOrderPopover';
-import { ChartToolbar } from './ChartToolbar';
+import { ChartToolbar, type ChartToolbarProps } from './ChartToolbar';
 import { DrawingContextMenu } from './DrawingContextMenu';
 import { DrawingEditPopover } from './DrawingEditPopover';
 import { DrawingToolbar } from './DrawingToolbar';
@@ -61,6 +62,8 @@ import type {
   OrderLineDash,
   OrderLineStyle,
   PriceLineSpec,
+  ReplayUIState,
+  SharedReplaySession,
 } from './types';
 import {
   cssVar,
@@ -106,6 +109,17 @@ export function ChartPanel({
   onSelectTicket,
   onReplaySessionChange,
   onReplayCursorTime,
+  onReplayUIChange,
+  windowIndex = 0,
+  windowCount = 1,
+  selectedWindowIndex = 0,
+  onSelectWindow,
+  onCloseWindow,
+  initialTimeframe,
+  onTimeframeChange,
+  sharedReplay = null,
+  hideToolbar = false,
+  onToolbarStateChange,
 }: {
   symbol: string;
   trading: Trading;
@@ -150,7 +164,7 @@ export function ChartPanel({
    * backtest-report replay (bounded by the report's own candle window, not
    * an explicit from/to) — secondary windows have no report to anchor to,
    * so they simply have nothing to sync in that case. */
-  onReplaySessionChange?: (session: {
+  onReplaySessionChange?: (windowIndex: number, session: {
     active: boolean;
     sessionPeriod: { from: number; to: number } | null;
   }) => void;
@@ -158,7 +172,18 @@ export function ChartPanel({
    * (null while not replaying) — the single "current position" secondary
    * windows follow, since a cursor *index* only means something within this
    * window's own timeframe's candle array. */
-  onReplayCursorTime?: (time: number | null) => void;
+  onReplayCursorTime?: (windowIndex: number, time: number | null) => void;
+  windowIndex?: number;
+  windowCount?: number;
+  selectedWindowIndex?: number;
+  onSelectWindow?: (index: number) => void;
+  onCloseWindow?: (index: number) => void;
+  initialTimeframe?: Candle['timeframe'];
+  onTimeframeChange?: (tf: Candle['timeframe']) => void;
+  sharedReplay?: SharedReplaySession | null;
+  hideToolbar?: boolean;
+  onToolbarStateChange?: (windowIndex: number, props: ChartToolbarProps) => void;
+  onReplayUIChange?: (windowIndex: number, ui: ReplayUIState | null) => void;
 }) {
   // All candles currently on the chart for this symbol/timeframe, oldest
   // first — kept in sync with live updates so "load more" always pages back
@@ -220,6 +245,12 @@ export function ChartPanel({
   // indicator (VWAP/ATR/structure/QML/patterns) all become cursor-gated for
   // free by switching their one `candlesRef.current` read to this call.
   function visibleCandles(): Candle[] {
+    if (sharedReplay?.active && sharedReplay.cursorTime != null) {
+      const all = candlesRef.current;
+      let idx = all.findIndex((c) => (c.time as number) > sharedReplay.cursorTime!);
+      if (idx === -1) idx = all.length;
+      return all.slice(0, idx);
+    }
     if (!replayActiveRef.current) return candlesRef.current;
     return candlesRef.current.slice(0, replayCursorIndexRef.current + 1);
   }
@@ -245,22 +276,22 @@ export function ChartPanel({
     loaded: number;
   } | null>(null);
 
-  // Multi-chart layout: mirror this window's replay session (active +
-  // picked period) and cursor position outward so secondary chart windows
-  // (different timeframe, same symbol) can follow along — see this
-  // component's onReplaySessionChange/onReplayCursorTime doc comments.
+  // Multi-chart layout: mirror this window's replay cursor position outward
+  // so secondary chart windows (different timeframe, same symbol) can follow
+  // along — see this component's onReplayCursorTime doc comment. The sibling
+  // "mirror the replay session" effect lives further down, after
+  // useBacktestData — it needs that hook's `backtestPeriod` to sync a
+  // backtest-report replay too, not just session replay.
   useEffect(() => {
-    onReplaySessionChange?.({ active: replayActive, sessionPeriod: sessionReplayPeriod });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [replayActive, sessionReplayPeriod]);
-  useEffect(() => {
-    if (!replayActive) {
-      onReplayCursorTime?.(null);
-      return;
+    if (!sharedReplay?.active) {
+      if (!replayActive) {
+        onReplayCursorTime?.(windowIndex, null);
+        return;
+      }
+      onReplayCursorTime?.(windowIndex, (candlesRef.current[replayCursorIndex]?.time as number) ?? null);
     }
-    onReplayCursorTime?.((candlesRef.current[replayCursorIndex]?.time as number) ?? null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [replayActive, replayCursorIndex]);
+  }, [replayActive, replayCursorIndex, sharedReplay?.active, windowIndex]);
 
   const {
     showStrategyEditor,
@@ -285,7 +316,7 @@ export function ChartPanel({
   } = useStrategyEditor();
 
   const [timeframe, setTimeframe] =
-    useState<Candle['timeframe']>(loadLastTimeframe);
+    useState<Candle['timeframe']>(windowIndex > 0 && initialTimeframe ? initialTimeframe : loadLastTimeframe);
   const timeframeRef = useRef(timeframe);
   timeframeRef.current = timeframe;
 
@@ -296,7 +327,13 @@ export function ChartPanel({
   // Keep `?timeframe=` and the last-picked timeframe in sync so a refresh (or
   // a bookmarked/bare link) resumes on the same timeframe — same convention
   // as the `?symbol=`/`tb.lastSymbol` sync in page.tsx.
+  const onTimeframeChangeRef = useRef(onTimeframeChange);
+  onTimeframeChangeRef.current = onTimeframeChange;
   useEffect(() => {
+    if (windowIndex > 0) {
+      onTimeframeChangeRef.current?.(timeframe);
+      return;
+    }
     const url = new URL(window.location.href);
     url.searchParams.set(TIMEFRAME_QUERY_KEY, timeframe);
     window.history.replaceState(null, '', url);
@@ -305,7 +342,7 @@ export function ChartPanel({
     } catch {
       // Ignore blocked/full localStorage — timeframe just won't persist.
     }
-  }, [timeframe]);
+  }, [timeframe, windowIndex]);
 
   // symbolInfo/spreadPoints/error/loadingMore/switchingChart/newsBands now
   // live in useCandleData's ChartRenderController — see the
@@ -452,6 +489,8 @@ export function ChartPanel({
     setSelectedTradeIndex,
     selectedSignalIndex,
     setSelectedSignalIndex,
+    replayCursorTime,
+    backtestPeriod,
   } = useBacktestData({
     backtestReportId,
     liveBotSkill,
@@ -465,6 +504,24 @@ export function ChartPanel({
     showTradeLabels,
   });
 
+  // Multi-chart layout: mirror this window's replay session (active + picked
+  // period) outward so secondary chart windows can follow along — see this
+  // component's onReplaySessionChange doc comment. A saved backtest report's
+  // "period" is its trades'/signals' own time bounds (`backtestPeriod`,
+  // derived in useBacktestData) rather than an explicit picked from/to like
+  // session replay has, but MiniChartPanel/useMiniCandleData don't care which
+  // produced the range — either way it's just "fetch this period at my own
+  // timeframe and clip to the shared cursor."
+  useEffect(() => {
+    if (!sharedReplay?.active) {
+      onReplaySessionChange?.(windowIndex, {
+        active: replayActive,
+        sessionPeriod: backtestReportId ? backtestPeriod : sessionReplayPeriod,
+      });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [replayActive, sessionReplayPeriod, backtestReportId, backtestPeriod, sharedReplay?.active, windowIndex]);
+
   // Indicator state + the indicator-series-creation effect. See
   // useIndicators.ts for what's now reactive (manualIndicators/
   // activeStrategy/showSeparators/chart readiness) vs. still imperative
@@ -475,6 +532,7 @@ export function ChartPanel({
     manualIndicators,
     addManualIndicator,
     removeManualIndicator,
+    updateManualIndicator,
     showIndicatorsDock,
     setShowIndicatorsDock,
     liveBotIndicators,
@@ -521,7 +579,7 @@ export function ChartPanel({
     timeframe,
     accountId,
     backtestReportId,
-    sessionReplayPeriod,
+    sessionReplayPeriod: sharedReplay?.active && sharedReplay.sessionPeriod ? sharedReplay.sessionPeriod : sessionReplayPeriod,
     setSessionReplayPeriod,
     setSessionReplayLoadingPage,
     candlesRef,
@@ -555,6 +613,13 @@ export function ChartPanel({
     switchingChart,
     newsBands,
   } = chartRenderController;
+
+  useEffect(() => {
+    if (sharedReplay?.active && sharedReplay.cursorTime != null) {
+      chartRenderController.paintUpTo();
+      recomputeIndicatorsRef.current?.();
+    }
+  }, [sharedReplay?.active, sharedReplay?.cursorTime, chartRenderController, recomputeIndicatorsRef]);
 
   // Overlay recompute on activeStrategy/manualIndicators/showSeparators
   // change, and custom (backend-Python) indicator compute on
@@ -1183,62 +1248,216 @@ export function ChartPanel({
     setCustomCodeError(null);
     recomputeIndicatorsRef.current();
   }
+
+  const toolbarProps: ChartToolbarProps = {
+    symbol,
+    timeframe,
+    showTfDropdown,
+    onSelectTimeframe: (tf) => {
+      setTimeframe(tf);
+      setShowTfDropdown(false);
+    },
+    onToggleTfDropdown: () => setShowTfDropdown((v) => !v),
+    tfDropdownRef,
+    onScrollToLatest: () => chartRef.current?.timeScale().scrollToRealTime(),
+    onResetZoom: () => chartRef.current?.timeScale().resetTimeScale(),
+    showIndicatorsDock,
+    onToggleIndicatorsDock: () => setShowIndicatorsDock((v) => !v),
+    manualIndicatorsCount: manualIndicators.length,
+    showDrawingsList: drawingTools.showDrawingsList,
+    onToggleDrawingsList: () => drawingTools.setShowDrawingsList((v) => !v),
+    drawingsListCount: drawingsList.length,
+    showCustomCodeEditor,
+    onToggleCodeEditor: () => {
+      setShowCustomCodeEditor((v) => !v);
+      setShowStrategyEditor(false);
+    },
+    showActivityLogDock,
+    onToggleActivityLogDock: () => setShowActivityLogDock((v) => !v),
+    showOverlaysDropdown,
+    onToggleOverlaysDropdown: () => setShowOverlaysDropdown((v) => !v),
+    overlaysDropdownRef,
+    showSeparators,
+    onToggleSeparators: toggleSeparators,
+    showSpreadLine,
+    onToggleSpreadLine: toggleSpreadLine,
+    showTradeLabels,
+    onToggleTradeLabels: toggleTradeLabels,
+    orderLineVisible: orderLineStyle.visible,
+    onToggleOrderLinesVisible: () => updateOrderLineStyle({ visible: !orderLineStyle.visible }),
+    showOrderLineSettings,
+    onToggleOrderLineSettings: () => setShowOrderLineSettings((v) => !v),
+    backtestReportId,
+    sessionReplayPeriod,
+    showSessionReplayPicker,
+    onSessionReplayToggle: () => {
+      if (sessionReplayPeriod) {
+        handleExitSessionReplay();
+      } else {
+        setShowSessionReplayPicker((v) => !v);
+      }
+    },
+    drawingTool: drawingTools.drawingTool,
+    pendingAnchorCount: drawingTools.pendingAnchorCount,
+    spreadPoints: chartRenderController.spreadPoints,
+  };
+
+  const onToolbarStateChangeRef = useRef(onToolbarStateChange);
+  onToolbarStateChangeRef.current = onToolbarStateChange;
+  useEffect(() => {
+    onToolbarStateChangeRef.current?.(windowIndex, toolbarProps);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    windowIndex,
+    symbol,
+    timeframe,
+    showTfDropdown,
+    showIndicatorsDock,
+    manualIndicators.length,
+    drawingTools.showDrawingsList,
+    drawingsList.length,
+    showCustomCodeEditor,
+    showActivityLogDock,
+    showOverlaysDropdown,
+    showSeparators,
+    showSpreadLine,
+    showTradeLabels,
+    orderLineStyle.visible,
+    showOrderLineSettings,
+    backtestReportId,
+    sessionReplayPeriod,
+    showSessionReplayPicker,
+    drawingTools.drawingTool,
+    drawingTools.pendingAnchorCount,
+    chartRenderController.spreadPoints,
+  ]);
+
+  const onReplayUIChangeRef = useRef(onReplayUIChange);
+  onReplayUIChangeRef.current = onReplayUIChange;
+  useEffect(() => {
+    if (!hideToolbar || sharedReplay?.active) {
+      onReplayUIChangeRef.current?.(windowIndex, null);
+      return;
+    }
+    const showPicker = Boolean(showSessionReplayPicker && !sessionReplayPeriod);
+    const isReplayActive = Boolean((backtestReportId || sessionReplayPeriod) && replayActive);
+    onReplayUIChangeRef.current?.(windowIndex, {
+      showPicker,
+      pickerProps: showPicker
+        ? {
+            fromValue: sessionReplayFromInput,
+            toValue: sessionReplayToInput,
+            onFromChange: setSessionReplayFromInput,
+            onToChange: setSessionReplayToInput,
+            estimate: sessionReplayEstimate,
+            onCancel: () => setShowSessionReplayPicker(false),
+            onStart: handleStartSessionReplay,
+          }
+        : null,
+      sessionPeriod: sessionReplayPeriod,
+      loadingPage: sessionReplayLoadingPage,
+      replayActive: isReplayActive,
+      replayControlsProps: isReplayActive
+        ? {
+            playing: replayPlaying,
+            onPlayPause: () => setReplayPlaying((p) => !p),
+            onStepBack: () => {
+              setReplayPlaying(false);
+              seekTo(replayCursorIndexRef.current - 1);
+            },
+            onStepForward: () => {
+              setReplayPlaying(false);
+              seekTo(replayCursorIndexRef.current + 1);
+            },
+            speed: replaySpeed,
+            onSpeedChange: setReplaySpeed,
+            cursorIndex: replayCursorIndex,
+            totalBars: candlesRef.current.length,
+            currentTime:
+              candlesRef.current[replayCursorIndex]
+                ? new Date(candlesRef.current[replayCursorIndex].time * 1000)
+                    .toISOString()
+                    .replace('T', ' ')
+                    .slice(0, 19)
+                : '—',
+            onSeek: (index) => {
+              setReplayPlaying(false);
+              seekTo(index);
+            },
+            following: followingCursor,
+            onRecenter: handleRecenterReplay,
+          }
+        : null,
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    windowIndex,
+    hideToolbar,
+    sharedReplay?.active,
+    showSessionReplayPicker,
+    sessionReplayPeriod,
+    sessionReplayFromInput,
+    sessionReplayToInput,
+    sessionReplayEstimate,
+    sessionReplayLoadingPage,
+    backtestReportId,
+    replayActive,
+    replayPlaying,
+    replaySpeed,
+    replayCursorIndex,
+    followingCursor,
+  ]);
+
   return (
     <section className='flex min-h-0 flex-1 flex-col rounded-md border border-line bg-panel'>
-      <ChartToolbar
-        symbol={symbol}
-        timeframe={timeframe}
-        showTfDropdown={showTfDropdown}
-        onSelectTimeframe={(tf) => {
-          setTimeframe(tf);
-          setShowTfDropdown(false);
-        }}
-        onToggleTfDropdown={() => setShowTfDropdown((v) => !v)}
-        tfDropdownRef={tfDropdownRef}
-        onScrollToLatest={() => chartRef.current?.timeScale().scrollToRealTime()}
-        onResetZoom={() => chartRef.current?.timeScale().resetTimeScale()}
-        showIndicatorsDock={showIndicatorsDock}
-        onToggleIndicatorsDock={() => setShowIndicatorsDock((v) => !v)}
-        manualIndicatorsCount={manualIndicators.length}
-        showDrawingsList={drawingTools.showDrawingsList}
-        onToggleDrawingsList={() => drawingTools.setShowDrawingsList((v) => !v)}
-        drawingsListCount={drawingsList.length}
-        showCustomCodeEditor={showCustomCodeEditor}
-        onToggleCodeEditor={() => {
-          setShowCustomCodeEditor((v) => !v);
-          setShowStrategyEditor(false);
-        }}
-        showActivityLogDock={showActivityLogDock}
-        onToggleActivityLogDock={() => setShowActivityLogDock((v) => !v)}
-        showOverlaysDropdown={showOverlaysDropdown}
-        onToggleOverlaysDropdown={() => setShowOverlaysDropdown((v) => !v)}
-        overlaysDropdownRef={overlaysDropdownRef}
-        showSeparators={showSeparators}
-        onToggleSeparators={toggleSeparators}
-        showSpreadLine={showSpreadLine}
-        onToggleSpreadLine={toggleSpreadLine}
-        showTradeLabels={showTradeLabels}
-        onToggleTradeLabels={toggleTradeLabels}
-        orderLineVisible={orderLineStyle.visible}
-        onToggleOrderLinesVisible={() => updateOrderLineStyle({ visible: !orderLineStyle.visible })}
-        showOrderLineSettings={showOrderLineSettings}
-        onToggleOrderLineSettings={() => setShowOrderLineSettings((v) => !v)}
-        backtestReportId={backtestReportId}
-        sessionReplayPeriod={sessionReplayPeriod}
-        showSessionReplayPicker={showSessionReplayPicker}
-        onSessionReplayToggle={() => {
-          if (sessionReplayPeriod) {
-            handleExitSessionReplay();
-          } else {
-            setShowSessionReplayPicker((v) => !v);
-          }
-        }}
-        drawingTool={drawingTool}
-        pendingAnchorCount={drawingTools.pendingAnchorCount}
-        spreadPoints={spreadPoints}
-      />
+      {hideToolbar && windowCount > 1 && (
+        <div
+          onClick={(e) => {
+            e.stopPropagation();
+            onSelectWindow?.(windowIndex);
+          }}
+          className={`flex items-center justify-between border-b px-3 py-1.5 text-xs select-none cursor-pointer transition-colors duration-150 ${
+            selectedWindowIndex === windowIndex
+              ? 'bg-accent/15 border-accent/30 text-ink font-semibold shadow-[0_1px_6px_rgba(41,98,255,0.15)]'
+              : 'bg-panel/80 border-line text-ink-muted hover:bg-line/20 hover:text-ink'
+          }`}
+        >
+          <div className='flex items-center gap-2'>
+            <span
+              className={`h-2.5 w-2.5 rounded-full transition-all duration-200 ${
+                selectedWindowIndex === windowIndex
+                  ? 'bg-accent scale-110 shadow-[0_0_8px_var(--color-accent)] animate-pulse'
+                  : 'bg-ink-muted/40'
+              }`}
+            />
+            <span className='font-bold text-ink tracking-wide'>{symbol}</span>
+            <span className='rounded bg-bg/80 border border-line/60 px-2 py-0.5 font-mono text-[11px] text-ink-muted'>
+              {timeframe}
+            </span>
+            {selectedWindowIndex === windowIndex && (
+              <span className='text-[10px] uppercase font-bold tracking-wider text-accent bg-accent/20 px-1.5 py-0.5 rounded border border-accent/30 shadow-2xs'>
+                Active
+              </span>
+            )}
+          </div>
+          {windowIndex > 0 && onCloseWindow && (
+            <button
+              type='button'
+              onClick={(e) => {
+                e.stopPropagation();
+                onCloseWindow(windowIndex);
+              }}
+              className='cursor-pointer rounded p-1 text-ink-muted hover:bg-err/20 hover:text-err transition-colors'
+              title='Close window'
+            >
+              <X size={14} />
+            </button>
+          )}
+        </div>
+      )}
+      {!hideToolbar && <ChartToolbar {...toolbarProps} />}
       {error && <p className='px-4 py-1 text-xs text-err'>{error}</p>}
-      {showSessionReplayPicker && !sessionReplayPeriod && (
+      {!hideToolbar && showSessionReplayPicker && !sessionReplayPeriod && (
         <SessionReplayPicker
           fromValue={sessionReplayFromInput}
           toValue={sessionReplayToInput}
@@ -1249,7 +1468,7 @@ export function ChartPanel({
           onStart={handleStartSessionReplay}
         />
       )}
-      {sessionReplayPeriod && (
+      {!hideToolbar && sessionReplayPeriod && (
         <div className='flex items-center gap-2 border-b border-line bg-accent/10 px-4 py-1 text-xs text-accent'>
           <span>
             Session replay —{' '}
@@ -1365,7 +1584,7 @@ export function ChartPanel({
       )}
       {/* Replay player — shown while replaying a backtest report (§F) or a
           session-replay period */}
-      {(backtestReportId || sessionReplayPeriod) && replayActive && (
+      {!hideToolbar && (backtestReportId || sessionReplayPeriod) && replayActive && (
         <ReplayControls
           playing={replayPlaying}
           onPlayPause={() => setReplayPlaying((p) => !p)}
@@ -1609,6 +1828,7 @@ export function ChartPanel({
           indicators={manualIndicators}
           onAdd={addManualIndicator}
           onRemove={removeManualIndicator}
+          onUpdate={updateManualIndicator}
           onCustomIndicatorCodeSaved={() => computeCustomIndicatorsRef.current()}
         />
       )}
@@ -2444,11 +2664,13 @@ export function ChartPanel({
             signals={backtestSignals ?? []}
             trades={backtestTrades ?? []}
             indicators={liveBotSkill ? (liveBotIndicators ?? []) : undefined}
+            backtestMeta={backtestMeta}
             selectedTradeIndex={selectedTradeIndex}
             onSelectTrade={handleToggleTrade}
             onNavigateTrade={handleNavigateTrade}
             selectedSignalIndex={selectedSignalIndex}
             onSelectSignal={handleToggleSignal}
+            replayCursorTime={backtestReportId ? replayCursorTime : null}
           />
         )}
       </div>

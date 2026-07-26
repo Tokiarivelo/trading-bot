@@ -37,6 +37,8 @@ class _OpenLeg:
     zone: BacktestZone | None
     pattern: str | None
     structure: tuple[tuple[str, float, datetime], ...]
+    reason: str
+    confidence: float | None
 
 
 class BacktestBookkeeper:
@@ -78,6 +80,8 @@ class BacktestBookkeeper:
             zone=zone,
             pattern=event.pattern,
             structure=event.structure,
+            reason=event.reason,
+            confidence=event.confidence,
         )
 
     async def on_position_closed(self, event: PositionClosed) -> None:
@@ -115,5 +119,7 @@ class BacktestBookkeeper:
                 zone=leg.zone,
                 pattern=leg.pattern,
                 structure=leg.structure,
+                reason=leg.reason,
+                confidence=leg.confidence,
             )
         )

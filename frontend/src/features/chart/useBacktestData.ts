@@ -31,7 +31,7 @@
  * effect is now its only consumer.
  */
 
-import { useEffect, useRef, useState, type RefObject } from "react";
+import { useEffect, useMemo, useRef, useState, type RefObject } from "react";
 import { type UTCTimestamp } from "lightweight-charts";
 import { useActiveAccount } from "@/shared/api/account-context";
 import {
@@ -96,6 +96,15 @@ export function useBacktestData({
   showTradeLabels,
 }: UseBacktestDataParams) {
   const accountId = useActiveAccount();
+
+  // The replay cursor bar's own time — same value the marker-drawing effect
+  // below computes locally as `cursorTime` (falling back to `Infinity` there
+  // to mean "reveal everything"), but exposed as `null` here so SignalsDock
+  // can tell "not replaying" apart from "cursor at time 0" and fall back to
+  // its own flat trade list instead of an Active/History split.
+  const replayCursorTime = replayActive
+    ? ((candlesRef.current[replayCursorIndex]?.time as number | undefined) ?? null)
+    : null;
 
   // Backtest-view state (§F): the report's trades, converted to markers once
   // fetched, and an error flag for the "View on Chart" banner.
@@ -186,6 +195,8 @@ export function useBacktestData({
                 zone: null,
                 pattern: null,
                 structure: [],
+                reason: "",
+                confidence: null,
               })),
           );
         })
@@ -339,6 +350,21 @@ export function useBacktestData({
     showTradeLabels,
   ]);
 
+  // The report's own time bounds — earliest trade open, latest trade close
+  // or signal, whichever is later (mirrors the initial-candle-window anchor
+  // logic in useCandleData.ts's resolveInitialCandles) — so a split-window
+  // secondary pane can fetch the same period at its own timeframe and clip
+  // it to the shared replay cursor, the same way session replay's explicit
+  // from/to already lets it. Null while the report/trades haven't loaded yet.
+  const backtestPeriod = useMemo(() => {
+    if (!backtestTrades || backtestTrades.length === 0) return null;
+    const times = [
+      ...backtestTrades.flatMap((t) => [t.open_time, t.close_time]),
+      ...(backtestSignals ?? []).map((s) => s.time),
+    ];
+    return { from: Math.min(...times), to: Math.max(...times) };
+  }, [backtestTrades, backtestSignals]);
+
   return {
     backtestTrades,
     setBacktestTrades,
@@ -354,6 +380,8 @@ export function useBacktestData({
     setSelectedTradeIndex,
     selectedSignalIndex,
     setSelectedSignalIndex,
+    replayCursorTime,
+    backtestPeriod,
   };
 }
 
