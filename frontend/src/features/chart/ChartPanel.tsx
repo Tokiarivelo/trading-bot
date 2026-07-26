@@ -48,7 +48,8 @@ import { ReplayControls } from './ReplayControls';
 import { SessionReplayPicker } from './SessionReplayPicker';
 import { SignalsDock } from './SignalsDock';
 import { useBacktestData } from './useBacktestData';
-import { useCandleData } from './useCandleData';
+import { fetchCandlesForPeriod, TIMEFRAME_SECONDS, useCandleData } from './useCandleData';
+import { fetchShared } from './sharedFetchCache';
 import { useChartEngine } from './useChartEngine';
 import { useChartUIToggles } from './useChartUIToggles';
 import { useDrawingTools } from './useDrawingTools';
@@ -83,6 +84,7 @@ import {
   toCustomSignalsSeriesMarkers,
   toSeriesMarkers,
 } from './chartMarkers';
+import { subscribeSharedPoll } from './sharedPoll';
 
 const MARKERS_POLL_MS = 5000;
 
@@ -193,6 +195,15 @@ export function ChartPanel({
   // still created here) they're read/written exclusively inside the fetch
   // effect, so they moved into useCandleData.ts wholesale.
   const candlesRef = useRef<Candle[]>([]);
+  // Multi-timeframe replay synthesis: when this window is a *coarser* follower
+  // (e.g. M5) than the master driving the replay (e.g. M1), it holds the
+  // master's finer candles for the whole session period so `visibleCandles()`
+  // can aggregate the ones that have landed inside the current not-yet-closed
+  // bucket into a synthetic "forming" bar that grows tick-by-tick like a live
+  // chart. Empty when this window isn't coarser than the master (or no replay
+  // is active) — the naive cursor cutoff already handles those cases. Loaded
+  // by the fetch effect further down.
+  const masterCandlesRef = useRef<Candle[]>([]);
   // useBacktestData's call moves further down (right after useChartEngine),
   // since phase 10 gave it a `chartController` param its marker-application
   // effect needs to paint through — see the call site below.
@@ -247,7 +258,53 @@ export function ChartPanel({
   function visibleCandles(): Candle[] {
     if (sharedReplay?.active && sharedReplay.cursorTime != null) {
       const all = candlesRef.current;
-      let idx = all.findIndex((c) => (c.time as number) > sharedReplay.cursorTime!);
+      const cursorTime = sharedReplay.cursorTime;
+      // Coarser-follower synthesis: if this window's timeframe is strictly
+      // coarser than the master driving the replay (e.g. M5 follower, M1
+      // master) and the master's finer candles are loaded, reveal a partial
+      // "forming" bar for the current bucket that grows as each finer bar
+      // lands — instead of only jumping to a fully-closed bar every N ticks.
+      const master = masterCandlesRef.current;
+      if (
+        sharedReplay.masterTimeframe &&
+        TIMEFRAME_SECONDS[timeframe] > TIMEFRAME_SECONDS[sharedReplay.masterTimeframe] &&
+        master.length > 0
+      ) {
+        // Derive the current bucket from this window's own last real candle
+        // whose time <= cursor (scan backward) rather than flooring the cursor
+        // arithmetically — H4/D1 depend on broker server-time offsets and W1
+        // uses a server-side epoch shift, so a naive floor can pick the wrong
+        // boundary. The follower's own candle times are already correct.
+        let bucketIdx = -1;
+        for (let i = all.length - 1; i >= 0; i--) {
+          if ((all[i].time as number) <= cursorTime) {
+            bucketIdx = i;
+            break;
+          }
+        }
+        if (bucketIdx !== -1) {
+          const bucketOpen = all[bucketIdx].time as number;
+          const closed = all.slice(0, bucketIdx);
+          const fine = master.filter(
+            (c) => (c.time as number) >= bucketOpen && (c.time as number) <= cursorTime,
+          );
+          if (fine.length > 0) {
+            const synthetic: Candle = {
+              symbol,
+              timeframe,
+              time: bucketOpen,
+              open: fine[0].open,
+              high: Math.max(...fine.map((c) => c.high)),
+              low: Math.min(...fine.map((c) => c.low)),
+              close: fine[fine.length - 1].close,
+              tick_volume: fine.reduce((sum, c) => sum + c.tick_volume, 0),
+              spread_points: fine[fine.length - 1].spread_points,
+            };
+            return [...closed, synthetic];
+          }
+        }
+      }
+      let idx = all.findIndex((c) => (c.time as number) > cursorTime);
       if (idx === -1) idx = all.length;
       return all.slice(0, idx);
     }
@@ -520,7 +577,7 @@ export function ChartPanel({
       });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [replayActive, sessionReplayPeriod, backtestReportId, backtestPeriod, sharedReplay?.active, windowIndex]);
+  }, [replayActive, sessionReplayPeriod, backtestReportId, backtestPeriod, sharedReplay?.active, windowIndex, timeframe]);
 
   // Indicator state + the indicator-series-creation effect. See
   // useIndicators.ts for what's now reactive (manualIndicators/
@@ -620,6 +677,52 @@ export function ChartPanel({
       recomputeIndicatorsRef.current?.();
     }
   }, [sharedReplay?.active, sharedReplay?.cursorTime, chartRenderController, recomputeIndicatorsRef]);
+
+  // Multi-timeframe replay synthesis (see `masterCandlesRef` above): when this
+  // window is a strictly coarser follower than the master driving the replay,
+  // fetch the master's finer candles for the whole session period so
+  // `visibleCandles()` can aggregate a forming bar for the current bucket.
+  // Deduped via `fetchShared` so an M5 and M15 follower over the same M1
+  // master/period share one fetch. Reset to empty whenever synthesis doesn't
+  // apply (replay ended, this window isn't coarser, or account not yet
+  // resolved) so stale finer data never leaks into a later render.
+  const sessionPeriod = sharedReplay?.sessionPeriod ?? null;
+  const masterTimeframe = sharedReplay?.masterTimeframe ?? null;
+  useEffect(() => {
+    if (
+      !accountId ||
+      !sharedReplay?.active ||
+      !sessionPeriod ||
+      !masterTimeframe ||
+      TIMEFRAME_SECONDS[timeframe] <= TIMEFRAME_SECONDS[masterTimeframe]
+    ) {
+      masterCandlesRef.current = [];
+      return;
+    }
+    let cancelled = false;
+    const key = `${accountId}:${symbol}:${masterTimeframe}:${sessionPeriod.from}:${sessionPeriod.to}`;
+    fetchShared(key, () =>
+      fetchCandlesForPeriod(accountId, symbol, masterTimeframe, sessionPeriod.from, sessionPeriod.to),
+    )
+      .then((candles) => {
+        if (!cancelled) masterCandlesRef.current = candles;
+      })
+      .catch(() => {
+        if (!cancelled) masterCandlesRef.current = [];
+      });
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    accountId,
+    symbol,
+    timeframe,
+    sharedReplay?.active,
+    masterTimeframe,
+    sessionPeriod?.from,
+    sessionPeriod?.to,
+  ]);
 
   // Overlay recompute on activeStrategy/manualIndicators/showSeparators
   // change, and custom (backend-Python) indicator compute on
@@ -750,40 +853,35 @@ export function ChartPanel({
       clearLiveTradeLines();
       return;
     }
-    let cancelled = false;
-
-    const poll = () => {
-      getTradeMarkers(accountId, symbol)
-        .then((trades) => {
-          if (cancelled) return;
-          seriesMarkersRef.current?.setMarkers(
-            toSeriesMarkers(trades, colors, showTradeLabels),
-          );
-          setClosedTrades(trades);
-          clearLiveTradeLines();
-          const manager = drawingManagerRef.current;
-          if (manager) {
-            for (const drawing of buildLiveTradeLineDrawings(
-              trades,
-              colors,
-              candlesRef.current,
-              orderLineStyle,
-            )) {
-              manager.addDrawing(drawing);
-            }
+    // The fetch is identical for every window on the same account+symbol
+    // (multi-chart layout §) — shared via subscribeSharedPoll so N windows
+    // don't each poll the journal independently, while applying the result
+    // (series markers, drawing lines, closedTrades state) stays per-window.
+    const unsubscribe = subscribeSharedPoll(
+      `trade-markers:${accountId}:${symbol}`,
+      MARKERS_POLL_MS,
+      () => getTradeMarkers(accountId, symbol),
+      (trades) => {
+        if (!trades) return; // Journal unreachable — leave whatever's already drawn.
+        seriesMarkersRef.current?.setMarkers(
+          toSeriesMarkers(trades, colors, showTradeLabels),
+        );
+        setClosedTrades(trades);
+        clearLiveTradeLines();
+        const manager = drawingManagerRef.current;
+        if (manager) {
+          for (const drawing of buildLiveTradeLineDrawings(
+            trades,
+            colors,
+            candlesRef.current,
+            orderLineStyle,
+          )) {
+            manager.addDrawing(drawing);
           }
-        })
-        .catch(() => {
-          // Journal unreachable — leave whatever markers/lines are already drawn.
-        });
-    };
-
-    poll();
-    const timer = setInterval(poll, MARKERS_POLL_MS);
-    return () => {
-      cancelled = true;
-      clearInterval(timer);
-    };
+        }
+      },
+    );
+    return unsubscribe;
     // setClosedTrades comes from useOrderPopovers but is a plain setState
     // setter (stable identity) — safe to omit, same as every other setState
     // setter this effect already calls without listing as a dependency.

@@ -196,6 +196,7 @@ export function MultiChartLayout(props: ChartPanelProps) {
           sessionPeriod: session.sessionPeriod,
           cursorTime: prev?.masterIndex === idx ? prev.cursorTime : null,
           masterIndex: idx,
+          masterTimeframe: windowToolbarsRef.current[idx]?.timeframe ?? null,
         }));
       }
     },

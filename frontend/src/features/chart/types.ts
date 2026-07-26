@@ -78,6 +78,11 @@ export interface SharedReplaySession {
   cursorTime: number | null;
   /** In multi-window layouts, identifies which window index initiated and drives the master replay clock. */
   masterIndex?: number;
+  /** The master window's current timeframe — lets a coarser follower window
+   * know both whether it needs to synthesize a forming bar (its own timeframe
+   * is coarser than this) and which finer timeframe's candles to aggregate
+   * from. Null while unknown (not yet populated). */
+  masterTimeframe: Candle['timeframe'] | null;
 }
 
 export interface ReplayUIState {
@@ -175,6 +180,10 @@ export interface ChartEngineController {
   getChart(): IChartApi | null;
   getCandleSeries(): ISeriesApi<'Candlestick'> | null;
   getVolumeSeries(): ISeriesApi<'Histogram'> | null;
+  /** Dedicated invisible series holding future time-scale points (whitespace bars)
+   * so trendlines/drawings can resolve future anchors without contaminating the
+   * main candle series and breaking out-of-order checks on live updates. */
+  getWhitespaceSeries(): ISeriesApi<'Line'> | null;
   getDrawingManager(): DrawingManager | null;
   /** Trade entry/exit markers (backtest/live/custom-code) — see chartMarkers.ts. */
   getSeriesMarkersPrimitive(): ISeriesMarkersPluginApi<Time> | null;

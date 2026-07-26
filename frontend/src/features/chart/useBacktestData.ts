@@ -56,6 +56,7 @@ import {
   toCustomSignalsSeriesMarkers,
   toSignalSeriesMarkers,
 } from "./chartMarkers";
+import { subscribeSharedPoll } from "./sharedPoll";
 import type { ChartEngineController, OrderLineStyle } from "./types";
 
 // Matches ChartPanel's own MARKERS_POLL_MS — the live-bot eye view's
@@ -165,52 +166,48 @@ export function useBacktestData({
   // (it still appears as a live position via the broker/orders UI).
   useEffect(() => {
     if (!liveBotSkill || !accountId) return;
-    let cancelled = false;
-
-    const poll = () => {
-      Promise.all([
-        getLiveBotSignals(accountId, liveBotSkill),
-        getTradeMarkers(accountId, symbol, liveBotSkill),
-      ])
-        .then(([signals, markers]) => {
-          if (cancelled) return;
-          setBacktestSignals(signals);
-          setBacktestTrades(
-            markers
-              .filter(
-                (m): m is TradeMarker & { close_time: number; close_price: number } =>
-                  m.close_time !== null && m.close_price !== null,
-              )
-              .map((m) => ({
-                side: m.side,
-                volume: m.volume,
-                open_time: m.open_time,
-                open_price: m.open_price,
-                sl: m.sl,
-                tp: m.tp,
-                close_time: m.close_time,
-                close_price: m.close_price,
-                profit: m.profit ?? 0,
-                r_multiple: null,
-                zone: null,
-                pattern: null,
-                structure: [],
-                reason: "",
-                confidence: null,
-              })),
-          );
-        })
-        .catch(() => {
-          // Activity log / journal unreachable — leave whatever's already shown.
-        });
-    };
-
-    poll();
-    const timer = setInterval(poll, MARKERS_POLL_MS);
-    return () => {
-      cancelled = true;
-      clearInterval(timer);
-    };
+    // Shared across every window with the same bot's eye on (multi-chart
+    // layout §) — the fetch is identical (account+symbol+skill), so N
+    // windows don't each poll the journal/activity-log independently.
+    const unsubscribe = subscribeSharedPoll(
+      `live-bot-markers:${accountId}:${symbol}:${liveBotSkill}`,
+      MARKERS_POLL_MS,
+      () =>
+        Promise.all([
+          getLiveBotSignals(accountId, liveBotSkill),
+          getTradeMarkers(accountId, symbol, liveBotSkill),
+        ]),
+      (result) => {
+        if (!result) return; // Activity log / journal unreachable — leave whatever's already shown.
+        const [signals, markers] = result;
+        setBacktestSignals(signals);
+        setBacktestTrades(
+          markers
+            .filter(
+              (m): m is TradeMarker & { close_time: number; close_price: number } =>
+                m.close_time !== null && m.close_price !== null,
+            )
+            .map((m) => ({
+              side: m.side,
+              volume: m.volume,
+              open_time: m.open_time,
+              open_price: m.open_price,
+              sl: m.sl,
+              tp: m.tp,
+              close_time: m.close_time,
+              close_price: m.close_price,
+              profit: m.profit ?? 0,
+              r_multiple: null,
+              zone: null,
+              pattern: null,
+              structure: [],
+              reason: "",
+              confidence: null,
+            })),
+        );
+      },
+    );
+    return unsubscribe;
   }, [accountId, symbol, liveBotSkill]);
 
   // Clears the live-bot overlay's data when the eye turns off, so a stale

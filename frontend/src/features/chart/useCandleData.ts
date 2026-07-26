@@ -85,6 +85,7 @@ import {
 import { onSocketConnect, subscribeRoom } from '@/shared/api/ws';
 import { cssVar } from './chartFormat';
 import { isCandleMessage, toBar, toVolumeBar } from './chartData';
+import { subscribeSharedPoll } from './sharedPoll';
 import type { ChartEngineController, ChartRenderController, NewsBand } from './types';
 import type { ContextMenuState, OrderPopoverState } from './useOrderPopovers';
 import type { DrawingMenuState } from './useDrawingTools';
@@ -416,12 +417,13 @@ export function useCandleData(params: UseCandleDataParams): ChartRenderControlle
       const upColor = cssVar('--color-ok');
       const downColor = cssVar('--color-err');
       const bars = visibleCandles();
-      chartController
-        .getCandleSeries()
-        ?.setData([...bars.map(toBar), ...buildFutureWhitespace(bars, timeframe)]);
+      chartController.getCandleSeries()?.setData(bars.map(toBar));
       chartController
         .getVolumeSeries()
         ?.setData(bars.map((c) => toVolumeBar(c, upColor, downColor)));
+      chartController
+        .getWhitespaceSeries()
+        ?.setData(buildFutureWhitespace(bars, timeframe));
       scheduleOverlayRecompute();
       setTimeout(() => {
         if (!cancelled) bumpLines((t) => t + 1);
@@ -652,9 +654,10 @@ export function useCandleData(params: UseCandleDataParams): ChartRenderControlle
         // The socket carries every open room's events on one connection —
         // Socket.IO room scoping only filters what the *server* emits, not
         // which of a client's several `.on(event, ...)` handlers a given
-        // message reaches. A multi-chart layout (this chart + `useMiniCandleData`
-        // instances) or the brief overlap window during a symbol/timeframe
-        // switch means this handler can be called with another room's candle.
+        // message reaches. A multi-chart layout (this chart + the other
+        // windows' own candle subscriptions) or the brief overlap window
+        // during a symbol/timeframe switch means this handler can be called
+        // with another room's candle.
         // Without this check that candle gets spliced into `bars` and pushed
         // into the chart series regardless of scale, producing exactly the
         // out-of-order drops/crashes this file's other guards are catching.
@@ -678,6 +681,9 @@ export function useCandleData(params: UseCandleDataParams): ChartRenderControlle
           bars[bars.length - 1] = candle;
         } else {
           bars.push(candle);
+          chartController
+            .getWhitespaceSeries()
+            ?.setData(buildFutureWhitespace(bars, timeframe));
         }
         try {
           chartController.getCandleSeries()?.update(toBar(candle));
@@ -689,10 +695,18 @@ export function useCandleData(params: UseCandleDataParams): ChartRenderControlle
             if (!cancelled) bumpLines((t) => t + 1);
           }, 50);
         } catch (err) {
-          // Defensive: lightweight-charts throws if a live update's time
-          // is older than what's on the chart. Shouldn't happen once
-          // gated by historyLoadedRef, but a dropped frame beats a crash.
-          console.warn('chart: dropped out-of-order live update', err);
+          // Defensive: lightweight-charts throws if a live update's time is
+          // older than what the *series* itself last received — which can
+          // still happen even after the `bars`-ref check above, since `bars`
+          // and the series' own internal state can momentarily disagree
+          // (e.g. mid-flight during a symbol/timeframe switch's async
+          // history load). Previously this just dropped the tick and warned,
+          // leaving the chart one bar stale until the next tick happened to
+          // land cleanly; falling back to a full `render()` re-`setData()`s
+          // the series from `candlesRef.current` (already updated above),
+          // resyncing it immediately instead of hoping the next tick fixes it.
+          console.warn('chart: dropped out-of-order live update, resyncing', err);
+          render();
         }
       },
     );
@@ -755,33 +769,26 @@ export function useCandleData(params: UseCandleDataParams): ChartRenderControlle
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [accountId, symbol, timeframe, backtestReportId, sessionReplayPeriod]);
 
-  // Poll live spread and symbol info for header indicator and spread line.
+  // Poll live spread and symbol info for header indicator and spread line —
+  // shared across every window on the same account+symbol (multi-chart
+  // layout §) so N windows don't each fire an identical request every tick.
   useEffect(() => {
     if (!accountId) return;
-    let cancelled = false;
-
-    const poll = () => {
-      getSymbolInfo(accountId, symbol)
-        .then((info) => {
-          if (!cancelled) {
-            setSymbolInfo(info);
-            setSpreadPoints(info.spread_points);
-          }
-        })
-        .catch(() => {
-          if (!cancelled) {
-            setSymbolInfo(null);
-            setSpreadPoints(null);
-          }
-        });
-    };
-
-    poll();
-    const timer = setInterval(poll, SPREAD_POLL_MS);
-    return () => {
-      cancelled = true;
-      clearInterval(timer);
-    };
+    const unsubscribe = subscribeSharedPoll(
+      `symbol-info:${accountId}:${symbol}`,
+      SPREAD_POLL_MS,
+      () => getSymbolInfo(accountId, symbol),
+      (info, error) => {
+        if (error || !info) {
+          setSymbolInfo(null);
+          setSpreadPoints(null);
+        } else {
+          setSymbolInfo(info);
+          setSpreadPoints(info.spread_points);
+        }
+      },
+    );
+    return unsubscribe;
   }, [accountId, symbol]);
 
   // News window shading (§8, F8): shade the pre/post-event window of any
@@ -844,27 +851,28 @@ export function useCandleData(params: UseCandleDataParams): ChartRenderControlle
       });
     }
 
-    function pollNews() {
-      getActiveNewsWindows()
-        .then((windows) => {
-          if (cancelled) return;
-          currentWindows = windows;
-          recompute();
-        })
-        .catch(() => {
-          if (!cancelled) setNewsBands((prev) => (prev.length === 0 ? prev : []));
-        });
-    }
-
-    pollNews();
-    const timer = setInterval(pollNews, NEWS_POLL_MS);
+    // The fetch itself is account-wide (no symbol/timeframe param) and
+    // identical for every open window — shared across all of them (multi-
+    // chart layout §), while `recompute()` above (which reads the result
+    // through `currentWindows`) stays per-window since it depends on this
+    // window's own visible range/container size.
+    const unsubscribe = subscribeSharedPoll(
+      'news-windows',
+      NEWS_POLL_MS,
+      () => getActiveNewsWindows(),
+      (windows, error) => {
+        if (cancelled) return;
+        currentWindows = error || !windows ? [] : windows;
+        recompute();
+      },
+    );
     chart?.timeScale().subscribeVisibleTimeRangeChange(recompute);
     const resizeObserver = new ResizeObserver(recompute);
     if (container) resizeObserver.observe(container);
 
     return () => {
       cancelled = true;
-      clearInterval(timer);
+      unsubscribe();
       chart?.timeScale().unsubscribeVisibleTimeRangeChange(recompute);
       resizeObserver.disconnect();
     };

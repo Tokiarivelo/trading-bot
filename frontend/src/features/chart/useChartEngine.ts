@@ -45,6 +45,7 @@ import {
   createChart,
   createSeriesMarkers,
   HistogramSeries,
+  LineSeries,
   type IChartApi,
   type ISeriesApi,
   type ISeriesMarkersPluginApi,
@@ -92,6 +93,7 @@ export function useChartEngine(params: UseChartEngineParams) {
   const chartRef = useRef<IChartApi | null>(null);
   const candleSeriesRef = useRef<ISeriesApi<'Candlestick'> | null>(null);
   const volumeSeriesRef = useRef<ISeriesApi<'Histogram'> | null>(null);
+  const whitespaceSeriesRef = useRef<ISeriesApi<'Line'> | null>(null);
   const seriesMarkersRef = useRef<ISeriesMarkersPluginApi<Time> | null>(null);
   // Separate marker-plugin instance for the manual 'structure'/'qml'
   // indicators (see useIndicators' recomputeIndicators) — kept independent
@@ -183,9 +185,17 @@ export function useChartEngine(params: UseChartEngineParams) {
       .priceScale()
       .applyOptions({ scaleMargins: { top: 0.8, bottom: 0 } });
 
+    const whitespaceSeries = chart.addSeries(LineSeries, {
+      color: 'transparent',
+      priceScaleId: '',
+      lastValueVisible: false,
+      priceLineVisible: false,
+    });
+
     chartRef.current = chart;
     candleSeriesRef.current = candleSeries;
     volumeSeriesRef.current = volumeSeries;
+    whitespaceSeriesRef.current = whitespaceSeries;
     seriesMarkersRef.current = createSeriesMarkers(candleSeries, []);
     structureMarkersRef.current = createSeriesMarkers(candleSeries, []);
 
@@ -536,6 +546,7 @@ export function useChartEngine(params: UseChartEngineParams) {
       chartRef.current = null;
       candleSeriesRef.current = null;
       volumeSeriesRef.current = null;
+      whitespaceSeriesRef.current = null;
       seriesMarkersRef.current = null;
       structureMarkersRef.current = null;
       setIsReady(false);
@@ -553,6 +564,7 @@ export function useChartEngine(params: UseChartEngineParams) {
       getChart: () => chartRef.current,
       getCandleSeries: () => candleSeriesRef.current,
       getVolumeSeries: () => volumeSeriesRef.current,
+      getWhitespaceSeries: () => whitespaceSeriesRef.current,
       getDrawingManager: () => drawingManagerRef.current,
       getSeriesMarkersPrimitive: () => seriesMarkersRef.current,
       getStructureMarkersPrimitive: () => structureMarkersRef.current,
@@ -568,6 +580,7 @@ export function useChartEngine(params: UseChartEngineParams) {
     chartRef,
     candleSeriesRef,
     volumeSeriesRef,
+    whitespaceSeriesRef,
     seriesMarkersRef,
     structureMarkersRef,
     drawingManagerRef,
