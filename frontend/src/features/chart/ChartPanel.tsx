@@ -14,12 +14,14 @@ import {
 } from 'lightweight-charts';
 import { type IDrawing } from 'lightweight-charts-drawing';
 import {
+  ArrowDown,
   Play,
   Square,
   X,
 } from 'lucide-react';
+import dynamic from 'next/dynamic';
 import Link from 'next/link';
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   getTradeMarkers,
   type Candle,
@@ -27,12 +29,8 @@ import {
   type StrategyVersionSummary,
   evaluateCustomCode,
 } from '@/shared/api/client';
-import { python } from '@codemirror/lang-python';
-import { githubDarkInit } from '@uiw/codemirror-theme-github';
-import CodeMirror from '@uiw/react-codemirror';
 import { useActiveAccount } from '@/shared/api/account-context';
 import type { Trading } from '@/features/trading/useTrading';
-import { BacktestStrategyEditor } from '@/features/backtest/BacktestStrategyEditor';
 import { SIGNAL_OUTCOME_META } from '@/features/backtest/signalOutcome';
 import { ActivityLogDock } from './ActivityLogDock';
 import { ChartContextMenu } from './ChartContextMenu';
@@ -48,7 +46,7 @@ import { ReplayControls } from './ReplayControls';
 import { SessionReplayPicker } from './SessionReplayPicker';
 import { SignalsDock } from './SignalsDock';
 import { useBacktestData } from './useBacktestData';
-import { fetchCandlesForPeriod, TIMEFRAME_SECONDS, useCandleData } from './useCandleData';
+import { FINER_TIMEFRAME, fetchCandlesForPeriod, TIMEFRAME_SECONDS, useCandleData } from './useCandleData';
 import { fetchShared } from './sharedFetchCache';
 import { useChartEngine } from './useChartEngine';
 import { useChartUIToggles } from './useChartUIToggles';
@@ -88,16 +86,27 @@ import { subscribeSharedPoll } from './sharedPoll';
 
 const MARKERS_POLL_MS = 5000;
 
-const cmTheme = githubDarkInit({
-  settings: {
-    background: 'var(--color-bg)',
-    gutterBackground: 'var(--color-bg)',
-    lineHighlight: 'var(--color-panel)',
-    foreground: 'var(--color-ink)',
-    caret: 'var(--color-accent)',
-    selection: 'color-mix(in srgb, var(--color-accent) 30%, transparent)',
-  },
-});
+// Lazy-loaded: BacktestStrategyEditor pulls in @uiw/react-codemirror +
+// @codemirror/lang-python + @uiw/codemirror-theme-github, and only renders
+// when the strategy-editor drawer is toggled open — keep that bundle out of
+// the main chart route's initial JS.
+const BacktestStrategyEditor = dynamic(
+  () =>
+    import('@/features/backtest/BacktestStrategyEditor').then(
+      (mod) => mod.BacktestStrategyEditor,
+    ),
+  { ssr: false },
+);
+
+// Lazy-loaded for the same reason: CustomCodeDrawer owns its own copy of
+// @uiw/react-codemirror + @codemirror/lang-python + @uiw/codemirror-theme-github
+// (a second, independent user of those packages from BacktestStrategyEditor
+// above) and only renders when the "Run Custom Code" drawer is open.
+const CustomCodeDrawer = dynamic(
+  () =>
+    import('./CustomCodeDrawer').then((mod) => mod.CustomCodeDrawer),
+  { ssr: false },
+);
 
 export function ChartPanel({
   symbol,
@@ -204,6 +213,15 @@ export function ChartPanel({
   // is active) — the naive cursor cutoff already handles those cases. Loaded
   // by the fetch effect further down.
   const masterCandlesRef = useRef<Candle[]>([]);
+  // Tick-form replay: the next-finer timeframe's candles for the *local*
+  // (single-window) replay period, so `visibleCandles()` can grow the current
+  // bar into a live-like "forming" bar from the finer bars that have landed
+  // inside it — the same synthesis `masterCandlesRef` drives for a coarser
+  // multi-chart follower, here for this window's own replay. Empty when
+  // tick-form is off, no replay is active, the timeframe has nothing finer
+  // (M1), or the finer history isn't available for the period — all of which
+  // fall back to the whole-bar reveal. Loaded by the fetch effect further down.
+  const finerCandlesRef = useRef<Candle[]>([]);
   // useBacktestData's call moves further down (right after useChartEngine),
   // since phase 10 gave it a `chartController` param its marker-application
   // effect needs to paint through — see the call site below.
@@ -220,12 +238,18 @@ export function ChartPanel({
     toggleSeparators,
     showSpreadLine,
     toggleSpreadLine,
+    showVolume,
+    toggleVolume,
     showTradeLabels,
     toggleTradeLabels,
+    showTradeMarkers,
+    toggleTradeMarkers,
     orderLineStyle,
     updateOrderLineStyle,
     showOrderLineSettings,
     setShowOrderLineSettings,
+    showDrawingToolbar,
+    toggleDrawingToolbar,
   } = useChartUIToggles();
   // Replay ("live session player", §F): progressively reveals the backtest
   // report's candles/indicators/trades/log up to a moving cursor instead of
@@ -250,6 +274,23 @@ export function ChartPanel({
   // mirrors it into state purely so the UI can show whether it's engaged.
   const followCursorRef = useRef(true);
   const [followingCursor, setFollowingCursor] = useState(true);
+  // Tick-form replay toggle: when on (the default), the autoplay loop advances
+  // a finer sub-cursor *within* each bar so the bar visibly forms — wick
+  // growing, body flipping green/red — from real finer-timeframe candles
+  // (`finerCandlesRef`), instead of popping in fully closed. `tickFormRef` is
+  // the imperative copy `visibleCandles()`/`render()` (closures created once
+  // per data-load) read; `tickForm` mirrors it for the ReplayControls toggle.
+  // Auto-forced off (and disabled in the UI) when the current timeframe has no
+  // finer level or the finer history isn't available — see `finerAvailable`.
+  const tickFormRef = useRef(true);
+  const [tickForm, setTickForm] = useState(true);
+  const [finerAvailable, setFinerAvailable] = useState(false);
+  // The finer sub-cursor: the time up to which the current forming bar has
+  // been revealed from `finerCandlesRef`. Null outside animation (manual
+  // step/scrub, tick-form off, no finer data) — `visibleCandles()` then shows
+  // the current bar fully closed. Written by the autoplay loop in
+  // useReplayEngine; read by `visibleCandles()` below.
+  const replayFineTimeRef = useRef<number | null>(null);
   // The single gate every candle/indicator render path reads through: the
   // full loaded window normally, or a prefix up to the replay cursor while
   // replaying — so candles, EMA/SMA/RSI/MACD/Bollinger, and every manual
@@ -309,8 +350,53 @@ export function ChartPanel({
       return all.slice(0, idx);
     }
     if (!replayActiveRef.current) return candlesRef.current;
-    return candlesRef.current.slice(0, replayCursorIndexRef.current + 1);
+    const all = candlesRef.current;
+    const idx = replayCursorIndexRef.current;
+    const current = all[idx];
+    const fineTime = replayFineTimeRef.current;
+    const fine = finerCandlesRef.current;
+    // Tick-form: grow the current bar into a live-like "forming" bar from the
+    // finer candles that have landed inside it (up to the sub-cursor), so it
+    // builds tick-by-tick — wick extending, body flipping — instead of popping
+    // in fully closed. Same aggregation the coarser-follower branch above does
+    // from `masterCandlesRef`, here from this window's own `finerCandlesRef`.
+    // Falls back to the whole-bar reveal when tick-form is off, the sub-cursor
+    // is idle (manual step/scrub), there's no finer data, or the current bar
+    // hasn't loaded yet.
+    if (tickFormRef.current && current && fineTime != null && fine.length > 0) {
+      const bucketOpen = current.time as number;
+      const inBucket = fine.filter(
+        (c) => (c.time as number) >= bucketOpen && (c.time as number) <= fineTime,
+      );
+      if (inBucket.length > 0) {
+        const synthetic: Candle = {
+          symbol,
+          timeframe,
+          time: bucketOpen,
+          open: inBucket[0].open,
+          high: Math.max(...inBucket.map((c) => c.high)),
+          low: Math.min(...inBucket.map((c) => c.low)),
+          close: inBucket[inBucket.length - 1].close,
+          tick_volume: inBucket.reduce((sum, c) => sum + c.tick_volume, 0),
+          spread_points: inBucket[inBucket.length - 1].spread_points,
+        };
+        return [...all.slice(0, idx), synthetic];
+      }
+    }
+    return all.slice(0, idx + 1);
   }
+  // `visibleCandles` is re-created every render (it closes over props like
+  // `sharedReplay.cursorTime`), but useChartEngine/useCandleData/useIndicators
+  // capture whatever reference they got the last time *their own* effect ran —
+  // effects whose deps never change on a replay cursor tick. So they'd keep
+  // calling a frozen-in-time closure and the chart would paint once, then stop
+  // following the cursor. Same "ref assigned during render, closures read
+  // through it" idiom as `timeframeRef`/`symbolRef`/`onToolbarStateChangeRef`:
+  // the wrapper's identity never changes (no consumer dep array needs it), but
+  // calling it always runs the current render's logic.
+  const visibleCandlesRef = useRef(visibleCandles);
+  visibleCandlesRef.current = visibleCandles;
+  const visibleCandlesStable = useCallback(() => visibleCandlesRef.current(), []);
 
   // Session replay: an arbitrary historical period, picked ad hoc (not tied
   // to a saved backtest report), replayed bar-by-bar like a live session.
@@ -507,7 +593,7 @@ export function ChartPanel({
     seriesMarkersRef,
     drawingManagerRef,
   } = useChartEngine({
-    visibleCandles,
+    visibleCandles: visibleCandlesStable,
     replayActiveRef,
     followCursorRef,
     symbolRef,
@@ -523,6 +609,7 @@ export function ChartPanel({
     setDrawingContextMenu,
     setDrawingEditPopover,
     bumpLines,
+    showVolume,
   });
 
   // Backtest-view / live-bot "eye" view data (trades/activity log/signals,
@@ -559,6 +646,7 @@ export function ChartPanel({
     customCodeResult,
     orderLineStyle,
     showTradeLabels,
+    showTradeMarkers,
   });
 
   // Multi-chart layout: mirror this window's replay session (active + picked
@@ -604,7 +692,7 @@ export function ChartPanel({
     activeStrategy,
     showSeparators,
     showSeparatorsRef,
-    visibleCandles,
+    visibleCandles: visibleCandlesStable,
     getRawCandles: () => candlesRef.current,
     customCodeResultRef,
     accountId,
@@ -623,6 +711,7 @@ export function ChartPanel({
   // that ever fires, this render has long since finished and the ref has
   // been assigned.
   const handleEnterReplayRef = useRef<() => void>(() => {});
+  const centerOnRef = useRef<(index: number) => void>(() => {});
 
   // Candle history fetch + live WS subscribe, the spread/symbol-info poll,
   // and news-window shading now live in useCandleData.ts — see that hook's
@@ -640,7 +729,7 @@ export function ChartPanel({
     setSessionReplayPeriod,
     setSessionReplayLoadingPage,
     candlesRef,
-    visibleCandles,
+    visibleCandles: visibleCandlesStable,
     replayActiveRef,
     replayCursorIndexRef,
     followCursorRef,
@@ -660,7 +749,22 @@ export function ChartPanel({
     recomputeIndicatorsRef,
     computeCustomIndicatorsRef,
     bumpLines,
-    onSessionReplayLoaded: () => handleEnterReplayRef.current(),
+    onSessionReplayLoaded: () => {
+      if (sharedReplay?.active) {
+        followCursorRef.current = true;
+        setFollowingCursor(true);
+        chartRenderController.paintUpTo();
+        recomputeIndicatorsRef.current?.();
+        const bars = visibleCandles();
+        if (bars.length > 0) {
+          requestAnimationFrame(() => {
+            centerOnRef.current(bars.length - 1);
+          });
+        }
+        return;
+      }
+      handleEnterReplayRef.current();
+    },
   });
   const {
     symbolInfo,
@@ -675,8 +779,17 @@ export function ChartPanel({
     if (sharedReplay?.active && sharedReplay.cursorTime != null) {
       chartRenderController.paintUpTo();
       recomputeIndicatorsRef.current?.();
+      if (followCursorRef.current) {
+        const bars = visibleCandles();
+        if (bars.length > 0) {
+          requestAnimationFrame(() => {
+            centerOnRef.current(bars.length - 1);
+          });
+        }
+      }
     }
-  }, [sharedReplay?.active, sharedReplay?.cursorTime, chartRenderController, recomputeIndicatorsRef]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sharedReplay?.active, sharedReplay?.cursorTime, chartRenderController.paintUpTo, recomputeIndicatorsRef]);
 
   // Multi-timeframe replay synthesis (see `masterCandlesRef` above): when this
   // window is a strictly coarser follower than the master driving the replay,
@@ -705,7 +818,13 @@ export function ChartPanel({
       fetchCandlesForPeriod(accountId, symbol, masterTimeframe, sessionPeriod.from, sessionPeriod.to),
     )
       .then((candles) => {
-        if (!cancelled) masterCandlesRef.current = candles;
+        if (!cancelled) {
+          masterCandlesRef.current = candles;
+          if (sharedReplay?.active && sharedReplay.cursorTime != null) {
+            chartRenderController.paintUpTo();
+            recomputeIndicatorsRef.current?.();
+          }
+        }
       })
       .catch(() => {
         if (!cancelled) masterCandlesRef.current = [];
@@ -723,6 +842,61 @@ export function ChartPanel({
     sessionPeriod?.from,
     sessionPeriod?.to,
   ]);
+
+  // Tick-form replay (see `finerCandlesRef` above): once local replay is active,
+  // fetch the next-finer timeframe's candles across the loaded window so
+  // `visibleCandles()` can synthesize a forming bar. `replayActive` only flips
+  // true *after* the window's candles have loaded (see `handleEnterReplay`), so
+  // `candlesRef.current` is populated by the time this runs. Deduped via
+  // `fetchShared`. Deliberately NOT gated on the `tickForm` toggle: the fetch
+  // (and `finerAvailable`, which the toggle's enabled state depends on) must not
+  // depend on the toggle, or turning tick-form off would disable the button and
+  // trap it off. `tickFormRef` gates *use* of the data in `visibleCandles`/the
+  // autoplay loop instead. Resets to empty (and `finerAvailable` false) whenever
+  // synthesis can't apply — no replay, the timeframe has no finer level (M1),
+  // account not resolved, or candles not yet loaded — so stale finer data never
+  // leaks into a render, and the empty array falls back to the whole-bar reveal.
+  useEffect(() => {
+    const finerTf = FINER_TIMEFRAME[timeframe];
+    const loaded = candlesRef.current;
+    if (!accountId || !replayActive || !finerTf || loaded.length === 0) {
+      finerCandlesRef.current = [];
+      setFinerAvailable(false);
+      return;
+    }
+    let cancelled = false;
+    const from = loaded[0].time as number;
+    const to = (loaded[loaded.length - 1].time as number) + TIMEFRAME_SECONDS[timeframe];
+    const key = `finer:${accountId}:${symbol}:${finerTf}:${from}:${to}`;
+    fetchShared(key, () => fetchCandlesForPeriod(accountId, symbol, finerTf, from, to))
+      .then((candles) => {
+        if (cancelled) return;
+        finerCandlesRef.current = candles;
+        setFinerAvailable(candles.length > 0);
+        // A finer load that lands mid-replay repaints so the forming bar can
+        // start synthesizing immediately rather than on the next cursor tick.
+        if (replayActiveRef.current) chartRenderController.paintUpTo();
+      })
+      .catch(() => {
+        if (cancelled) return;
+        finerCandlesRef.current = [];
+        setFinerAvailable(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [accountId, symbol, timeframe, replayActive]);
+
+  // Keep the imperative tick-form flag (read by `visibleCandles()`/`render()`
+  // closures created once per data-load) in sync with the toggle state, and
+  // repaint immediately so toggling mid-replay (e.g. while paused) takes effect
+  // now rather than on the next autoplay tick.
+  useEffect(() => {
+    tickFormRef.current = tickForm;
+    if (replayActiveRef.current) chartRenderController.paintUpTo();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tickForm]);
 
   // Overlay recompute on activeStrategy/manualIndicators/showSeparators
   // change, and custom (backend-Python) indicator compute on
@@ -776,17 +950,27 @@ export function ChartPanel({
     followCursorRef,
     setSessionReplayPeriod,
     setShowActivityLogDock,
+    // `hideToolbar` alone is true for every window MultiChartLayout renders,
+    // including a single-window split — `windowCount > 1` is what actually
+    // distinguishes "real" multi-window mode (see the same pairing above,
+    // the focus-ring header).
+    suppressAutoActivityDock: hideToolbar && windowCount > 1,
     backtestTrades,
     backtestSignals,
     selectedTradeIndex,
     setSelectedTradeIndex,
     selectedSignalIndex,
     setSelectedSignalIndex,
+    sharedReplayActive: sharedReplay?.active ?? false,
+    finerCandlesRef,
+    replayFineTimeRef,
+    tickFormRef,
   });
   // See the `handleEnterReplayRef` declaration above useCandleData's call —
   // reassigned every render so useCandleData's `onSessionReplayLoaded`
   // always dispatches to the current `handleEnterReplay`.
   handleEnterReplayRef.current = replayEngine.handleEnterReplay;
+  centerOnRef.current = replayEngine.centerOn;
   const {
     navigateToTime,
     seekTo,
@@ -828,6 +1012,7 @@ export function ChartPanel({
   // state and marker-merge effect backtest view uses, just fed live data),
   // replacing this unscoped "every trade on the symbol" view rather than
   // layering on top of it.
+  //
   useEffect(() => {
     if (backtestReportId || liveBotSkill || !accountId) {
       setClosedTrades([]);
@@ -848,7 +1033,9 @@ export function ChartPanel({
     };
     if (customCodeResult) {
       seriesMarkersRef.current?.setMarkers(
-        toCustomSignalsSeriesMarkers(customCodeResult.signals, colors, showTradeLabels),
+        showTradeMarkers
+          ? toCustomSignalsSeriesMarkers(customCodeResult.signals, colors, showTradeLabels)
+          : [],
       );
       clearLiveTradeLines();
       return;
@@ -863,15 +1050,27 @@ export function ChartPanel({
       () => getTradeMarkers(accountId, symbol),
       (trades) => {
         if (!trades) return; // Journal unreachable — leave whatever's already drawn.
+        // A clicked active order or trade-history row (`activeHighlightedTicket`,
+        // synced with OrdersDock/TradeHistoryTable via `onSelectTicket`) scopes
+        // the arrow/label markers and the entry->exit oblique line down to just
+        // that one trade — without this, every trade on the symbol kept its own
+        // arrow/label/oblique-line regardless of what was clicked. An open
+        // position naturally gets only its entry arrow+label here (`toSeriesMarkers`
+        // only adds the exit circle/oblique-line once `close_time` is set), which
+        // is also why a selected active order never grows an oblique line.
+        const displayTrades =
+          activeHighlightedTicket !== null
+            ? trades.filter((t) => String(t.id) === String(activeHighlightedTicket))
+            : trades;
         seriesMarkersRef.current?.setMarkers(
-          toSeriesMarkers(trades, colors, showTradeLabels),
+          showTradeMarkers ? toSeriesMarkers(displayTrades, colors, showTradeLabels) : [],
         );
         setClosedTrades(trades);
         clearLiveTradeLines();
         const manager = drawingManagerRef.current;
         if (manager) {
           for (const drawing of buildLiveTradeLineDrawings(
-            trades,
+            displayTrades,
             colors,
             candlesRef.current,
             orderLineStyle,
@@ -894,6 +1093,8 @@ export function ChartPanel({
     customCodeResult,
     orderLineStyle,
     showTradeLabels,
+    activeHighlightedTicket,
+    showTradeMarkers,
   ]);
 
   // A trade-history row can be arbitrarily far in the past (unlike an open
@@ -1365,6 +1566,8 @@ export function ChartPanel({
     showDrawingsList: drawingTools.showDrawingsList,
     onToggleDrawingsList: () => drawingTools.setShowDrawingsList((v) => !v),
     drawingsListCount: drawingsList.length,
+    showDrawingToolbar,
+    onToggleDrawingToolbar: toggleDrawingToolbar,
     showCustomCodeEditor,
     onToggleCodeEditor: () => {
       setShowCustomCodeEditor((v) => !v);
@@ -1379,8 +1582,12 @@ export function ChartPanel({
     onToggleSeparators: toggleSeparators,
     showSpreadLine,
     onToggleSpreadLine: toggleSpreadLine,
+    showVolume,
+    onToggleVolume: toggleVolume,
     showTradeLabels,
     onToggleTradeLabels: toggleTradeLabels,
+    showTradeMarkers,
+    onToggleTradeMarkers: toggleTradeMarkers,
     orderLineVisible: orderLineStyle.visible,
     onToggleOrderLinesVisible: () => updateOrderLineStyle({ visible: !orderLineStyle.visible }),
     showOrderLineSettings,
@@ -1414,12 +1621,15 @@ export function ChartPanel({
     manualIndicators.length,
     drawingTools.showDrawingsList,
     drawingsList.length,
+    showDrawingToolbar,
     showCustomCodeEditor,
     showActivityLogDock,
     showOverlaysDropdown,
     showSeparators,
     showSpreadLine,
+    showVolume,
     showTradeLabels,
+    showTradeMarkers,
     orderLineStyle.visible,
     showOrderLineSettings,
     backtestReportId,
@@ -1712,6 +1922,9 @@ export function ChartPanel({
           }}
           following={followingCursor}
           onRecenter={handleRecenterReplay}
+          tickForm={tickForm}
+          onToggleTickForm={() => setTickForm((t) => !t)}
+          finerAvailable={finerAvailable}
         />
       )}
       {/* Strategy info — collapsed by default, shows only name + toggle */}
@@ -2051,146 +2264,35 @@ export function ChartPanel({
         )}
         {/* Custom script code drawer — slides in from the configured edge */}
         {showCustomCodeEditor && (
-          <div
-            className={`pointer-events-auto absolute z-40 flex flex-col bg-panel border-line shadow-2xl overflow-hidden ${
-              drawerPosition === 'right'
-                ? 'right-0 top-0 h-full border-l'
-                : drawerPosition === 'left'
-                  ? 'left-0 top-0 h-full border-r'
-                  : drawerPosition === 'bottom'
-                    ? 'bottom-0 left-0 w-full border-t'
-                    : 'top-0 left-0 w-full border-b'
-            }`}
-            style={{
-              width:
-                drawerPosition === 'right' || drawerPosition === 'left'
-                  ? '420px'
-                  : '100%',
-              height:
-                drawerPosition === 'bottom' || drawerPosition === 'top'
-                  ? '340px'
-                  : '100%',
-              maxWidth:
-                drawerPosition === 'right' || drawerPosition === 'left'
-                  ? '55%'
-                  : undefined,
-              maxHeight:
-                drawerPosition === 'bottom' || drawerPosition === 'top'
-                  ? '55%'
-                  : undefined,
+          <CustomCodeDrawer
+            drawerPosition={drawerPosition}
+            setDrawerPosition={setDrawerPosition}
+            customCodeDraft={customCodeDraft}
+            setCustomCodeDraft={setCustomCodeDraft}
+            customCodeCopied={customCodeCopied}
+            handleCopyCustomCode={handleCopyCustomCode}
+            customCodeBusy={customCodeBusy}
+            customCodeError={customCodeError}
+            customCodeResult={customCodeResult}
+            runCustomCode={() => runCustomCode()}
+            clearCustomCode={clearCustomCode}
+            onClose={() => {
+              setShowCustomCodeEditor(false);
+              clearCustomCode();
             }}
-          >
-            {/* Drawer header */}
-            <div className='flex items-center gap-2 border-b border-line px-3 py-1.5 bg-panel shrink-0'>
-              <span className='text-xs font-semibold text-ink truncate'>
-                Run Custom Code
-              </span>
-              {/* Position controls */}
-              <div className='flex items-center gap-0.5 ml-auto'>
-                <button
-                  onClick={handleCopyCustomCode}
-                  className={`cursor-pointer mr-1.5 rounded px-2 py-0.5 text-[10px] border transition-colors ${
-                    customCodeCopied
-                      ? 'border-ok text-ok bg-ok/10'
-                      : 'border-line text-ink-muted hover:text-accent hover:border-accent'
-                  }`}
-                  title='Copy code'
-                >
-                  {customCodeCopied ? 'Copied!' : 'Copy'}
-                </button>
-                {(['right', 'bottom', 'left', 'top'] as const).map((pos) => (
-                  <button
-                    key={pos}
-                    onClick={() => setDrawerPosition(pos)}
-                    title={`Move to ${pos}`}
-                    className={`cursor-pointer rounded px-1.5 py-0.5 text-[10px] border transition-colors ${
-                      drawerPosition === pos
-                        ? 'border-accent text-accent bg-accent/10'
-                        : 'border-line text-ink-muted hover:text-ink'
-                    }`}
-                  >
-                    {pos === 'right'
-                      ? '⇥'
-                      : pos === 'left'
-                        ? '⇤'
-                        : pos === 'bottom'
-                          ? '⇓'
-                          : '⇑'}
-                  </button>
-                ))}
-                <button
-                  onClick={() => {
-                    setShowCustomCodeEditor(false);
-                    clearCustomCode();
-                  }}
-                  className='cursor-pointer ml-1 rounded border border-line px-1.5 py-0.5 text-[10px] text-ink-muted hover:border-err hover:text-err transition-colors'
-                  title='Close drawer'
-                >
-                  ✕
-                </button>
-              </div>
-            </div>
-            {/* Drawer content */}
-            <div className='flex-1 flex flex-col p-2 min-h-0'>
-              <div className='flex-1 flex flex-col min-h-0 rounded-md border border-line bg-panel'>
-                <CodeMirror
-                  value={customCodeDraft}
-                  height='100%'
-                  className='flex-1 min-h-0 overflow-auto'
-                  theme={cmTheme}
-                  extensions={[python()]}
-                  onChange={setCustomCodeDraft}
-                  editable={!customCodeBusy}
-                />
-
-                {customCodeError && (
-                  <div className='border-t border-line px-3 py-2 text-xs text-err shrink-0 max-h-32 overflow-y-auto'>
-                    <p>{customCodeError}</p>
-                  </div>
-                )}
-
-                {customCodeResult && (
-                  <div className='border-t border-line px-3 py-1.5 text-xs text-ok shrink-0 bg-panel/30 flex items-center justify-between'>
-                    <span>
-                      Success: {customCodeResult.signals.length} signal(s),{' '}
-                      {Object.keys(customCodeResult.indicators).length}{' '}
-                      indicator(s) calculated
-                    </span>
-                    <button
-                      onClick={clearCustomCode}
-                      className='cursor-pointer px-1.5 py-0.5 rounded border border-line hover:border-ink hover:text-ink text-[10px] text-ink-muted'
-                    >
-                      Reset Graph
-                    </button>
-                  </div>
-                )}
-
-                <div className='flex items-center gap-2 border-t border-line p-3 shrink-0'>
-                  <button
-                    type='button'
-                    className='cursor-pointer rounded border border-accent px-3 py-1 text-xs text-accent hover:bg-accent hover:text-bg disabled:cursor-not-allowed disabled:opacity-50'
-                    disabled={customCodeBusy}
-                    onClick={() => runCustomCode()}
-                  >
-                    {customCodeBusy ? 'Running code...' : 'Run & Show on Graph'}
-                  </button>
-                  <span className='text-[10px] text-ink-muted'>
-                    Evaluates custom Python strategy. Returns moving
-                    averages/indicators & buy/sell signals on graph.
-                  </span>
-                </div>
-              </div>
-            </div>
-          </div>
+          />
         )}
-        {/* Drawing toolbar — floats on the left edge of the chart canvas */}
-        <DrawingToolbar
-          activeTool={drawingTool}
-          onToolSelect={setDrawingTool}
-          onClearAll={drawingTools.clearAllDrawings}
-          activeColor={activeColor}
-          onColorChange={drawingTools.handleColorChange}
-        />
+        {/* Drawing toolbar — floats on the left edge of the chart canvas,
+            toggled via the toolbar's "Tools" button (showDrawingToolbar) */}
+        {showDrawingToolbar && (
+          <DrawingToolbar
+            activeTool={drawingTool}
+            onToolSelect={setDrawingTool}
+            onClearAll={drawingTools.clearAllDrawings}
+            activeColor={activeColor}
+            onColorChange={drawingTools.handleColorChange}
+          />
+        )}
         {contextMenu && (
           <ChartContextMenu
             ref={contextMenuRef}
@@ -2579,6 +2681,57 @@ export function ChartPanel({
                 t.sl !== null ? `, SL ${t.sl}` : ''
               }${t.tp !== null ? `, TP ${t.tp}` : ''}`}
             />
+          );
+        })()}
+        {(() => {
+          // "Opened here" callout for a clicked active order or trade-history
+          // row (`findHistoryTrade`, same conduit the history-zone rectangle
+          // above and `navigateToTime`'s auto-scroll both use) — a pulsing
+          // ping-ring + solid dot exactly on the opening candle/price, plus a
+          // blinking side label with a bouncing down-arrow pointing at it, so
+          // the spot is unmistakable even once the chart has auto-centered on
+          // it (the plain series-marker arrow from `toSeriesMarkers` can be
+          // easy to miss at a glance).
+          const t = findHistoryTrade();
+          if (!t) return null;
+          const chart = chartRef.current;
+          const series = candleSeriesRef.current;
+          if (!chart || !series) return null;
+          const openSnap = nearestCandleTime(candlesRef.current, t.open_time);
+          if (openSnap === null) return null;
+          const x = chart.timeScale().timeToCoordinate(openSnap);
+          const y = series.priceToCoordinate(t.open_price);
+          if (x === null || y === null) return null;
+          const color = t.side === 'buy' ? cssVar('--color-buy') : cssVar('--color-sell');
+          return (
+            <div
+              key={`opened-here-${t.id}`}
+              className='pointer-events-none absolute z-20'
+              style={{ left: `${x}px`, top: `${y}px` }}
+            >
+              <div className='absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2'>
+                <span
+                  className='absolute left-1/2 top-1/2 h-4 w-4 -translate-x-1/2 -translate-y-1/2 animate-ping rounded-full'
+                  style={{ backgroundColor: color, opacity: 0.6 }}
+                />
+                <span
+                  className='relative block h-3 w-3 rounded-full ring-2 ring-white'
+                  style={{ backgroundColor: color, boxShadow: `0 0 6px ${color}` }}
+                />
+              </div>
+              <div
+                className='absolute left-1/2 -translate-x-1/2 -translate-y-full flex flex-col items-center gap-0.5'
+                style={{ top: '-6px' }}
+              >
+                <span
+                  className='animate-pulse whitespace-nowrap rounded px-2 py-0.5 text-[11px] font-bold'
+                  style={{ backgroundColor: color, color: '#ffffff', boxShadow: `0 0 8px ${color}` }}
+                >
+                  {t.side.toUpperCase()} opened here
+                </span>
+                <ArrowDown size={14} className='animate-bounce' style={{ color }} />
+              </div>
+            </div>
           );
         })()}
         {(() => {

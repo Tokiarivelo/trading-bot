@@ -151,15 +151,24 @@ export default function Home() {
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [selectedOrderTicket]);
 
-  // ChartPanel needs a symbol string even while the real one is still
-  // resolving on mount (see the effect below) — the empty-string placeholder
-  // is never rendered since ChartPanel itself is gated on `symbol` below.
-  const trading = useTrading(symbol ?? "");
-  const activeStrategy = useActiveStrategyForSymbol(symbol ?? "");
+  // Mirrors OrdersDock's own persisted visibility (via its onVisibleChange
+  // notify-only callback below) so the trade-history leg of useAllPositions
+  // can be skipped while that dock — the only consumer of
+  // skillByTicket/openTradeByTicket — is hidden. Starts true to match
+  // OrdersDock's own default-visible behavior before its post-mount
+  // localStorage read runs.
+  const [ordersDockVisible, setOrdersDockVisible] = useState(true);
   // Account-wide positions/pending orders — feeds both the header's total
   // floating P/L and the Active Orders / Positions panel (OrdersDock ->
   // AllOrdersPanel), so the two never fall out of sync or double-poll.
-  const allPositions = useAllPositions();
+  const allPositions = useAllPositions({ needsTradeHistory: ordersDockVisible });
+  // ChartPanel needs a symbol string even while the real one is still
+  // resolving on mount (see the effect below) — the empty-string placeholder
+  // is never rendered since ChartPanel itself is gated on `symbol` below.
+  // Symbol-filtered view of `allPositions` — no poll of its own, see
+  // useTrading.ts.
+  const trading = useTrading(symbol ?? "", allPositions);
+  const activeStrategy = useActiveStrategyForSymbol(symbol ?? "");
 
   // Resolve the symbol to open on load — `?symbol=` wins over the last one
   // viewed (`tb.lastSymbol`), which wins over the first favorite, which wins
@@ -400,6 +409,7 @@ export default function Home() {
               selectedTicket={selectedOrderTicket?.ticket ?? null}
               onSelectTicket={handleSelectOrderTicket}
               onClearSelection={() => setSelectedOrderTicket(null)}
+              onVisibleChange={setOrdersDockVisible}
             >
               {symbol ? (
                 <MultiChartLayout

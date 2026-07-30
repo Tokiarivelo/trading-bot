@@ -11,6 +11,7 @@ import {
   History,
   Layers,
   Pencil,
+  PenTool,
   RotateCcw,
   Settings,
   Sliders,
@@ -44,6 +45,11 @@ export interface ChartToolbarProps {
   showDrawingsList: boolean;
   onToggleDrawingsList: () => void;
   drawingsListCount: number;
+  /** Floating drawing-tool palette (DrawingToolbar) on the chart's left
+   * edge — hidden drawings themselves are unaffected, only the tool-picker
+   * strip is toggled. */
+  showDrawingToolbar: boolean;
+  onToggleDrawingToolbar: () => void;
   showCustomCodeEditor: boolean;
   onToggleCodeEditor: () => void;
   showActivityLogDock: boolean;
@@ -59,8 +65,12 @@ export interface ChartToolbarProps {
   onToggleSeparators: () => void;
   showSpreadLine: boolean;
   onToggleSpreadLine: () => void;
+  showVolume: boolean;
+  onToggleVolume: () => void;
   showTradeLabels: boolean;
   onToggleTradeLabels: () => void;
+  showTradeMarkers: boolean;
+  onToggleTradeMarkers: () => void;
   orderLineVisible: boolean;
   onToggleOrderLinesVisible: () => void;
   showOrderLineSettings: boolean;
@@ -103,6 +113,8 @@ export const ChartToolbar = memo(function ChartToolbar({
   showDrawingsList,
   onToggleDrawingsList,
   drawingsListCount,
+  showDrawingToolbar,
+  onToggleDrawingToolbar,
   showCustomCodeEditor,
   onToggleCodeEditor,
   showActivityLogDock,
@@ -114,8 +126,12 @@ export const ChartToolbar = memo(function ChartToolbar({
   onToggleSeparators,
   showSpreadLine,
   onToggleSpreadLine,
+  showVolume,
+  onToggleVolume,
   showTradeLabels,
   onToggleTradeLabels,
+  showTradeMarkers,
+  onToggleTradeMarkers,
   orderLineVisible,
   onToggleOrderLinesVisible,
   showOrderLineSettings,
@@ -315,6 +331,20 @@ export const ChartToolbar = memo(function ChartToolbar({
           <button
             type='button'
             className={`flex cursor-pointer items-center gap-1.5 rounded px-2.5 py-1 font-medium transition-all ${
+              showDrawingToolbar
+                ? 'bg-accent/20 text-accent border border-accent/30'
+                : 'text-ink-muted hover:text-ink hover:bg-line/40'
+            }`}
+            onClick={onToggleDrawingToolbar}
+            title='Show or hide the drawing tools palette'
+          >
+            <PenTool size={13} />
+            <span>Tools</span>
+          </button>
+
+          <button
+            type='button'
+            className={`flex cursor-pointer items-center gap-1.5 rounded px-2.5 py-1 font-medium transition-all ${
               showCustomCodeEditor
                 ? 'bg-accent/20 text-accent border border-accent/30'
                 : 'text-ink-muted hover:text-ink hover:bg-line/40'
@@ -346,12 +376,12 @@ export const ChartToolbar = memo(function ChartToolbar({
           <button
             type='button'
             className={`flex cursor-pointer items-center gap-1.5 rounded-md border border-line bg-bg/70 px-2.5 py-1.5 text-xs font-medium transition-all ${
-              showSeparators || showSpreadLine || orderLineVisible
+              showSeparators || showSpreadLine || orderLineVisible || showVolume
                 ? 'text-accent border-accent/40 bg-accent/10'
                 : 'text-ink-muted hover:text-ink hover:border-line/80'
             }`}
             onClick={onToggleOverlaysDropdown}
-            title='Chart overlay settings (Spread line, Period separators, Order lines)'
+            title='Chart overlay settings (Spread line, Period separators, Order lines, Volume)'
           >
             <Layers size={13} />
             <span>Overlays</span>
@@ -377,6 +407,19 @@ export const ChartToolbar = memo(function ChartToolbar({
                 {showSpreadLine && <Check size={12} className='text-accent' />}
               </button>
 
+              {/* Volume Toggle */}
+              <button
+                type='button'
+                className='flex w-full cursor-pointer items-center justify-between rounded px-2.5 py-1.5 text-xs text-ink-muted hover:bg-line/50 hover:text-ink transition-colors'
+                onClick={onToggleVolume}
+              >
+                <span className='flex items-center gap-2'>
+                  {showVolume ? <Eye size={13} className='text-accent' /> : <EyeOff size={13} />}
+                  <span>Volume histogram</span>
+                </span>
+                {showVolume && <Check size={12} className='text-accent' />}
+              </button>
+
               {/* Trade Labels Toggle */}
               <button
                 type='button'
@@ -389,6 +432,20 @@ export const ChartToolbar = memo(function ChartToolbar({
                   <span>Trade labels (BUY/SELL)</span>
                 </span>
                 {showTradeLabels && <Check size={12} className='text-accent' />}
+              </button>
+
+              {/* Trade Markers (arrows) Toggle */}
+              <button
+                type='button'
+                className='flex w-full cursor-pointer items-center justify-between rounded px-2.5 py-1.5 text-xs text-ink-muted hover:bg-line/50 hover:text-ink transition-colors'
+                onClick={onToggleTradeMarkers}
+                title='Show/hide the BUY/SELL arrows themselves — independent of the text label toggle'
+              >
+                <span className='flex items-center gap-2'>
+                  {showTradeMarkers ? <Eye size={13} className='text-accent' /> : <EyeOff size={13} />}
+                  <span>Trade arrows (BUY/SELL)</span>
+                </span>
+                {showTradeMarkers && <Check size={12} className='text-accent' />}
               </button>
 
               {/* Period Separators Toggle */}

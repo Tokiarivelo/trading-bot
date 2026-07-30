@@ -60,7 +60,7 @@ import { type MouseEventParams, type UTCTimestamp } from 'lightweight-charts';
 import { type IDrawing } from 'lightweight-charts-drawing';
 import { createDrawingInstance } from './chartMarkers';
 import { hexToRgba, REQUIRED_ANCHORS } from './chartFormat';
-import { clearUserDrawings, loadDrawingsFromStorage } from './chartStorage';
+import { clearUserDrawings, isProgrammaticDrawingId, loadDrawingsFromStorage } from './chartStorage';
 import type { ChartEngineController, DrawingToolType } from './types';
 
 /** Shared shape of the drawing-tools' own context-menu/edit-popover state —
@@ -440,12 +440,16 @@ export function useDrawingTools(params: UseDrawingToolsParams) {
     if (!manager || !d) return;
     d.updateOptions({ visible: !d.options.visible });
     try {
-      const data = manager.exportDrawings();
+      const data = manager
+        .exportDrawings()
+        .filter((item) => !isProgrammaticDrawingId(item.id));
       localStorage.setItem(`chart-drawings:${symbol}`, JSON.stringify(data));
     } catch {
       // localStorage quota or serialisation errors are non-fatal.
     }
-    setDrawingsList(manager.getAllDrawings());
+    setDrawingsList(
+      manager.getAllDrawings().filter((item) => !isProgrammaticDrawingId(item.id)),
+    );
   }
 
   function clearAllDrawings() {

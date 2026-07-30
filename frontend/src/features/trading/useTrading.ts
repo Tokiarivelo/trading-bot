@@ -1,31 +1,35 @@
 "use client";
 
 /**
- * Shared trading state for a symbol: polls open positions + pending orders,
- * exposes mutate actions that re-poll on success, and coordinates the
- * chart's click-to-place with the order ticket — `placementMode` is toggled
- * by the ticket, consumed by `ChartPanel`'s click handler, which populates
- * `draftOrder` for the user to confirm rather than firing an order directly.
+ * Symbol-scoped trading state, derived from `useAllPositions`'s already-
+ * polled account-wide result rather than polling `getPositions`/
+ * `getPendingOrders` a second time — `positions`/`pendingOrders` here are
+ * just that account-wide result filtered down to `symbol` (see `AllPositions`
+ * in `useAllPositions.ts`, the single caller-shared TanStack Query cache).
+ * Mutate actions are `useMutation`s whose `onSuccess` calls
+ * `allPositions.refresh()` — the same account-scoped query-key invalidation
+ * `refresh()` already does for the manual "refresh now" case — so a change
+ * reflects immediately rather than waiting for the next poll tick. Also
+ * coordinates the chart's click-to-place with the order ticket —
+ * `placementMode` is toggled by the ticket, consumed by `ChartPanel`'s click
+ * handler, which populates `draftOrder` for the user to confirm rather than
+ * firing an order directly.
  */
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
+import { useMutation } from "@tanstack/react-query";
 import { useActiveAccount } from "@/shared/api/account-context";
 import {
   cancelPendingOrder,
   closePosition,
-  getPendingOrders,
-  getPositions,
   modifyPendingOrder,
   modifyPosition,
   openOrder,
   placePendingOrder,
   type OrderSide,
-  type PendingOrderOut,
   type PendingOrderType,
-  type PositionOut,
 } from "@/shared/api/client";
-
-const POLL_MS = 3000;
+import type { AllPositions } from "./useAllPositions";
 
 export type PlacementMode = `${OrderSide}_${PendingOrderType}` | null;
 
@@ -35,33 +39,22 @@ export interface DraftOrder {
   price: number;
 }
 
-export function useTrading(symbol: string) {
+export function useTrading(symbol: string, allPositions: AllPositions) {
   const accountId = useActiveAccount();
-  const [positions, setPositions] = useState<PositionOut[]>([]);
-  const [pendingOrders, setPendingOrders] = useState<PendingOrderOut[]>([]);
   const [placementMode, setPlacementMode] = useState<PlacementMode>(null);
   const [draftOrder, setDraftOrder] = useState<DraftOrder | null>(null);
-  const symbolRef = useRef(symbol);
-  symbolRef.current = symbol;
   const accountIdRef = useRef(accountId);
   accountIdRef.current = accountId;
+  const refresh = allPositions.refresh;
 
-  const refresh = useCallback(() => {
-    const account = accountIdRef.current;
-    if (!symbolRef.current || !account) return; // no symbol/account resolved yet (initial load)
-    getPositions(account, symbolRef.current)
-      .then(setPositions)
-      .catch(() => {});
-    getPendingOrders(account, symbolRef.current)
-      .then(setPendingOrders)
-      .catch(() => {});
-  }, []);
-
-  useEffect(() => {
-    refresh();
-    const id = setInterval(refresh, POLL_MS);
-    return () => clearInterval(id);
-  }, [symbol, accountId, refresh]);
+  const positions = useMemo(
+    () => allPositions.positions.filter((p) => p.symbol === symbol),
+    [allPositions.positions, symbol],
+  );
+  const pendingOrders = useMemo(
+    () => allPositions.pendingOrders.filter((o) => o.symbol === symbol),
+    [allPositions.pendingOrders, symbol],
+  );
 
   // A chart click while a placement mode is armed populates the draft for
   // confirmation in the ticket, then disarms itself — one click, one draft.
@@ -75,6 +68,64 @@ export function useTrading(symbol: string) {
     [placementMode],
   );
 
+  const openMarketMutation = useMutation({
+    mutationFn: (vars: { account: string; side: OrderSide; volume: number; sl: number | null; tp: number | null }) =>
+      openOrder(vars.account, { symbol, side: vars.side, volume: vars.volume, sl: vars.sl, tp: vars.tp }),
+    onSuccess: () => refresh(),
+  });
+
+  const placePendingMutation = useMutation({
+    mutationFn: (vars: {
+      account: string;
+      side: OrderSide;
+      orderType: PendingOrderType;
+      volume: number;
+      price: number;
+      sl: number | null;
+      tp: number | null;
+    }) =>
+      placePendingOrder(vars.account, {
+        symbol,
+        side: vars.side,
+        order_type: vars.orderType,
+        volume: vars.volume,
+        price: vars.price,
+        sl: vars.sl,
+        tp: vars.tp,
+      }),
+    onSuccess: () => {
+      setDraftOrder(null);
+      refresh();
+    },
+  });
+
+  const closeMutation = useMutation({
+    mutationFn: (vars: { account: string; ticket: number }) => closePosition(vars.account, vars.ticket),
+    onSuccess: () => refresh(),
+  });
+
+  const modifyPositionSlTpMutation = useMutation({
+    mutationFn: (vars: { account: string; ticket: number; sl: number | null; tp: number | null }) =>
+      modifyPosition(vars.account, vars.ticket, vars.sl, vars.tp),
+    onSuccess: () => refresh(),
+  });
+
+  const modifyPendingMutation = useMutation({
+    mutationFn: (vars: {
+      account: string;
+      ticket: number;
+      price: number | null;
+      sl: number | null;
+      tp: number | null;
+    }) => modifyPendingOrder(vars.account, vars.ticket, vars.price, vars.sl, vars.tp),
+    onSuccess: () => refresh(),
+  });
+
+  const cancelPendingMutation = useMutation({
+    mutationFn: (vars: { account: string; ticket: number }) => cancelPendingOrder(vars.account, vars.ticket),
+    onSuccess: () => refresh(),
+  });
+
   async function openMarket(
     side: OrderSide,
     volume: number,
@@ -83,8 +134,7 @@ export function useTrading(symbol: string) {
   ) {
     const account = accountIdRef.current;
     if (!account) return;
-    await openOrder(account, { symbol, side, volume, sl, tp });
-    refresh();
+    await openMarketMutation.mutateAsync({ account, side, volume, sl, tp });
   }
 
   async function placePending(
@@ -97,31 +147,19 @@ export function useTrading(symbol: string) {
   ) {
     const account = accountIdRef.current;
     if (!account) return;
-    await placePendingOrder(account, {
-      symbol,
-      side,
-      order_type: orderType,
-      volume,
-      price,
-      sl,
-      tp,
-    });
-    setDraftOrder(null);
-    refresh();
+    await placePendingMutation.mutateAsync({ account, side, orderType, volume, price, sl, tp });
   }
 
   async function close(ticket: number) {
     const account = accountIdRef.current;
     if (!account) return;
-    await closePosition(account, ticket);
-    refresh();
+    await closeMutation.mutateAsync({ account, ticket });
   }
 
   async function modifyPositionSlTp(ticket: number, sl: number | null, tp: number | null) {
     const account = accountIdRef.current;
     if (!account) return;
-    await modifyPosition(account, ticket, sl, tp);
-    refresh();
+    await modifyPositionSlTpMutation.mutateAsync({ account, ticket, sl, tp });
   }
 
   async function modifyPending(
@@ -132,15 +170,13 @@ export function useTrading(symbol: string) {
   ) {
     const account = accountIdRef.current;
     if (!account) return;
-    await modifyPendingOrder(account, ticket, price, sl, tp);
-    refresh();
+    await modifyPendingMutation.mutateAsync({ account, ticket, price, sl, tp });
   }
 
   async function cancelPending(ticket: number) {
     const account = accountIdRef.current;
     if (!account) return;
-    await cancelPendingOrder(account, ticket);
-    refresh();
+    await cancelPendingMutation.mutateAsync({ account, ticket });
   }
 
   return {

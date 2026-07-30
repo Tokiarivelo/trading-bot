@@ -11,7 +11,14 @@
  * ActivityLogDock, shown while ChartPanel's `replayActive` is true.
  */
 
-import { ChevronsLeft, ChevronsRight, Crosshair, Pause, Play } from "lucide-react";
+import {
+  CandlestickChart,
+  ChevronsLeft,
+  ChevronsRight,
+  Crosshair,
+  Pause,
+  Play,
+} from "lucide-react";
 import type { ReactNode } from "react";
 
 const SPEED_OPTIONS = [0.25, 0.5, 1, 2, 4, 8, 16];
@@ -29,6 +36,9 @@ export function ReplayControls({
   onSeek,
   following,
   onRecenter,
+  tickForm,
+  onToggleTickForm,
+  finerAvailable,
   prefixContent,
 }: {
   playing: boolean;
@@ -46,6 +56,15 @@ export function ReplayControls({
    * once the user drags/zooms manually, back on via the button below. */
   following: boolean;
   onRecenter: () => void;
+  /** Whether tick-form (live-like intra-bar formation from finer candles) is on.
+   * Optional: the toggle only renders when `onToggleTickForm` is provided
+   * (single-window replay). Multi-chart mode forms bars via follower synthesis
+   * instead and omits it. */
+  tickForm?: boolean;
+  onToggleTickForm?: () => void;
+  /** Whether finer-timeframe data is loaded for the current window. When false
+   * the toggle is disabled and playback falls back to the whole-bar reveal. */
+  finerAvailable?: boolean;
   /** Optional extra nodes rendered on the far left (e.g. multi-window sync selectors). */
   prefixContent?: ReactNode;
 }) {
@@ -101,6 +120,27 @@ export function ReplayControls({
           ))}
         </select>
       </label>
+      {onToggleTickForm && (
+        <button
+          className={`flex shrink-0 cursor-pointer items-center gap-1 rounded border px-2 py-0.5 disabled:cursor-not-allowed disabled:opacity-40 ${
+            tickForm && finerAvailable
+              ? 'border-accent text-accent hover:bg-accent/20'
+              : 'border-line text-ink-muted hover:border-accent hover:text-accent'
+          }`}
+          onClick={onToggleTickForm}
+          disabled={!finerAvailable}
+          title={
+            !finerAvailable
+              ? 'No finer-timeframe data for this window — bars reveal fully closed'
+              : tickForm
+                ? 'Tick-form on: bars form live-like from finer candles. Click for instant reveal.'
+                : 'Tick-form off: bars reveal fully closed. Click to form them live-like.'
+          }
+        >
+          <CandlestickChart size={14} />
+          Tick-form
+        </button>
+      )}
       <input
         type="range"
         min={0}

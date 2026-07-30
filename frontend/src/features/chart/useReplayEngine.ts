@@ -135,6 +135,11 @@ export interface UseReplayEngineParams {
    * unrelated to any hook-ordering constraint, just simplest to receive
    * as a param rather than duplicate. */
   setShowActivityLogDock: Dispatch<SetStateAction<boolean>>;
+  /** Skips the auto-open above — set for any window in a multi-window split
+   * layout (`hideToolbar`), where popping the activity dock open over
+   * whichever window started replay is disruptive rather than helpful; the
+   * single full-chart view keeps the original auto-open behavior. */
+  suppressAutoActivityDock?: boolean;
 
   // --- Backtest/live-bot trade+signal selection (useBacktestData) — the
   // click targets `handleToggleTrade`/`handleNavigateTrade`/
@@ -145,6 +150,22 @@ export interface UseReplayEngineParams {
   setSelectedTradeIndex: Dispatch<SetStateAction<number | null>>;
   selectedSignalIndex: number | null;
   setSelectedSignalIndex: Dispatch<SetStateAction<number | null>>;
+  sharedReplayActive?: boolean;
+
+  // --- Tick-form replay (created in ChartPanel.tsx alongside the other replay
+  // refs, since `visibleCandles`/`render` — closures built in useCandleData,
+  // called before this hook — read them; see ChartPanel's `finerCandlesRef`/
+  // `tickFormRef`/`replayFineTimeRef` docs). The autoplay loop below advances
+  // `replayFineTimeRef` through `finerCandlesRef` so each bar visibly forms
+  // from its finer constituents instead of appearing fully closed.
+  /** The next-finer timeframe's candles for the replay window, or empty when
+   * tick-form is off / unavailable — then the loop reveals whole bars. */
+  finerCandlesRef: RefObject<Candle[]>;
+  /** Sub-cursor: time up to which the current forming bar is revealed. Null =
+   * show the current bar fully closed (manual seek, tick-form off). */
+  replayFineTimeRef: RefObject<number | null>;
+  /** Whether tick-form is enabled (mirror of ChartPanel's `tickForm`). */
+  tickFormRef: RefObject<boolean>;
 }
 
 export function useReplayEngine(params: UseReplayEngineParams) {
@@ -152,6 +173,7 @@ export function useReplayEngine(params: UseReplayEngineParams) {
     chartController,
     timeframe,
     replayActive,
+    sharedReplayActive = false,
     setReplayActive,
     replayActiveRef,
     replayPlaying,
@@ -162,12 +184,16 @@ export function useReplayEngine(params: UseReplayEngineParams) {
     followCursorRef,
     setSessionReplayPeriod,
     setShowActivityLogDock,
+    suppressAutoActivityDock = false,
     backtestTrades,
     backtestSignals,
     selectedTradeIndex,
     setSelectedTradeIndex,
     selectedSignalIndex,
     setSelectedSignalIndex,
+    finerCandlesRef,
+    replayFineTimeRef,
+    tickFormRef,
   } = params;
   const chartRenderController = params.chartRenderController;
 
@@ -271,7 +297,12 @@ export function useReplayEngine(params: UseReplayEngineParams) {
     centerOn(index);
   }
 
-  function seekTo(index: number) {
+  // `keepFine` is set only by the tick-form autoplay loop, which sets
+  // `replayFineTimeRef` itself right before committing a frame; every other
+  // caller (manual step/scrub, jump-to-signal) leaves it default so the target
+  // bar is shown fully closed rather than mid-formation from a stale sub-cursor.
+  function seekTo(index: number, opts?: { keepFine?: boolean }) {
+    if (!opts?.keepFine) replayFineTimeRef.current = null;
     const total = chartRenderController.candlesRef.current.length;
     if (total === 0) return;
     const clamped = Math.max(0, Math.min(index, total - 1));
@@ -315,12 +346,13 @@ export function useReplayEngine(params: UseReplayEngineParams) {
     const startIndex = Math.min(REPLAY_START_CONTEXT_BARS, Math.max(0, total - 1));
     replayCursorIndexRef.current = startIndex;
     setReplayCursorIndex(startIndex);
+    replayFineTimeRef.current = null;
     setReplayPlaying(false);
     replayActiveRef.current = true;
     setReplayActive(true);
     followCursorRef.current = true;
     setFollowingCursor(true);
-    setShowActivityLogDock(true);
+    if (!suppressAutoActivityDock) setShowActivityLogDock(true);
     chartRenderController.paintUpTo();
     // Re-fit the price scale to the (now much smaller) revealed window
     // instead of leaving the full report's price range applied — otherwise
@@ -348,6 +380,7 @@ export function useReplayEngine(params: UseReplayEngineParams) {
     replayActiveRef.current = false;
     setReplayActive(false);
     setReplayPlaying(false);
+    replayFineTimeRef.current = null;
     if (animationFrameRef.current !== null) {
       cancelAnimationFrame(animationFrameRef.current);
       animationFrameRef.current = null;
@@ -438,7 +471,7 @@ export function useReplayEngine(params: UseReplayEngineParams) {
   // ReplayControls. Only active during replay; the live/static views never
   // had auto-follow to begin with.
   useEffect(() => {
-    if (!replayActive) {
+    if (!replayActive && !sharedReplayActive) {
       isMouseDownRef.current = false;
       return;
     }
@@ -479,29 +512,87 @@ export function useReplayEngine(params: UseReplayEngineParams) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [replayActive]);
 
-  // Autoplay: advances the cursor at an interval scaled by `replaySpeed`,
+  // One autoplay step. Mutates the replay refs but does NOT paint — the tick
+  // below paints once after running however many steps the speed calls for, so
+  // the expensive recompute inside `paintUpTo()` still fires at most once per
+  // tick no matter how fast playback is. Returns false at the end of the data.
+  //
+  // Tick-form (finer candles loaded + toggle on): walk a sub-cursor
+  // (`replayFineTimeRef`) through the current bar's finer constituents so the
+  // bar visibly forms; once the bar's finer candles are exhausted, close it and
+  // open the next one anchored at *its* first finer candle (so the new bar
+  // starts as a thin sliver rather than flashing fully-closed for a frame).
+  // A bar with no finer coverage (e.g. before the broker's M1 history begins)
+  // just falls through to the whole-bar advance, same as tick-form off.
+  function advanceReplayState(): boolean {
+    const candles = chartRenderController.candlesRef.current;
+    const total = candles.length;
+    if (total === 0) return false;
+    const idx = replayCursorIndexRef.current;
+    const fine = finerCandlesRef.current;
+    const current = candles[idx];
+    if (tickFormRef.current && fine.length > 0 && current) {
+      const step = TIMEFRAME_SECONDS[timeframe];
+      const barOpen = current.time as number;
+      const barEnd = barOpen + step;
+      const fineTime = replayFineTimeRef.current;
+      // `barOpen - 1` when the sub-cursor is idle/before this bar means "start
+      // from this bar's first finer candle"; times are whole seconds so this is
+      // exactly `>= barOpen`.
+      const from = fineTime == null || fineTime < barOpen ? barOpen - 1 : fineTime;
+      const next = fine.find(
+        (c) => (c.time as number) > from && (c.time as number) < barEnd,
+      );
+      if (next) {
+        replayFineTimeRef.current = next.time as number;
+        return true; // same bar, still forming
+      }
+      // This bar's finer candles are exhausted — reveal the next bar.
+      if (idx + 1 >= total) return false;
+      const newOpen = candles[idx + 1].time as number;
+      const firstFine = fine.find(
+        (c) => (c.time as number) >= newOpen && (c.time as number) < newOpen + step,
+      );
+      replayFineTimeRef.current = firstFine ? (firstFine.time as number) : null;
+      replayCursorIndexRef.current = idx + 1;
+      return true;
+    }
+    // Whole-bar reveal (tick-form off or no finer data).
+    replayFineTimeRef.current = null;
+    if (idx + 1 >= total) return false;
+    replayCursorIndexRef.current = idx + 1;
+    return true;
+  }
+
+  // Autoplay: advances the replay at an interval scaled by `replaySpeed`,
   // pausing once it reaches the last loaded bar. `paintUpTo()` re-runs the
   // full indicator/structure/pattern recompute (and ChartPanel.tsx's
   // trade-drawing effect reruns on every cursor change too) — expensive
-  // enough over a few hundred bars that firing it once per *bar* at high
+  // enough over a few hundred bars that firing it once per *step* at high
   // speed (e.g. every ~37ms at 16x) visibly stutters. Ticks are floored at
-  // MIN_TICK_MS and the cursor advances more bars per tick to compensate,
-  // capping how often the expensive recompute actually runs regardless of
-  // the speed the user picks.
+  // MIN_TICK_MS and more steps run per tick to compensate (whole bars when
+  // tick-form is off, finer sub-frames when on), while `seekTo` paints just
+  // once per tick, capping how often the recompute actually runs regardless
+  // of the speed the user picks.
   useEffect(() => {
     if (!replayPlaying) return;
     const MIN_TICK_MS = 100;
     const rawIntervalMs = 600 / replaySpeed;
     const tickMs = Math.max(MIN_TICK_MS, rawIntervalMs);
-    const barsPerTick = Math.max(1, Math.round(tickMs / rawIntervalMs));
+    const stepsPerTick = Math.max(1, Math.round(tickMs / rawIntervalMs));
     const id = setInterval(() => {
-      const next = replayCursorIndexRef.current + barsPerTick;
-      if (next >= chartRenderController.candlesRef.current.length) {
-        seekTo(chartRenderController.candlesRef.current.length - 1);
-        setReplayPlaying(false);
-        return;
+      let reachedEnd = false;
+      for (let s = 0; s < stepsPerTick; s++) {
+        if (!advanceReplayState()) {
+          reachedEnd = true;
+          break;
+        }
       }
-      seekTo(next);
+      // Commit the accumulated refs with a single paint+center; `keepFine`
+      // preserves the sub-cursor `advanceReplayState` just set (a plain
+      // `seekTo` would clear it and paint a whole bar).
+      seekTo(replayCursorIndexRef.current, { keepFine: true });
+      if (reachedEnd) setReplayPlaying(false);
     }, tickMs);
     return () => clearInterval(id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -521,6 +612,7 @@ export function useReplayEngine(params: UseReplayEngineParams) {
     lastRevealedSignatureRef,
 
     // Handlers.
+    centerOn,
     navigateToTime,
     seekTo,
     handleEnterReplay,

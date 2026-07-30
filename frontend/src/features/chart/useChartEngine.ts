@@ -60,6 +60,11 @@ import type { ChartEngineController, DrawingToolType } from './types';
 import type { ContextMenuState, OrderPopoverState } from './useOrderPopovers';
 import type { DrawingMenuState } from './useDrawingTools';
 
+// How many of the most-recent visible bars the replay-following autoscale
+// override considers — bounded so a long replay window doesn't scan its
+// entire revealed history on every autoscale call.
+const AUTOSCALE_RECENT_BARS = 100;
+
 export interface UseChartEngineParams {
   /** The full loaded window normally, or a prefix up to the replay cursor
    * while replaying — see ChartPanel's `visibleCandles()`. Read once at
@@ -86,6 +91,7 @@ export interface UseChartEngineParams {
   setDrawingContextMenu: Dispatch<SetStateAction<DrawingMenuState | null>>;
   setDrawingEditPopover: Dispatch<SetStateAction<DrawingMenuState | null>>;
   bumpLines: Dispatch<SetStateAction<number>>;
+  showVolume: boolean;
 }
 
 export function useChartEngine(params: UseChartEngineParams) {
@@ -150,24 +156,27 @@ export function useChartEngine(params: UseChartEngineParams) {
         if (params.replayActiveRef.current && params.followCursorRef.current) {
           const bars = params.visibleCandles();
           if (bars.length > 0) {
-            const lastCandle = bars[bars.length - 1];
-            const currentPrice = lastCandle.close;
-            if (res && res.priceRange) {
-              const { minValue, maxValue } = res.priceRange;
-              const originalSpan = maxValue - minValue;
-              const span = originalSpan > 0 ? originalSpan : currentPrice * 0.02;
+            // Derive the range from the visible bars' own high/low instead of
+            // blending with `originalProvider()`'s result: that provider
+            // reflects the full loaded dataset (or a wider pre-replay
+            // window), and on the very first replay tick it hasn't caught up
+            // to the just-narrowed `bars` yet — using its span centered on
+            // one bar's close produced a wildly oversized range (the whole
+            // history's high/low squeezed around a single price).
+            const recent = bars.slice(-AUTOSCALE_RECENT_BARS);
+            let minValue = Infinity;
+            let maxValue = -Infinity;
+            for (const bar of recent) {
+              if (bar.low < minValue) minValue = bar.low;
+              if (bar.high > maxValue) maxValue = bar.high;
+            }
+            if (minValue <= maxValue) {
+              const span = maxValue - minValue;
+              const padding = span > 0 ? span * 0.1 : recent[recent.length - 1].close * 0.02;
               return {
                 priceRange: {
-                  minValue: currentPrice - span / 2,
-                  maxValue: currentPrice + span / 2,
-                }
-              };
-            } else {
-              const span = currentPrice * 0.02;
-              return {
-                priceRange: {
-                  minValue: currentPrice - span / 2,
-                  maxValue: currentPrice + span / 2,
+                  minValue: minValue - padding,
+                  maxValue: maxValue + padding,
                 }
               };
             }
@@ -180,6 +189,7 @@ export function useChartEngine(params: UseChartEngineParams) {
     const volumeSeries = chart.addSeries(HistogramSeries, {
       priceFormat: { type: 'volume' },
       priceScaleId: 'volume',
+      visible: params.showVolume,
     });
     volumeSeries
       .priceScale()
@@ -243,9 +253,16 @@ export function useChartEngine(params: UseChartEngineParams) {
     // candle tick — they're never user data, so they're excluded from both
     // the persisted localStorage snapshot and the drawings-list panel.
     const syncList = () =>
-      params.setDrawingsList(
-        manager.getAllDrawings().filter((d) => !isProgrammaticDrawingId(d.id)),
-      );
+      params.setDrawingsList((prev) => {
+        const next = manager.getAllDrawings().filter((d) => !isProgrammaticDrawingId(d.id));
+        if (
+          prev.length === next.length &&
+          prev.every((d, i) => d.id === next[i].id && d === next[i])
+        ) {
+          return prev;
+        }
+        return next;
+      });
     const saveAndSync = () => {
       if (params.isSwitchingSymbolRef.current) {
         syncList();
@@ -287,24 +304,33 @@ export function useChartEngine(params: UseChartEngineParams) {
         }
       }
     };
-    const unsubAdd = manager.on('drawing:added', saveAndSync);
+    const isProgrammaticEvent = (e: any): boolean => {
+      if (!e) return false;
+      const id = typeof e === 'string' ? e : e.drawingId || e.drawing?.id || e.id;
+      return typeof id === 'string' ? isProgrammaticDrawingId(id) : false;
+    };
+    const unsubAdd = manager.on('drawing:added', (e: any) => {
+      if (!isProgrammaticEvent(e)) saveAndSync();
+    });
     const unsubRemove = manager.on('drawing:removed', (e) => {
-      if (e.drawingId) {
+      if (e?.drawingId) {
         delete params.originalStylesRef.current[e.drawingId];
       }
-      saveAndSync();
+      if (!isProgrammaticEvent(e)) saveAndSync();
     });
     const unsubClear = manager.on('drawing:cleared', () => {
       params.originalStylesRef.current = {};
       saveAndSync();
     });
-    const unsubUpdate = manager.on('drawing:updated', saveAndSync);
+    const unsubUpdate = manager.on('drawing:updated', (e: any) => {
+      if (!isProgrammaticEvent(e)) saveAndSync();
+    });
     const unsubSelect = manager.on('drawing:selected', (e) => {
       if (e.drawing) {
         highlightDrawing(e.drawing);
       }
       syncSelectedColor();
-      saveAndSync();
+      if (!isProgrammaticEvent(e)) saveAndSync();
     });
     const unsubDeselect = manager.on('drawing:deselected', (e) => {
       if (e.drawingId) {
@@ -553,6 +579,12 @@ export function useChartEngine(params: UseChartEngineParams) {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  useEffect(() => {
+    if (volumeSeriesRef.current) {
+      volumeSeriesRef.current.applyOptions({ visible: params.showVolume });
+    }
+  }, [params.showVolume]);
 
   // Stable except when `isReady` flips (mount, and unmount if this instance
   // is ever torn down) — safe as a consumer effect dependency; it won't

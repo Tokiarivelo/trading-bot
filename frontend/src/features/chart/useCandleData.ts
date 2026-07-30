@@ -108,6 +108,31 @@ export const TIMEFRAME_SECONDS: Record<Candle['timeframe'], number> = {
   MN: 2_592_000,
 };
 
+// The next-finer timeframe to drive tick-form ("live-like") replay: replaying
+// a coarse bar, we fetch these finer bars for the same window and aggregate
+// the ones inside the current bucket into a growing "forming" bar — same
+// synthesis `visibleCandles()` already does for a coarser multi-chart follower,
+// applied to single-window local replay. `M1 → null`: there is no candle
+// timeframe below M1 (the API exposes no tick/quote endpoint), so an M1 replay
+// has nothing finer to form from and falls back to the whole-bar reveal. The
+// mapping keeps each step to a single finer level (not all the way to M1) so a
+// bar forms from a sane number of frames (5 for M5, 4 for H1→M15, …) rather
+// than hundreds.
+export const FINER_TIMEFRAME: Record<
+  Candle['timeframe'],
+  Candle['timeframe'] | null
+> = {
+  M1: null,
+  M5: 'M1',
+  M15: 'M5',
+  M30: 'M5',
+  H1: 'M15',
+  H4: 'H1',
+  D1: 'H1',
+  W1: 'D1',
+  MN: 'D1',
+};
+
 // Session replay ("live session player" over an arbitrary historical period,
 // independent of any backtest report): backend's `/market-data/candles` caps
 // `count` at 5000 (market_data/api/routes.py), so a period wider than one
@@ -576,6 +601,16 @@ export function useCandleData(params: UseCandleDataParams): ChartRenderControlle
           setBacktestError(
             `no ${timeframe} candle history covering this report's period — ` +
               'backfill it (POST /market-data/backfill) or switch to a timeframe with history',
+          );
+        }
+        // A picked session-replay range can fall entirely inside a gap in
+        // the local candle DB (e.g. before backfill started) — without this,
+        // the fetch "succeeds" with zero candles and replay silently enters
+        // an empty, permanently-blank session with no indication why.
+        if (sessionReplayPeriod && candles.length === 0) {
+          setError(
+            `no ${timeframe} candle history in this replay period — ` +
+              'pick a different range or timeframe',
           );
         }
         // Session replay's window is deliberately bounded by the picked

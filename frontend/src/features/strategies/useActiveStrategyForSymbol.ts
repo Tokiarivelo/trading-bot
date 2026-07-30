@@ -5,10 +5,17 @@
  * spec targets `symbol` — used by the dashboard to know which PDF-derived
  * indicators/price levels to overlay on `ChartPanel` for the symbol being
  * viewed. Null when no AI-generated strategy is active for that symbol.
+ *
+ * Backed by a single TanStack Query keyed by `accountId` only (not
+ * `symbol`) — the underlying fetch (`getStrategyVersions(.., "active")`) is
+ * account-wide, so the query key mirrors the actual network resource and the
+ * per-symbol match is derived client-side, same as the pre-migration effect.
  */
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
+import { useQuery } from "@tanstack/react-query";
 import { useActiveAccount } from "@/shared/api/account-context";
+import { queryKeys } from "@/shared/api/queryKeys";
 import { getStrategyVersions, type StrategyVersionSummary } from "@/shared/api/client";
 
 const POLL_MS = 5000;
@@ -35,38 +42,23 @@ function sameStrategyVersion(
 export function useActiveStrategyForSymbol(symbol: string): StrategyVersionSummary | null {
   const accountId = useActiveAccount();
   const [activeStrategy, setActiveStrategy] = useState<StrategyVersionSummary | null>(null);
-  const symbolRef = useRef(symbol);
-  symbolRef.current = symbol;
+
+  const query = useQuery({
+    queryKey: queryKeys.strategies.activeVersions(accountId),
+    queryFn: () => getStrategyVersions(accountId as string, undefined, "active"),
+    enabled: accountId !== null,
+    refetchInterval: POLL_MS,
+  });
 
   useEffect(() => {
-    if (!accountId) return;
-    let cancelled = false;
-
-    const refresh = () => {
-      getStrategyVersions(accountId, undefined, "active")
-        .then((versions) => {
-          if (cancelled) return;
-          const match =
-            versions.find((v) => v.spec?.symbols.includes(symbolRef.current)) ?? null;
-          // Keep the previous object reference when nothing meaningful
-          // changed — otherwise every poll (every 5s, for the life of the
-          // chart) hands consumers (ChartPanel's indicator/drawing rebuild
-          // effect) a "new" activeStrategy and triggers a full teardown and
-          // recompute for no reason.
-          setActiveStrategy((prev) =>
-            sameStrategyVersion(prev, match) ? prev : match,
-          );
-        })
-        .catch(() => {});
-    };
-
-    refresh();
-    const id = setInterval(refresh, POLL_MS);
-    return () => {
-      cancelled = true;
-      clearInterval(id);
-    };
-  }, [accountId, symbol]);
+    const match = query.data?.find((v) => v.spec?.symbols.includes(symbol)) ?? null;
+    // Keep the previous object reference when nothing meaningful changed —
+    // otherwise every poll (every 5s, for the life of the chart) hands
+    // consumers (ChartPanel's indicator/drawing rebuild effect) a "new"
+    // activeStrategy and triggers a full teardown and recompute for no
+    // reason.
+    setActiveStrategy((prev) => (sameStrategyVersion(prev, match) ? prev : match));
+  }, [query.data, symbol]);
 
   return activeStrategy;
 }

@@ -25,7 +25,7 @@
  * windows fall back to their own live view.
  */
 
-import { useCallback, useRef, useState, type ComponentProps } from 'react';
+import { useCallback, useEffect, useRef, useState, type ComponentProps } from 'react';
 import type { Candle } from '@/shared/api/client';
 import { isTimeframe } from './chartFormat';
 import { ChartPanel } from './ChartPanel';
@@ -36,6 +36,8 @@ import type { ReplayUIState, SharedReplaySession } from './types';
 
 const WINDOW_COUNT_KEY = 'tb.chartWindowCount';
 const WINDOW_TIMEFRAMES_KEY = 'tb.chartWindowTimeframes';
+const WINDOW_COUNT_QUERY_KEY = 'windows';
+const WINDOW_TIMEFRAMES_QUERY_KEY = 'tfs';
 const MAX_WINDOWS = 4;
 // Distinct default timeframes for windows 2-4 so a first-time split shows
 // genuinely different views rather than three identical M5 charts.
@@ -43,6 +45,10 @@ const DEFAULT_SECONDARY_TIMEFRAMES: Candle['timeframe'][] = ['M15', 'H1', 'H4'];
 
 function loadWindowCount(): number {
   try {
+    const urlCount = Number(new URLSearchParams(window.location.search).get(WINDOW_COUNT_QUERY_KEY));
+    if (!isNaN(urlCount) && urlCount >= 1 && urlCount <= MAX_WINDOWS) {
+      return urlCount;
+    }
     const stored = Number(localStorage.getItem(WINDOW_COUNT_KEY));
     return stored >= 1 && stored <= MAX_WINDOWS ? stored : 1;
   } catch {
@@ -52,6 +58,13 @@ function loadWindowCount(): number {
 
 function loadWindowTimeframes(): Candle['timeframe'][] {
   try {
+    const urlTfs = new URLSearchParams(window.location.search).get(WINDOW_TIMEFRAMES_QUERY_KEY);
+    if (urlTfs) {
+      const parsed = urlTfs.split(',');
+      return DEFAULT_SECONDARY_TIMEFRAMES.map((fallback, i) =>
+        isTimeframe(parsed[i]) ? (parsed[i] as Candle['timeframe']) : fallback,
+      );
+    }
     const raw = localStorage.getItem(WINDOW_TIMEFRAMES_KEY);
     if (!raw) return DEFAULT_SECONDARY_TIMEFRAMES;
     const parsed = JSON.parse(raw);
@@ -88,6 +101,23 @@ const GRID_CLASS: Record<number, string> = {
 export function MultiChartLayout(props: ChartPanelProps) {
   const [windowCount, setWindowCount] = useState(loadWindowCount);
   const [secondaryTimeframes, setSecondaryTimeframes] = useState(loadWindowTimeframes);
+
+  useEffect(() => {
+    try {
+      const url = new URL(window.location.href);
+      if (windowCount > 1) {
+        url.searchParams.set(WINDOW_COUNT_QUERY_KEY, String(windowCount));
+        url.searchParams.set(WINDOW_TIMEFRAMES_QUERY_KEY, secondaryTimeframes.join(','));
+      } else {
+        url.searchParams.delete(WINDOW_COUNT_QUERY_KEY);
+        url.searchParams.delete(WINDOW_TIMEFRAMES_QUERY_KEY);
+      }
+      window.history.replaceState(null, '', url);
+    } catch {
+      // Ignore URL parsing errors during SSR or edge environments.
+    }
+  }, [windowCount, secondaryTimeframes]);
+
   const [sharedReplay, setSharedReplay] = useState<SharedReplaySession | null>(null);
   const [syncedWindows, setSyncedWindows] = useState<Record<number, boolean>>({});
   const windowReplayUIRef = useRef<Record<number, ReplayUIState>>({});
@@ -99,6 +129,14 @@ export function MultiChartLayout(props: ChartPanelProps) {
 
   const windowToolbarsRef = useRef<Record<number, ChartToolbarProps>>({});
   const [activeToolbarProps, setActiveToolbarProps] = useState<ChartToolbarProps | null>(null);
+  // Live per-window timeframe, for the "Sync Replay" chips below — kept
+  // separate from `activeToolbarProps` (which only updates for the
+  // *selected* window) and from `secondaryTimeframes` (which only reflects
+  // each window's timeframe at its own mount time, never a later change).
+  // Without this, a non-selected window's timeframe change updated
+  // `windowToolbarsRef` (a ref, no re-render) but nothing else, so the chip
+  // for that window kept showing its stale initial timeframe indefinitely.
+  const [windowTimeframes, setWindowTimeframes] = useState<Record<number, Candle['timeframe']>>({});
 
   function handleSelectWindow(idx: number) {
     setSelectedWindow(idx);
@@ -110,6 +148,15 @@ export function MultiChartLayout(props: ChartPanelProps) {
 
   const handleToolbarStateChange = useCallback((idx: number, tp: ChartToolbarProps) => {
     windowToolbarsRef.current[idx] = tp;
+    setWindowTimeframes((prev) =>
+      prev[idx] === tp.timeframe ? prev : { ...prev, [idx]: tp.timeframe },
+    );
+    setSharedReplay((prev) => {
+      if (prev?.masterIndex === idx && prev.masterTimeframe !== tp.timeframe) {
+        return { ...prev, masterTimeframe: tp.timeframe };
+      }
+      return prev;
+    });
     if (idx === selectedWindowRef.current) {
       setActiveToolbarProps((prev) => {
         if (!prev) return tp;
@@ -121,12 +168,15 @@ export function MultiChartLayout(props: ChartPanelProps) {
           prev.manualIndicatorsCount === tp.manualIndicatorsCount &&
           prev.showDrawingsList === tp.showDrawingsList &&
           prev.drawingsListCount === tp.drawingsListCount &&
+          prev.showDrawingToolbar === tp.showDrawingToolbar &&
           prev.showCustomCodeEditor === tp.showCustomCodeEditor &&
           prev.showActivityLogDock === tp.showActivityLogDock &&
           prev.showOverlaysDropdown === tp.showOverlaysDropdown &&
           prev.showSeparators === tp.showSeparators &&
           prev.showSpreadLine === tp.showSpreadLine &&
+          prev.showVolume === tp.showVolume &&
           prev.showTradeLabels === tp.showTradeLabels &&
+          prev.showTradeMarkers === tp.showTradeMarkers &&
           prev.orderLineVisible === tp.orderLineVisible &&
           prev.showOrderLineSettings === tp.showOrderLineSettings &&
           (prev.backtestReportId ?? null) === (tp.backtestReportId ?? null) &&
@@ -205,8 +255,11 @@ export function MultiChartLayout(props: ChartPanelProps) {
 
   const handleReplayCursorTime = useCallback((idx: number, time: number | null) => {
     setSharedReplay((prev) => {
-      if (prev?.masterIndex === idx && prev.cursorTime !== time) {
-        return { ...prev, cursorTime: time };
+      if (prev?.masterIndex === idx) {
+        const curTf = windowToolbarsRef.current[idx]?.timeframe ?? prev.masterTimeframe;
+        if (prev.cursorTime !== time || prev.masterTimeframe !== curTf) {
+          return { ...prev, cursorTime: time, masterTimeframe: curTf };
+        }
       }
       return prev;
     });
@@ -262,12 +315,15 @@ export function MultiChartLayout(props: ChartPanelProps) {
           onResetZoom={() => windowToolbarsRef.current[selectedWindow]?.onResetZoom()}
           onToggleIndicatorsDock={() => windowToolbarsRef.current[selectedWindow]?.onToggleIndicatorsDock()}
           onToggleDrawingsList={() => windowToolbarsRef.current[selectedWindow]?.onToggleDrawingsList()}
+          onToggleDrawingToolbar={() => windowToolbarsRef.current[selectedWindow]?.onToggleDrawingToolbar()}
           onToggleCodeEditor={() => windowToolbarsRef.current[selectedWindow]?.onToggleCodeEditor()}
           onToggleActivityLogDock={() => windowToolbarsRef.current[selectedWindow]?.onToggleActivityLogDock()}
           onToggleOverlaysDropdown={() => windowToolbarsRef.current[selectedWindow]?.onToggleOverlaysDropdown()}
           onToggleSeparators={() => windowToolbarsRef.current[selectedWindow]?.onToggleSeparators()}
           onToggleSpreadLine={() => windowToolbarsRef.current[selectedWindow]?.onToggleSpreadLine()}
+          onToggleVolume={() => windowToolbarsRef.current[selectedWindow]?.onToggleVolume()}
           onToggleTradeLabels={() => windowToolbarsRef.current[selectedWindow]?.onToggleTradeLabels()}
+          onToggleTradeMarkers={() => windowToolbarsRef.current[selectedWindow]?.onToggleTradeMarkers()}
           onToggleOrderLinesVisible={() => windowToolbarsRef.current[selectedWindow]?.onToggleOrderLinesVisible()}
           onToggleOrderLineSettings={() => windowToolbarsRef.current[selectedWindow]?.onToggleOrderLineSettings()}
           onSessionReplayToggle={() => windowToolbarsRef.current[selectedWindow]?.onSessionReplayToggle()}
@@ -316,9 +372,10 @@ export function MultiChartLayout(props: ChartPanelProps) {
                     const isMaster = i === activeReplayUI.windowIndex;
                     const isSynced = syncedWindows[i] !== false;
                     const tf =
-                      i === 0
+                      windowTimeframes[i] ??
+                      (i === 0
                         ? (activeToolbarProps?.timeframe ?? 'M15')
-                        : (secondaryTimeframes[i - 1] ?? DEFAULT_SECONDARY_TIMEFRAMES[i - 1]);
+                        : (secondaryTimeframes[i - 1] ?? DEFAULT_SECONDARY_TIMEFRAMES[i - 1]));
                     return (
                       <button
                         key={i}

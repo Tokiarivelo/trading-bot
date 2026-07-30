@@ -22,8 +22,10 @@
 
 import Link from "next/link";
 import { Eye, EyeOff } from "lucide-react";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useActiveAccount } from "@/shared/api/account-context";
+import { queryKeys } from "@/shared/api/queryKeys";
 import {
   ApiError,
   activateStrategyVersion,
@@ -50,6 +52,10 @@ interface BotCounts {
 // (spread, markers, news) do, and also refetch the moment this tab regains
 // focus so switching back from `/bots` doesn't wait out a full poll tick.
 const ASSIGNMENTS_POLL_MS = 5000;
+// Slower than the assignments poll on purpose — counts don't need to be as
+// fresh as "is this bot still assigned," and a longer interval keeps the
+// per-bot request fan-out (2 requests × active bot count) from stacking up.
+const COUNTS_POLL_MS = 15000;
 
 export function BotSelector({
   symbol,
@@ -71,85 +77,117 @@ export function BotSelector({
   signalsDisabled?: boolean;
 }) {
   const accountId = useActiveAccount();
-  const [candidates, setCandidates] = useState<StrategyVersionSummary[] | null>(null);
-  const [activeBots, setActiveBots] = useState<NormalSkillAssignment[] | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const queryClient = useQueryClient();
+  const [actionError, setActionError] = useState<string | null>(null);
   const [busyKey, setBusyKey] = useState<string | null>(null);
   const [justActivated, setJustActivated] = useState<string | null>(null);
-  const [counts, setCounts] = useState<Record<string, BotCounts>>({});
   const [filter, setFilter] = useState("");
 
-  const refresh = useCallback(() => {
-    if (!accountId) return;
-    Promise.all([getStrategyVersions(accountId), getSkillAssignments()])
-      .then(([versions, assignments]) => {
-        setCandidates(
-          versions
-            .filter((v) => v.status !== "archived" && (v.spec?.symbols ?? []).includes(symbol))
-            .sort((a, b) => b.created_at - a.created_at),
-        );
-        setActiveBots(assignments.filter((a) => a.symbol === symbol));
-      })
-      .catch(() => setError("failed to load bots for this symbol"));
-  }, [accountId, symbol]);
+  // Bot assignments are edited from a different page (`/bots` ->
+  // SymbolAssignmentPanel), so this panel can't rely on its own actions to
+  // know when they change — poll like the chart's other "external state"
+  // panels (spread, markers, news) do. `refetchOnWindowFocus: true` (opted
+  // back in per-query, since the app-wide default is off — see
+  // `query-client.tsx`) reproduces the prior manual focus/visibilitychange
+  // listeners: TanStack Query's focus manager already listens for both.
+  const versionsQuery = useQuery({
+    queryKey: queryKeys.strategies.versions(accountId),
+    queryFn: () => getStrategyVersions(accountId as string),
+    enabled: accountId !== null,
+    refetchInterval: ASSIGNMENTS_POLL_MS,
+    refetchOnWindowFocus: true,
+  });
 
-  useEffect(() => {
-    setCandidates(null);
-    setActiveBots(null);
-    setJustActivated(null);
-    refresh();
-    const timer = setInterval(refresh, ASSIGNMENTS_POLL_MS);
-    const onFocus = () => refresh();
-    window.addEventListener("focus", onFocus);
-    document.addEventListener("visibilitychange", onFocus);
-    return () => {
-      clearInterval(timer);
-      window.removeEventListener("focus", onFocus);
-      document.removeEventListener("visibilitychange", onFocus);
-    };
-  }, [refresh]);
+  const assignmentsQuery = useQuery({
+    queryKey: queryKeys.strategies.skillAssignments(),
+    queryFn: () => getSkillAssignments(),
+    refetchInterval: ASSIGNMENTS_POLL_MS,
+    refetchOnWindowFocus: true,
+  });
+
+  const candidates = useMemo<StrategyVersionSummary[] | null>(() => {
+    if (!versionsQuery.data) return null;
+    return versionsQuery.data
+      .filter((v) => v.status !== "archived" && (v.spec?.symbols ?? []).includes(symbol))
+      .sort((a, b) => b.created_at - a.created_at);
+  }, [versionsQuery.data, symbol]);
+
+  const activeBots = useMemo<NormalSkillAssignment[] | null>(() => {
+    if (!assignmentsQuery.data) return null;
+    return assignmentsQuery.data.filter((a) => a.symbol === symbol);
+  }, [assignmentsQuery.data, symbol]);
+
+  const loadError = versionsQuery.isError || assignmentsQuery.isError;
+  const error = actionError ?? (loadError ? "failed to load bots for this symbol" : null);
+
+  // Used by `activate`/`stop` below to reflect their own mutation
+  // immediately rather than waiting out a full poll tick — replaces the
+  // pre-migration `refresh()`'s manual re-fetch with cache invalidation.
+  const refresh = useCallback(() => {
+    queryClient.invalidateQueries({ queryKey: queryKeys.strategies.versions(accountId) });
+    queryClient.invalidateQueries({ queryKey: queryKeys.strategies.skillAssignments() });
+  }, [accountId, queryClient]);
 
   // Per-bot Signals / Orders / Trades chip counts — one journal + one
   // activity-log fetch per active bot, same endpoints the eye overlay
   // already uses for a single bot, just fanned out across the whole list.
   // A failure for one bot (e.g. no signals persisted yet) shouldn't blank
   // out every other bot's counts, so each bot's fetch is caught on its own.
-  useEffect(() => {
-    if (!activeBots || activeBots.length === 0 || !accountId) return;
-    let cancelled = false;
-    Promise.all(
-      activeBots.map((bot) =>
-        Promise.all([
-          getTradeMarkers(accountId, symbol, bot.name),
-          getLiveBotSignals(accountId, bot.name),
-        ])
-          .then(([markers, signals]): [string, BotCounts] => [
-            bot.name,
-            {
-              orders: markers.length,
-              trades: markers.filter((m) => m.close_time !== null).length,
-              signals: signals.length,
-              rejected: signals.filter((s) => s.outcome !== "opened" && s.outcome !== "skipped")
-                .length,
-            },
+  //
+  // Keyed on the sorted bot-name list, NOT the `activeBots` array itself:
+  // `activeBots` is a brand-new array every time `assignmentsQuery`/
+  // `versionsQuery` refetch (every ASSIGNMENTS_POLL_MS tick) even when the
+  // assignment set is unchanged, so keying this query on it directly would
+  // re-fire this whole fan-out every 5s regardless of whether anything
+  // changed — with ~20 active bots that's 40 requests every 5s, sustained
+  // forever, enough to saturate the browser's per-origin connection limit
+  // and starve unrelated chart/candle fetches. Counts still need their own
+  // periodic refresh (a bot's trade/signal counts change without the
+  // assignment list changing), so this is its own query with its own,
+  // slower `refetchInterval` rather than piggybacking on the assignments
+  // poll's identity churn.
+  const activeBotNamesKey = activeBots
+    ? activeBots.map((b) => b.name).sort().join(",")
+    : "";
+
+  const countsQuery = useQuery({
+    queryKey: queryKeys.strategies.botCounts(accountId, symbol, activeBotNamesKey),
+    queryFn: async () => {
+      const bots = activeBots ?? [];
+      const entries = await Promise.all(
+        bots.map((bot) =>
+          Promise.all([
+            getTradeMarkers(accountId as string, symbol, bot.name),
+            getLiveBotSignals(accountId as string, bot.name),
           ])
-          .catch((): [string, BotCounts] => [
-            bot.name,
-            { orders: 0, trades: 0, signals: 0, rejected: 0 },
-          ]),
-      ),
-    ).then((entries) => {
-      if (!cancelled) setCounts(Object.fromEntries(entries));
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [accountId, symbol, activeBots]);
+            .then(([markers, signals]): [string, BotCounts] => [
+              bot.name,
+              {
+                orders: markers.length,
+                trades: markers.filter((m) => m.close_time !== null).length,
+                signals: signals.length,
+                rejected: signals.filter((s) => s.outcome !== "opened" && s.outcome !== "skipped")
+                  .length,
+              },
+            ])
+            .catch((): [string, BotCounts] => [
+              bot.name,
+              { orders: 0, trades: 0, signals: 0, rejected: 0 },
+            ]),
+        ),
+      );
+      return Object.fromEntries(entries) as Record<string, BotCounts>;
+    },
+    enabled: accountId !== null && !!activeBots && activeBots.length > 0,
+    refetchInterval: COUNTS_POLL_MS,
+  });
+
+  const counts = useMemo(() => countsQuery.data ?? {}, [countsQuery.data]);
 
   async function activate(v: StrategyVersionSummary) {
     if (!accountId) return;
     setBusyKey(v.id);
-    setError(null);
+    setActionError(null);
     setJustActivated(null);
     try {
       if (v.status !== "active") {
@@ -161,7 +199,7 @@ export function BotSelector({
       }
       refresh();
     } catch (e) {
-      setError(e instanceof ApiError ? e.message : "failed to activate this bot on " + symbol);
+      setActionError(e instanceof ApiError ? e.message : "failed to activate this bot on " + symbol);
     } finally {
       setBusyKey(null);
     }
@@ -169,12 +207,12 @@ export function BotSelector({
 
   async function stop(botName: string) {
     setBusyKey(botName);
-    setError(null);
+    setActionError(null);
     try {
       await removeBotFromSymbol(symbol, botName);
       refresh();
     } catch (e) {
-      setError(e instanceof ApiError ? e.message : `failed to stop ${botName} on ${symbol}`);
+      setActionError(e instanceof ApiError ? e.message : `failed to stop ${botName} on ${symbol}`);
     } finally {
       setBusyKey(null);
     }

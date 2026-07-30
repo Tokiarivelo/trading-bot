@@ -53,6 +53,7 @@ export function OrdersDock({
   selectedTicket = null,
   onSelectTicket,
   onClearSelection,
+  onVisibleChange,
 }: {
   children: React.ReactNode;
   allPositions: AllPositions;
@@ -60,6 +61,15 @@ export function OrdersDock({
   selectedTicket?: string | number | null;
   onSelectTicket?: (ticket: string | number, symbol: string) => void;
   onClearSelection?: () => void;
+  /**
+   * Fired whenever the dock's visibility changes (including the initial
+   * post-mount read of the persisted value) so a caller can gate other work
+   * — e.g. `page.tsx` skips `useAllPositions`'s trade-history poll while this
+   * dock (and the panel that renders it) is hidden. The dock still owns and
+   * persists its own `visible` state; this is a notify-only callback, not
+   * controlled-component lifting.
+   */
+  onVisibleChange?: (visible: boolean) => void;
 }) {
   // Read persisted state after mount (not in useState initializers) so
   // server-rendered and first-client-render markup match — localStorage
@@ -79,7 +89,8 @@ export function OrdersDock({
     } catch {
       // Ignore blocked/full localStorage — the toggle just won't persist.
     }
-  }, [visible]);
+    onVisibleChange?.(visible);
+  }, [visible, onVisibleChange]);
 
   useEffect(() => {
     try {

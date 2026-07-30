@@ -82,6 +82,9 @@ export interface UseBacktestDataParams {
   customCodeResult: EvaluateCustomCodeResponse | null;
   orderLineStyle: OrderLineStyle;
   showTradeLabels: boolean;
+  /** Independent of `showTradeLabels` (which only blanks the marker text):
+   * when false, no trade/signal arrow markers are painted at all. */
+  showTradeMarkers: boolean;
 }
 
 export function useBacktestData({
@@ -95,6 +98,7 @@ export function useBacktestData({
   customCodeResult,
   orderLineStyle,
   showTradeLabels,
+  showTradeMarkers,
 }: UseBacktestDataParams) {
   const accountId = useActiveAccount();
 
@@ -263,11 +267,13 @@ export function useBacktestData({
       : Infinity;
     if (customCodeResult) {
       chartController.getSeriesMarkersPrimitive()?.setMarkers(
-        toCustomSignalsSeriesMarkers(
-          customCodeResult.signals,
-          colors,
-          showTradeLabels,
-        ).filter((m) => (m.time as number) <= cursorTime),
+        showTradeMarkers
+          ? toCustomSignalsSeriesMarkers(
+              customCodeResult.signals,
+              colors,
+              showTradeLabels,
+            ).filter((m) => (m.time as number) <= cursorTime)
+          : [],
       );
       clearBacktestDrawings();
       lastRevealedSignatureRef.current = null;
@@ -275,11 +281,15 @@ export function useBacktestData({
     }
     chartController.getSeriesMarkersPrimitive()?.setMarkers(
       [
-        ...toBacktestSeriesMarkers(backtestTrades, colors, showTradeLabels),
+        ...(showTradeMarkers
+          ? toBacktestSeriesMarkers(backtestTrades, colors, showTradeLabels)
+          : []),
         // Vetoed/rejected signals as square markers — every valid setup the
         // strategy saw, not only the fills (opened signals ARE the trade
         // arrows above, so they're excluded from this builder).
-        ...toSignalSeriesMarkers(backtestSignals ?? [], showTradeLabels),
+        ...(showTradeMarkers
+          ? toSignalSeriesMarkers(backtestSignals ?? [], showTradeLabels)
+          : []),
       ]
         .sort((a, b) => (a.time as number) - (b.time as number))
         .filter((m) => (m.time as number) <= cursorTime),
@@ -345,6 +355,7 @@ export function useBacktestData({
     replayCursorIndex,
     orderLineStyle,
     showTradeLabels,
+    showTradeMarkers,
   ]);
 
   // The report's own time bounds — earliest trade open, latest trade close

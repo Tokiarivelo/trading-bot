@@ -34,19 +34,22 @@ async function closeBotAndPositions(
   botWithPositions: BotWithPositions,
   onError: (message: string) => void,
 ): Promise<void> {
+  const results = await Promise.allSettled(
+    botWithPositions.positions.map((position) => closePosition(accountId, position.ticket)),
+  );
   let allClosed = true;
-  for (const position of botWithPositions.positions) {
-    try {
-      await closePosition(accountId, position.ticket);
-    } catch (e) {
+  results.forEach((result, i) => {
+    if (result.status === "rejected") {
       allClosed = false;
+      const position = botWithPositions.positions[i];
+      const e = result.reason;
       onError(
         e instanceof ApiError
           ? `#${position.ticket} (${symbol}): ${e.message}`
           : `#${position.ticket} (${symbol}): failed to close`,
       );
     }
-  }
+  });
   if (!allClosed) {
     onError(
       `${botWithPositions.bot.bot_name} on ${symbol}: left active — not every position closed`,

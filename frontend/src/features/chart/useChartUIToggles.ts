@@ -79,6 +79,25 @@ export function useChartUIToggles() {
     });
   }
 
+  const [showVolume, setShowVolume] = useState<boolean>(() => {
+    try {
+      const stored = localStorage.getItem("chart-show-volume");
+      return stored ? stored === "true" : true;
+    } catch {
+      return true;
+    }
+  });
+
+  function toggleVolume(): void {
+    setShowVolume((prev) => {
+      const next = !prev;
+      try {
+        localStorage.setItem("chart-show-volume", String(next));
+      } catch {}
+      return next;
+    });
+  }
+
   // Entry-arrow "BUY 0.01"/"SELL 0.01" text labels — on by default, but a
   // symbol with many trades stacks these into unreadable overlapping text
   // (the arrows/colors alone still show direction). Toggling this off blanks
@@ -102,11 +121,57 @@ export function useChartUIToggles() {
     });
   }
 
+  // The entry-arrow markers themselves — on by default. Independent of
+  // `showTradeLabels` above (which only blanks the text): toggling this off
+  // hides the arrow/circle shapes entirely, for reading raw price action on a
+  // symbol whose chart is papered over with trade markers.
+  const [showTradeMarkers, setShowTradeMarkers] = useState<boolean>(() => {
+    try {
+      const stored = localStorage.getItem("chart-show-trade-markers");
+      return stored ? stored === "true" : true;
+    } catch {
+      return true;
+    }
+  });
+
+  function toggleTradeMarkers(): void {
+    setShowTradeMarkers((prev) => {
+      const next = !prev;
+      try {
+        localStorage.setItem("chart-show-trade-markers", String(next));
+      } catch {}
+      return next;
+    });
+  }
+
   // Style for the selected trade's open/close lines (see
   // ChartPanel's `buildSelectedTradeLines`) — loaded once, persisted on
   // every change via chartStorage.ts.
   const [orderLineStyle, setOrderLineStyle] = useState<OrderLineStyle>(loadOrderLineStyle);
   const [showOrderLineSettings, setShowOrderLineSettings] = useState(false);
+
+  // The floating drawing-tool palette (DrawingToolbar, left edge of the
+  // chart canvas) — on by default, but it can be toggled off to reclaim the
+  // space when only reading the chart, without touching any drawings already
+  // on it.
+  const [showDrawingToolbar, setShowDrawingToolbar] = useState<boolean>(() => {
+    try {
+      const stored = localStorage.getItem("chart-show-drawing-toolbar");
+      return stored ? stored === "true" : true;
+    } catch {
+      return true;
+    }
+  });
+
+  function toggleDrawingToolbar(): void {
+    setShowDrawingToolbar((prev) => {
+      const next = !prev;
+      try {
+        localStorage.setItem("chart-show-drawing-toolbar", String(next));
+      } catch {}
+      return next;
+    });
+  }
 
   function updateOrderLineStyle(patch: Partial<OrderLineStyle>): void {
     setOrderLineStyle((prev) => {
@@ -128,13 +193,20 @@ export function useChartUIToggles() {
     toggleSeparators,
     showSpreadLine,
     toggleSpreadLine,
+    showVolume,
+    toggleVolume,
     showTradeLabels,
     toggleTradeLabels,
+    showTradeMarkers,
+    toggleTradeMarkers,
     orderLineStyle,
     updateOrderLineStyle,
     showOrderLineSettings,
     setShowOrderLineSettings,
+    showDrawingToolbar,
+    toggleDrawingToolbar,
   };
 }
 
 export type ChartUIToggles = ReturnType<typeof useChartUIToggles>;
+
