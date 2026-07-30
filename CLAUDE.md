@@ -61,6 +61,10 @@ Read `IMPLEMENTATION_PLAN.md` for the full design. These rules are binding.
   `symbol:timeframe`) and connects to the backend directly, because Next
   rewrites don't proxy WS.
 - Feature folders under `frontend/src/features/` mirror backend modules.
+- Polled/cached data fetching goes through TanStack Query (`@tanstack/react-query`,
+  query keys documented in `shared/api/queryKeys.ts`) rather than a hand-rolled
+  `useState`/`setInterval` poll — adopted in `features/trading/`, the pattern
+  for migrating other feature folders.
 - All charting via `lightweight-charts` only.
 - API types come from the backend OpenAPI schema — don't hand-write duplicates.
   See "API documentation (OpenAPI)" above: every backend route is fully typed
