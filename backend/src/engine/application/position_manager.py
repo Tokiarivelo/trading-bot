@@ -49,7 +49,7 @@ from src.broker.domain.trading import (
 )
 from src.engine.application.risk_manager import RiskManager
 from src.engine.domain.zone_detection import DEFAULT_ATR_PERIOD, Base, BaseKind, atr, detect_bases
-from src.market_data.domain.models import MarketDataUnavailable, Timeframe
+from src.market_data.domain.models import MarketDataUnavailable, SymbolInfo, Timeframe
 from src.market_data.ports.market_data import MarketDataPort
 
 logger = logging.getLogger(__name__)
@@ -99,11 +99,16 @@ class PositionManager:
 
         if positions:
             bases = await self._detect_bases(symbol)
+            # One symbol-info fetch per symbol per candle close, shared by every
+            # open position on that symbol — same cost concern/pattern as the
+            # `_detect_bases` hoist above: two+ positions on the same symbol
+            # would otherwise duplicate this gateway call per position.
+            info = await self._market_data.get_symbol_info(symbol)
             for position in positions:
                 self._candles_since_open[position.ticket] = (
                     self._candles_since_open.get(position.ticket, 0) + 1
                 )
-                await self._manage(position, bases)
+                await self._manage(position, bases, info)
 
         if self._risk_manager is not None:
             await self._manage_pending_orders(symbol)
@@ -209,10 +214,9 @@ class PositionManager:
             return False
         return (candidate - current_sl) * direction > 0
 
-    async def _manage(self, position: Position, bases: list[Base]) -> None:
+    async def _manage(self, position: Position, bases: list[Base], info: SymbolInfo) -> None:
         if position.sl is None:
             return
-        info = await self._market_data.get_symbol_info(position.symbol)
         mark = info.bid if position.side is Side.BUY else info.ask
         direction = 1 if position.side is Side.BUY else -1
         risk = abs(position.open_price - position.sl)

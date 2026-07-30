@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -274,3 +275,190 @@ def test_target_swing_finds_nearest_old_high_for_buy():
     swings = [(10, 90.0, "high"), (20, 80.0, "low"), (30, 100.0, "high")]
     target = mod._target_swing(swings, close=85.0, direction=Direction.BUY)
     assert target == (100.0, 30)
+
+
+# --- Incremental zone-detection cache: bit-identical proof -----------------
+#
+# `TrendFollowZonesScalpXauusd._detect_zones_cached` is a timestamp-keyed
+# incremental replacement for the stateless `_detect_zones(opens, highs,
+# lows, closes, atr, params)` full recompute, replicated from the proven
+# design on `pob_snd_zones_xauusd_v1.PobSndZonesXauusd._detect_zones_cached`
+# (see OPTIMIZATION_CHECKLIST.md). Unlike that reference, there's no
+# zone-TF resample here — `evaluate()` hands the detector a raw trailing
+# slice of `zone_lookback_bars` M1 candles, so the cache is keyed on the
+# window's own bar timestamps instead of a resampled bucket's end time.
+# These tests are the actual proof it's safe: a long synthetic walk-forward
+# series is fed through a fixed-size sliding window one bar at a time, and
+# at EVERY step the incremental cache's output must exactly match a
+# from-scratch `_detect_zones` recompute on the identical window.
+
+CONTEXT_BARS = 200  # zone_lookback_bars production default
+ATR_PERIOD = 14  # production default
+
+
+def _make_walk_forward_series(n_bars: int, seed: int) -> list[dict]:
+    """Regime-switching synthetic OHLC series (trend-up / trend-down /
+    chop, each lasting a random few-to-twenty bars) so the leg-base-leg
+    detector sees a realistic mix of legs, bases, and weak-run merges —
+    not just noise."""
+    rng = np.random.default_rng(seed)
+    bars: list[dict] = []
+    price = 2000.0
+    regime = 0
+    regime_len = 0
+    for i in range(n_bars):
+        if regime_len <= 0:
+            regime = int(rng.choice([-1, 0, 1], p=[0.35, 0.3, 0.35]))
+            regime_len = int(rng.integers(4, 20))
+        drift = {-1: -0.35, 0: 0.0, 1: 0.35}[regime] * rng.uniform(0.5, 1.5)
+        noise = rng.normal(0, 0.15)
+        o = price
+        c = o + drift + noise
+        hi = max(o, c) + abs(rng.normal(0, 0.08))
+        lo = min(o, c) - abs(rng.normal(0, 0.08))
+        bars.append(_bar(i, o, hi, lo, c))
+        price = c
+        regime_len -= 1
+    return bars
+
+
+def _zone_fingerprint(zone: dict, times_ns: np.ndarray) -> tuple:
+    """Normalize a zone dict for cross-call comparison: positions
+    (base_start/conf_idx/leg_out_end/retest_idx/broken_idx) are only
+    meaningful within the window that produced them, so translate them to
+    the bar's absolute timestamp — the stable identifier — before
+    comparing."""
+
+    def t(idx: int | None) -> int | None:
+        return None if idx is None else int(times_ns[idx])
+
+    return (
+        zone["pattern"],
+        zone["kind"],
+        round(zone["price_high"], 6),
+        round(zone["price_low"], 6),
+        t(zone["base_start"]),
+        t(zone["conf_idx"]),
+        t(zone["leg_out_end"]),
+        t(zone["retest_idx"]),
+        t(zone["broken_idx"]),
+        zone["flipped"],
+    )
+
+
+def test_incremental_cache_matches_full_recompute_every_step() -> None:
+    """Walk ~4000 bars forward one bar at a time through a fixed-size
+    200-bar sliding window (`zone_lookback_bars`, rolling the window over
+    ~19 times), and at EVERY single step assert the incremental cache
+    (`TrendFollowZonesScalpXauusd._detect_zones_cached`, called on one
+    persistent strategy instance so its cache carries forward) produces
+    exactly the same zones as the stateless full recompute
+    (`_detect_zones`) on the identical window — not just at the end of the
+    walk."""
+    all_bars = _make_walk_forward_series(4200, seed=20260729)
+    opens_all = np.array([b["open"] for b in all_bars])
+    highs_all = np.array([b["high"] for b in all_bars])
+    lows_all = np.array([b["low"] for b in all_bars])
+    closes_all = np.array([b["close"] for b in all_bars])
+    times_all = pd.DatetimeIndex([b["time"] for b in all_bars]).as_unit("ns").asi8
+
+    params = mod.TrendFollowZonesScalpXauusd().spec.params
+    incremental = mod.TrendFollowZonesScalpXauusd()
+
+    checked_steps = 0
+    found_any_zone = False
+    for end in range(CONTEXT_BARS, len(all_bars)):
+        sl = slice(end - CONTEXT_BARS, end)
+        opens, highs, lows, closes = opens_all[sl], highs_all[sl], lows_all[sl], closes_all[sl]
+        times_ns = times_all[sl]
+        atr_series = mod._atr(highs, lows, closes, ATR_PERIOD)
+        if atr_series.dropna().empty:
+            continue
+
+        ground_truth = mod._detect_zones(opens, highs, lows, closes, atr_series, params)
+        cached = incremental._detect_zones_cached(
+            times_ns, opens, highs, lows, closes, atr_series, params
+        )
+
+        gt_fp = [_zone_fingerprint(z, times_ns) for z in ground_truth]
+        cached_fp = [_zone_fingerprint(z, times_ns) for z in cached]
+        assert cached_fp == gt_fp, f"zone mismatch at window end={end}: {cached_fp} != {gt_fp}"
+        checked_steps += 1
+        found_any_zone = found_any_zone or bool(ground_truth)
+
+    # Sanity: the walk actually exercised a meaningful number of steps
+    # (rolling the 200-bar window over many times), and zones were actually
+    # found somewhere along the way — this isn't vacuously passing on empty
+    # output the entire walk.
+    assert checked_steps > 3900
+    assert found_any_zone
+
+
+def test_incremental_cache_reprocesses_far_fewer_bars_than_full_recompute() -> None:
+    """Prove the algorithmic claim from the design (not a wall-clock
+    benchmark): in steady state, `_detect_zones_cached`'s classify+run-
+    grouping helper (`_build_runs_from`) only walks the ATR-warmup head and
+    the newly-appended tail of the window, never the cached middle — while
+    a cold instance (no cache yet, e.g. right after engine restart) walks
+    the whole thing, exactly like a bare `_detect_zones` recompute would."""
+    all_bars = _make_walk_forward_series(1400, seed=99)
+    opens_all = np.array([b["open"] for b in all_bars])
+    highs_all = np.array([b["high"] for b in all_bars])
+    lows_all = np.array([b["low"] for b in all_bars])
+    closes_all = np.array([b["close"] for b in all_bars])
+    times_all = pd.DatetimeIndex([b["time"] for b in all_bars]).as_unit("ns").asi8
+
+    params = mod.TrendFollowZonesScalpXauusd().spec.params
+    incremental = mod.TrendFollowZonesScalpXauusd()
+
+    bars_walked: list[int] = []
+    orig = mod._build_runs_from
+
+    def counting(classes, start, stop=None):
+        stop_pos = len(classes) if stop is None else stop
+        bars_walked.append(max(0, stop_pos - start))
+        return orig(classes, start, stop)
+
+    # Warm the cache up over many steady-state steps first, uninstrumented.
+    warm_end = CONTEXT_BARS + 600
+    for end in range(CONTEXT_BARS, warm_end):
+        sl = slice(end - CONTEXT_BARS, end)
+        opens, highs, lows, closes = opens_all[sl], highs_all[sl], lows_all[sl], closes_all[sl]
+        times_ns = times_all[sl]
+        atr_series = mod._atr(highs, lows, closes, ATR_PERIOD)
+        if atr_series.dropna().empty:
+            continue
+        incremental._detect_zones_cached(times_ns, opens, highs, lows, closes, atr_series, params)
+
+    # One more steady-state step, instrumented, compared against a cold
+    # (freshly-constructed, no cache) instance evaluating the *identical*
+    # window.
+    sl = slice(warm_end - CONTEXT_BARS, warm_end)
+    opens, highs, lows, closes = opens_all[sl], highs_all[sl], lows_all[sl], closes_all[sl]
+    times_ns = times_all[sl]
+    atr_series = mod._atr(highs, lows, closes, ATR_PERIOD)
+    n_bars_in_frame = len(closes)
+    assert n_bars_in_frame > 0
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(mod, "_build_runs_from", counting)
+
+        bars_walked.clear()
+        incremental._detect_zones_cached(times_ns, opens, highs, lows, closes, atr_series, params)
+        incremental_bars = sum(bars_walked)
+
+        bars_walked.clear()
+        cold = mod.TrendFollowZonesScalpXauusd()
+        cold._detect_zones_cached(times_ns, opens, highs, lows, closes, atr_series, params)
+        cold_bars = sum(bars_walked)
+
+    # Cold (no cache yet) always falls back to a full recompute: every bar
+    # in the frame goes through the classify+group helper, same as
+    # `_detect_zones` would process unconditionally.
+    assert cold_bars == n_bars_in_frame
+    # The warmed-up incremental instance reprocesses strictly fewer bars —
+    # only the ATR-warmup head (`atr_period` bars, never cacheable — see
+    # `_detect_zones_cached` docstring) plus the newly-appended tail, not
+    # the whole window.
+    assert incremental_bars < cold_bars
+    assert incremental_bars <= n_bars_in_frame * 0.75

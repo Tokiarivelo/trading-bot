@@ -266,9 +266,17 @@ class TradeEngine:
             logger.warning("ENTRY SKIPPED (no market data): %s — %s", symbol, exc)
             return
 
+        # Fetched once per symbol per candle close, alongside `info` —
+        # balance only changes on a realized close (a `close_on_opposite_
+        # signal` exit), never from opening a position, so N candidate bots
+        # reuse this one value instead of each round-tripping the gateway
+        # (+ keyring read) for it. `_enter_for_bot` re-fetches it, but only
+        # when `_close_opposite_position` actually closed something.
+        balance = await self._current_balance()
+
         ctx = self._context_builder(symbol, candles_by_tf, info.spread_points)
         for decision, strategy in candidates:
-            await self._enter_for_bot(symbol, decision, strategy, ctx, info, now)
+            balance = await self._enter_for_bot(symbol, decision, strategy, ctx, info, now, balance)
 
     async def _enter_for_bot(
         self,
@@ -278,7 +286,8 @@ class TradeEngine:
         ctx: MarketContext,
         info: SymbolInfo,
         now: datetime,
-    ) -> None:
+        balance: float | None,
+    ) -> float | None:
         # Fetched fresh per bot (not hoisted above the candidates loop) so a
         # bot later in this same candle sees the position(s) an earlier bot
         # on the same symbol just opened.
@@ -289,7 +298,7 @@ class TradeEngine:
         # before the max-open-positions cap is checked against the count.
         signal = strategy.evaluate(ctx)
         if signal is None:
-            return
+            return balance
         logger.info(
             "SIGNAL: %s %s via strategy=%s skill=%s — %s",
             symbol,
@@ -300,9 +309,16 @@ class TradeEngine:
         )
 
         if strategy.spec.close_on_opposite_signal:
-            open_positions = await self._close_opposite_position(
+            open_positions, closed = await self._close_opposite_position(
                 symbol, decision, strategy, signal, open_positions
             )
+            if closed:
+                # The only thing in this loop that changes account balance
+                # mid-candle — re-fetch so this bot's sizing below (and any
+                # later bot's, since `balance` is threaded back to the
+                # caller) sees the post-close balance instead of the value
+                # hoisted once at the top of `_try_enter`.
+                balance = await self._current_balance()
 
         pretrade = self._risk_manager.check_pretrade(len(open_positions), now)
         if not pretrade.approved:
@@ -312,7 +328,7 @@ class TradeEngine:
                 decision.skill_name,
                 pretrade.reason,
             )
-            return
+            return balance
 
         veto_tf = _veto_timeframe(strategy)
         veto_timeframes = (veto_tf,) if veto_tf is not None else ()
@@ -325,7 +341,7 @@ class TradeEngine:
                 decision.skill_name,
                 veto_reason,
             )
-            return
+            return balance
 
         side = Side(signal.direction.value)
         reference_price = info.ask if side is Side.BUY else info.bid
@@ -333,10 +349,9 @@ class TradeEngine:
         sl_price = reference_price - sign * signal.sl_points
         tp_price = reference_price + sign * signal.tp_points
 
-        balance = await self._current_balance()
         if balance is None:
             logger.info("ENTRY SKIPPED (no account connected): %s", symbol)
-            return
+            return balance
 
         sizing = self._risk_manager.size_position(
             balance=balance,
@@ -359,7 +374,7 @@ class TradeEngine:
                 abs(reference_price - sl_price),
                 decision.risk_multiplier,
             )
-            return
+            return balance
         logger.info(
             "SIZING OK: %s %s %.2f lots [%s] (balance=%.2f, risk_multiplier=%.2f)",
             symbol,
@@ -394,8 +409,9 @@ class TradeEngine:
                 structure=tuple((p.label.value, p.price, p.time) for p in signal.structure),
             )
         except OrderRejected:
-            return  # spread/RR gate already logged the veto inside order_service
+            return balance  # spread/RR gate already logged the veto inside order_service
         self._risk_manager.record_trade_opened(now)
+        return balance
 
     async def _close_opposite_position(
         self,
@@ -404,14 +420,18 @@ class TradeEngine:
         strategy: Strategy,
         signal: Signal,
         open_positions: list[Position],
-    ) -> list[Position]:
+    ) -> tuple[list[Position], bool]:
         """For a `close_on_opposite_signal` strategy: closes this bot's own
         open position on `symbol` (matched by `magic`, so other bots' or
         manually-opened positions are untouched) when its side opposes the
         fresh `signal` — a signal-flip exit instead of waiting for
-        SL/TP/time-stop. Returns `open_positions` with the closed ticket
-        removed so the caller's pretrade gate sees the freed slot right
-        away, in the same pass that opens the new position."""
+        SL/TP/time-stop. Returns `(open_positions, closed)`: `open_positions`
+        has the closed ticket removed so the caller's pretrade gate sees the
+        freed slot right away, in the same pass that opens the new position;
+        `closed` is `True` only when a position was actually closed here —
+        the caller uses it to decide whether account balance needs
+        re-fetching, since a realized close is the only thing in this loop
+        that changes it."""
         opposite_side = Side.SELL if signal.direction == Direction.BUY else Side.BUY
         position = next(
             (
@@ -422,7 +442,7 @@ class TradeEngine:
             None,
         )
         if position is None:
-            return open_positions
+            return open_positions, False
         try:
             await self._order_service.close_position(position.ticket)
         except OrderRejected:
@@ -432,7 +452,7 @@ class TradeEngine:
                 symbol,
                 signal.direction.value,
             )
-            return open_positions
+            return open_positions, False
         logger.info(
             "SIGNAL FLIP: %s ticket=%d %s closed [%s] — new %s signal via strategy=%s",
             symbol,
@@ -442,4 +462,4 @@ class TradeEngine:
             signal.direction.value,
             strategy.spec.name,
         )
-        return [p for p in open_positions if p.ticket != position.ticket]
+        return [p for p in open_positions if p.ticket != position.ticket], True

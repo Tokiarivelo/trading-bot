@@ -70,9 +70,7 @@ class BotSignalOut(BaseModel):
     decision-trail log lines, so the chart can show every setup the strategy
     saw for this bot, not only its fills."""
 
-    time: int = Field(
-        description="Epoch seconds UTC — when the strategy emitted this signal."
-    )
+    time: int = Field(description="Epoch seconds UTC — when the strategy emitted this signal.")
     direction: str = Field(description="'buy' or 'sell'.")
     outcome: str = Field(
         description="What the engine did with it: 'opened' (became a trade), 'htf_veto' "

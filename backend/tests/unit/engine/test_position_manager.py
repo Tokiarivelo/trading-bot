@@ -149,8 +149,10 @@ class FakeMarketData:
     def __init__(self, info: SymbolInfo = INFO, candles: list[Candle] | None = None) -> None:
         self.info = info
         self.candles = candles or []
+        self.symbol_info_calls: list[str] = []
 
     async def get_symbol_info(self, symbol: str) -> SymbolInfo:
+        self.symbol_info_calls.append(symbol)
         return self.info
 
     async def get_candles(
@@ -232,6 +234,25 @@ async def test_time_stop_closes_position_without_progress():
     await manager.on_candle_closed("XAUUSD")
 
     assert order_service.closed == [1]
+
+
+async def test_get_symbol_info_fetched_once_per_symbol_with_multiple_positions():
+    # Two open positions on the same symbol must share a single
+    # get_symbol_info call per on_candle_closed cycle, same hoisting pattern
+    # already used for _detect_bases -- not one fetch per position.
+    positions = [
+        _position(ticket=1, open_price=2400.0, sl=2390.0),
+        _position(ticket=2, open_price=2400.0, sl=2390.0),
+    ]
+    order_service = FakeOrderService(positions)
+    market_data = FakeMarketData()
+    manager = PositionManager(order_service, market_data)
+
+    await manager.on_candle_closed("XAUUSD")
+
+    assert market_data.symbol_info_calls == ["XAUUSD"]
+    # both positions were still managed off that single fetched info
+    assert order_service.modified == [(1, 2400.0, 2420.0), (2, 2400.0, 2420.0)]
 
 
 # ---- secure-on-base-clear (bot-agnostic profit protection) -------------------

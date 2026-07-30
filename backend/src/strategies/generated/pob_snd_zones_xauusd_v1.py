@@ -270,56 +270,63 @@ def _track_on_m5(
     return episode_starts, broken_idx
 
 
-def _detect_zones(df: pd.DataFrame, atr: pd.Series, params: dict) -> list[dict]:
-    """RBR/DBD/RBD/DBR zones over `df` — same leg-base-leg geometry as the
-    frontend `sndZones()` (see module docstring).
+def _classify_bars(
+    closes: np.ndarray, opens: np.ndarray, atr_filled: np.ndarray, base_mult: float
+) -> np.ndarray:
+    """Vectorized per-bar classification: 0 = base (small body, either
+    color); +1/-1 = directional momentum bar. Same rule the scalar
+    `classify(i)` used before this was split out for
+    `PobSndZonesXauusd._detect_zones_cached` — keep the two in sync."""
+    body = np.abs(closes - opens)
+    return np.where(body <= base_mult * atr_filled, 0, np.where(closes >= opens, 1, -1))
 
-    Returns chronological zone dicts:
-      pattern ("RBR"|"DBD"|"RBD"|"DBR"), kind (ZoneKind), price_high,
-      price_low, base_start / conf_idx / leg_out_end (integer positions in
-      `df`). Retest/break tracking is NOT done here — the caller tracks
-      those on the M5 feed for bar-accurate freshness.
-    """
-    n = len(df)
-    valid_atr = atr.dropna()
-    if valid_atr.empty:
-        return []
-    # Pad the ATR warmup bars with the first available value so early
-    # candles still classify (same padding the chart indicator does).
-    atr_filled = atr.fillna(valid_atr.iloc[0]).to_numpy()
 
-    opens = df["open"].to_numpy()
-    highs = df["high"].to_numpy()
-    lows = df["low"].to_numpy()
-    closes = df["close"].to_numpy()
-
-    base_mult = params["base_body_atr_mult"]
-    leg_mult = params["leg_travel_atr_mult"]
-    max_base = int(params["max_base_candles"])
-
-    # 0 = base (small body, either color); +1/-1 = directional momentum bar.
-    def classify(i: int) -> int:
-        if abs(closes[i] - opens[i]) <= base_mult * atr_filled[i]:
-            return 0
-        return 1 if closes[i] >= opens[i] else -1
-
-    # Runs of consecutive same-class candles, as mutable [cls, start, end].
+def _build_runs_from(classes: np.ndarray, start: int, stop: int | None = None) -> list[list[int]]:
+    """Group `classes[start:stop]` into consecutive-same-class runs, as
+    mutable [cls, start, end] triples of absolute positions."""
+    end_pos = len(classes) if stop is None else stop
     runs: list[list[int]] = []
-    for i in range(n):
-        cls = classify(i)
+    for i in range(start, end_pos):
+        cls = int(classes[i])
         if runs and runs[-1][0] == cls:
             runs[-1][2] = i
         else:
             runs.append([cls, i, i])
+    return runs
 
+
+def _coalesce_adjacent_runs(runs: list[list[int]]) -> list[list[int]]:
+    """Re-join directly-adjacent same-class runs at a splice seam (used
+    when a cached run-list prefix is stitched to freshly-built head/tail
+    segments in `PobSndZonesXauusd._detect_zones_cached`). A from-scratch
+    `_build_runs_from` pass never produces two adjacent same-class runs, so
+    any that appear at a seam are a splicing artifact, not a real
+    boundary — the weak-run merge-loop's 3-run window assumes that
+    invariant holds."""
+    out: list[list[int]] = []
+    for r in runs:
+        if out and out[-1][0] == r[0] and out[-1][2] + 1 == r[1]:
+            out[-1][2] = r[2]
+        else:
+            out.append(list(r))
+    return out
+
+
+def _make_is_leg(closes: np.ndarray, opens: np.ndarray, atr_filled: np.ndarray, leg_mult: float):
     def is_leg(run: list[int]) -> bool:
         cls, start, end = run
         return cls != 0 and abs(closes[end] - opens[start]) >= leg_mult * atr_filled[end]
 
-    # Weak same-direction runs split by a short base run merge into one run
-    # (a rally printing 0.7-ATR candles around a doji is one leg, not two
-    # non-legs). Runs that BOTH already qualify as legs stay separate: the
-    # pause between them is a stacked-zone base, not leg interior.
+    return is_leg
+
+
+def _merge_weak_runs(runs: list[list[int]], is_leg, max_base: int) -> list[list[int]]:
+    """Fixed-point pass absorbing a short same-color-bracketed base run into
+    one leg (see the `_detect_zones` module docstring). Mutates and returns
+    `runs`. Cheap even when `runs` includes an already-final cached prefix:
+    re-scanning entries that can't merge again is what makes the
+    incremental cache exact rather than approximate — see
+    `PobSndZonesXauusd._detect_zones_cached`."""
     merged = True
     while merged:
         merged = False
@@ -334,7 +341,17 @@ def _detect_zones(df: pd.DataFrame, atr: pd.Series, params: dict) -> list[dict]:
             runs[k : k + 3] = [[d1[0], d1[1], d2[2]]]
             merged = True
             break
+    return runs
 
+
+def _build_zones_from_runs(
+    runs: list[list[int]],
+    is_leg,
+    highs: np.ndarray,
+    lows: np.ndarray,
+    closes: np.ndarray,
+    max_base: int,
+) -> list[dict]:
     legs = [r for r in runs if is_leg(r)]
 
     zones: list[dict] = []
@@ -379,6 +396,46 @@ def _detect_zones(df: pd.DataFrame, atr: pd.Series, params: dict) -> list[dict]:
             }
         )
     return zones
+
+
+def _detect_zones(df: pd.DataFrame, atr: pd.Series, params: dict) -> list[dict]:
+    """RBR/DBD/RBD/DBR zones over `df` — same leg-base-leg geometry as the
+    frontend `sndZones()` (see module docstring).
+
+    Returns chronological zone dicts:
+      pattern ("RBR"|"DBD"|"RBD"|"DBR"), kind (ZoneKind), price_high,
+      price_low, base_start / conf_idx / leg_out_end (integer positions in
+      `df`). Retest/break tracking is NOT done here — the caller tracks
+      those on the M5 feed for bar-accurate freshness.
+
+    Pure full recompute, O(n) classify + O(runs^2)-ish merge every call —
+    this is the stateless ground truth. `PobSndZonesXauusd` uses the
+    incremental, cache-backed `_detect_zones_cached` for its own
+    (repeatedly-called, sliding-window) zone_frame instead; this function
+    stays untouched and is still used directly for the one-shot H1 target
+    pool in `evaluate()`.
+    """
+    valid_atr = atr.dropna()
+    if valid_atr.empty:
+        return []
+    # Pad the ATR warmup bars with the first available value so early
+    # candles still classify (same padding the chart indicator does).
+    atr_filled = atr.fillna(valid_atr.iloc[0]).to_numpy()
+
+    opens = df["open"].to_numpy()
+    highs = df["high"].to_numpy()
+    lows = df["low"].to_numpy()
+    closes = df["close"].to_numpy()
+
+    base_mult = params["base_body_atr_mult"]
+    leg_mult = params["leg_travel_atr_mult"]
+    max_base = int(params["max_base_candles"])
+
+    classes = _classify_bars(closes, opens, atr_filled, base_mult)
+    runs = _build_runs_from(classes, 0)
+    is_leg = _make_is_leg(closes, opens, atr_filled, leg_mult)
+    runs = _merge_weak_runs(runs, is_leg, max_base)
+    return _build_zones_from_runs(runs, is_leg, highs, lows, closes, max_base)
 
 
 def _in_session(minute_of_day: int, windows: tuple) -> bool:
@@ -502,6 +559,175 @@ class PobSndZonesXauusd:
                 "min_confidence": 0.5,
             },
         )
+        # Incremental zone-detection cache for `_detect_zones_cached`,
+        # keyed on zone-TF bucket END timestamps (int64 ns) rather than
+        # `zone_frame` positions — positions are meaningless across calls
+        # because the engine/backtest hand this strategy a fixed-size
+        # TRAILING window that slides forward each call (oldest bar
+        # dropped, newest appended), and `zone_frame` gets a fresh 0-based
+        # index every time. Only bar timestamps are stable identifiers.
+        # None until the first successful detection; reset to None whenever
+        # a call can't produce a usable ATR (mirrors `_detect_zones`
+        # returning `[]` early).
+        self._zone_cache: dict[str, object] | None = None
+
+    def _detect_zones_cached(
+        self,
+        zone_frame: pd.DataFrame,
+        zone_end_ns: np.ndarray,
+        atr: pd.Series,
+        params: dict,
+    ) -> list[dict]:
+        """Incremental, bit-identical replacement for module-level
+        `_detect_zones(zone_frame, atr, params)`, exploiting that
+        `evaluate()` calls this with a *sliding* window over the same
+        zone-TF bucket grid every time (see `__init__` and the module
+        docstring's engine-interplay note). `zone_end_ns` is the bucket END
+        time array `_resample` returns alongside `zone_frame` — positionally
+        aligned with it, 1:1, ascending, absolute nanosecond timestamps.
+
+        Stability invariant this relies on: `_resample` can only ever
+        under-fill bucket position 0 (the window's start may cut into the
+        middle of that bucket's M5 bars) or drop a partial *final* bucket
+        outright (it already does, unconditionally). Every OTHER position
+        in a given call's `zone_frame` is a complete bucket — all 6 (or
+        whatever `zone_tf_minutes/5`) of its M5 bars are inside the window
+        — so its OHLC, and therefore its run classification, is a pure
+        function of its absolute bucket identity (`zone_end_ns[i]`) and is
+        invariant across calls, PROVIDED that same position is also not
+        position 0 in whichever call it's being read back from — a bucket
+        that was complete when cached can still show up as a truncated
+        position 0 in a later, further-slid window.
+
+        The rolling ATR pushes that boundary out further: `_atr`'s
+        `rolling(period, min_periods=period)` needs `atr_period` bars of
+        lookback, and this strategy fills its NaN warmup with the first
+        valid value (`atr.fillna(valid_atr.iloc[0])`) — that fill value
+        itself is computed from bars including position 0. So a run's
+        classification only becomes call-invariant from position
+        `atr_period` onward, not position 1.
+
+        Algorithm per call:
+          1. Diff `zone_end_ns` against the previous call's cached array
+             for a contiguous prefix match (`old_ends[p:p+L] ==
+             zone_end_ns[:L]`). No match (cold start, session gap, or a
+             non-contiguous jump) -> fall back to a full recompute exactly
+             as `_detect_zones` and reseed the cache from it.
+          2. Otherwise translate the previous call's cached RAW
+             (*pre-merge*) runs into this call's positions and keep a
+             contiguous prefix of them, dropping any run touching position
+             0 (may be a window-truncated partial bucket), the ATR warmup
+             band (position < atr_period — the NaN-fill uses the first
+             valid value, itself computed over bars including position 0,
+             so it isn't call-invariant until position atr_period), or the
+             old window's own last position (a run that was last in the
+             OLD frame hadn't yet seen its terminating opposite-class bar —
+             it may still be *growing* now that more bars exist, and
+             `is_leg()` depends only on a run's own start/end, so a run
+             that grows can flip from "too short to be its own leg" to "a
+             leg in its own right", changing whether the weak-run
+             merge-loop should combine it with its neighbors at all. This
+             is why the cache stores *raw*, un-merged runs rather than the
+             final merged result: merging is a one-way, irreversible
+             combine (3 runs -> 1) with no way to split back apart, so
+             caching post-merge output would permanently bake in a merge
+             decision that a later bar can prove should never have
+             happened).
+          3. Re-run the classify+group loop only over what those cached
+             raw runs don't cover: the head, `[0, first_cached_start)`
+             (always includes position 0 and the ATR warmup band), and the
+             tail, `(last_cached_end, n)` (newly-appended bars since last
+             call, plus the old window's final — still-growing — run).
+          4. Splice head + cached raw runs + tail, `_coalesce_adjacent_runs`
+             any accidental same-class seam, then run the *full* weak-run
+             merge-loop (`_merge_weak_runs`) and leg/zone-building
+             (`_build_zones_from_runs`) over the spliced RAW list — same
+             calls `_detect_zones` makes, just fed a partially-cached raw
+             run list. The merge-loop always runs fresh, in full, over
+             whatever raw runs it's given (cheap — run count is small,
+             never the O(n)-bars part) — this is what makes merge
+             decisions exact rather than approximate: nothing is ever
+             cached past the merge step, so a newly-arrived bar can always
+             correctly change how nearby cached runs merge (or don't).
+
+        Bit-identical to `_detect_zones(zone_frame, atr, params)` on every
+        call — proven by
+        `tests/unit/strategies/test_pob_snd_zones_xauusd.py::test_incremental_cache_matches_full_recompute_every_step`.
+        """
+        n = len(zone_frame)
+        valid_atr = atr.dropna()
+        if valid_atr.empty:
+            self._zone_cache = None
+            return []
+        atr_filled = atr.fillna(valid_atr.iloc[0]).to_numpy()
+
+        opens = zone_frame["open"].to_numpy()
+        highs = zone_frame["high"].to_numpy()
+        lows = zone_frame["low"].to_numpy()
+        closes = zone_frame["close"].to_numpy()
+
+        base_mult = params["base_body_atr_mult"]
+        leg_mult = params["leg_travel_atr_mult"]
+        max_base = int(params["max_base_candles"])
+        atr_period = int(params["atr_period"])
+
+        classes = _classify_bars(closes, opens, atr_filled, base_mult)
+
+        candidates: list[list[int]] = []
+        cache = self._zone_cache
+        if cache is not None and n:
+            old_ends = cache["ends"]
+            if len(old_ends):
+                p = int(np.searchsorted(old_ends, zone_end_ns[0]))
+                if 0 <= p < len(old_ends):
+                    overlap_len = min(len(old_ends) - p, n)
+                    if np.array_equal(
+                        old_ends[p : p + overlap_len], zone_end_ns[:overlap_len]
+                    ):
+                        # Exclude any run touching the OLD frame's own last
+                        # position (index `overlap_len - 1` here) — that
+                        # run was still open/growing as of the old call.
+                        for cls, s_ns, e_ns in cache["raw_runs"]:
+                            s = int(np.searchsorted(zone_end_ns, s_ns))
+                            e = int(np.searchsorted(zone_end_ns, e_ns))
+                            ok = (
+                                s < len(zone_end_ns)
+                                and e < len(zone_end_ns)
+                                and zone_end_ns[s] == s_ns
+                                and zone_end_ns[e] == e_ns
+                                and atr_period <= s
+                                and e <= overlap_len - 2
+                            )
+                            if not ok:
+                                # Cached runs are position-ordered, so once
+                                # we've started collecting a contiguous
+                                # trustworthy block, the first one that no
+                                # longer fits marks its end; before that,
+                                # keep skipping runs that are too close to
+                                # position 0 / the ATR warmup edge.
+                                if candidates:
+                                    break
+                                continue
+                            candidates.append([cls, s, e])
+
+        if candidates:
+            head_runs = _build_runs_from(classes, 0, stop=candidates[0][1])
+            tail_runs = _build_runs_from(classes, candidates[-1][2] + 1)
+            raw_runs = _coalesce_adjacent_runs(head_runs + candidates + tail_runs)
+        else:
+            raw_runs = _build_runs_from(classes, 0)
+
+        is_leg = _make_is_leg(closes, opens, atr_filled, leg_mult)
+        # `_merge_weak_runs` mutates its input in place — always give it a
+        # fresh copy so `raw_runs` (what gets cached) stays pre-merge.
+        merged_runs = _merge_weak_runs([list(r) for r in raw_runs], is_leg, max_base)
+        zones = _build_zones_from_runs(merged_runs, is_leg, highs, lows, closes, max_base)
+
+        self._zone_cache = {
+            "ends": zone_end_ns.copy(),
+            "raw_runs": [[cls, int(zone_end_ns[s]), int(zone_end_ns[e])] for cls, s, e in raw_runs],
+        }
+        return zones
 
     def evaluate(self, ctx: MarketContext) -> Signal | None:
         params = self.spec.params
@@ -528,7 +754,7 @@ class PobSndZonesXauusd:
             return None
         atr_val = float(atr_val)
 
-        zones = _detect_zones(zone_frame, atr_series, params)
+        zones = self._detect_zones_cached(zone_frame, zone_end_ns, atr_series, params)
         if not zones:
             return None
 

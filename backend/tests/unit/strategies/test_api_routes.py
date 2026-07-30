@@ -4,6 +4,7 @@ active and reactivates that exact file."""
 
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 
 import httpx
@@ -403,3 +404,89 @@ async def test_get_version_with_legacy_string_indicators_still_validates(api, se
         {"type": "ema", "period": 200, "label": "EMA200", "source": "close", "params": {}}
     ]
     assert spec["unrecognized_indicators"] == ["Ichimoku Cloud"]
+
+
+async def test_write_routes_run_service_calls_via_asyncio_to_thread(api, service, monkeypatch):
+    """Regression test for the OPTIMIZATION_CHECKLIST.md "Strategy-version
+    write routes" fix: every write route (activate/duplicate/rename/edit/
+    spec/archive/pause/resume/delete) must hand its synchronous
+    `StrategyVersionService` call to `asyncio.to_thread` instead of calling
+    it directly on the event loop — otherwise a strategy-version write blocks
+    `TradeEngine.on_candle_closed` on the same loop for its whole duration.
+
+    Spies on `asyncio.to_thread` as seen by the routes module (still
+    delegating to the real implementation, so behavior is unchanged) and
+    asserts each route's underlying service method appears in the recorded
+    calls — proving the sync work is dispatched off the loop rather than
+    invoked inline."""
+    strategy_versions, _ = service
+    calls: list[object] = []
+    real_to_thread = asyncio.to_thread
+
+    async def spy_to_thread(func, *args, **kwargs):
+        calls.append(func)
+        return await real_to_thread(func, *args, **kwargs)
+
+    monkeypatch.setattr("src.strategies.api.routes.asyncio.to_thread", spy_to_thread)
+
+    v1 = strategy_versions.save_generated_code(
+        name="sample", code=VALID_CODE, source=CodeSource.AI_GENERATED
+    )
+
+    activate_response = await api.post(f"/accounts/default/strategies/versions/{v1.id}/activate")
+    assert activate_response.status_code == 200
+    assert strategy_versions.activate_version in calls
+
+    pause_response = await api.post(f"/accounts/default/strategies/versions/{v1.id}/pause")
+    assert pause_response.status_code == 200
+    assert strategy_versions.pause_version in calls
+
+    resume_response = await api.post(f"/accounts/default/strategies/versions/{v1.id}/resume")
+    assert resume_response.status_code == 200
+    assert strategy_versions.resume_version in calls
+
+    spec_response = await api.patch(
+        f"/accounts/default/strategies/versions/{v1.id}/spec",
+        json={
+            "name": "sample",
+            "symbols": ["XAUUSD"],
+            "entry_timeframe": "M5",
+            "confirmation_timeframes": [],
+            "indicators": [],
+            "entry_rules": "",
+            "exit_rules": "",
+            "risk_notes": "",
+            "params": {},
+        },
+    )
+    assert spec_response.status_code == 200
+    assert strategy_versions.update_spec in calls
+
+    rename_response = await api.patch(
+        f"/accounts/default/strategies/versions/{v1.id}/rename", json={"name": "sample_renamed"}
+    )
+    assert rename_response.status_code == 200
+    assert strategy_versions.rename_family in calls
+
+    duplicate_response = await api.post(
+        f"/accounts/default/strategies/versions/{v1.id}/duplicate", json={"name": "sample_dup"}
+    )
+    assert duplicate_response.status_code == 200
+    assert strategy_versions.duplicate_version in calls
+
+    edit_response = await api.post(
+        f"/accounts/default/strategies/versions/{v1.id}/edit", json={"code": EDITED_CODE}
+    )
+    assert edit_response.status_code == 200
+    assert strategy_versions.edit_code in calls
+
+    archive_response = await api.post(f"/accounts/default/strategies/versions/{v1.id}/archive")
+    assert archive_response.status_code == 200
+    assert strategy_versions.archive_version in calls
+
+    v_extra = strategy_versions.save_generated_code(
+        name="sample_extra", code=VALID_CODE, source=CodeSource.AI_GENERATED
+    )
+    delete_response = await api.delete(f"/accounts/default/strategies/versions/{v_extra.id}")
+    assert delete_response.status_code == 204
+    assert strategy_versions.delete_version in calls

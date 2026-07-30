@@ -65,3 +65,28 @@ class TradeRecord:
     @property
     def is_open(self) -> bool:
         return self.close_time is None
+
+
+@dataclass(frozen=True, kw_only=True)
+class TradeAnalyticsRecord:
+    """Slim projection of `TradeRecord` carrying only the fields
+    `domain/analytics.py`'s aggregation actually reads (id, symbol, volume,
+    open/close time, profit, skill, strategy_version). Backs
+    `JournalRepository.get_all_for_analytics`, which selects just these
+    columns so SQLAlchemy never deserializes the four JSON snapshot/structure
+    columns (`m5/h1_entry/exit_snapshot`, `structure`) that analytics never
+    touches. `compute_symbol_analytics`/`compute_bot_analytics` accept either
+    this or a full `TradeRecord` — they only use attributes both share."""
+
+    id: str
+    symbol: str
+    volume: float
+    open_time: datetime
+    close_time: datetime | None
+    profit: float | None
+    skill: str | None
+    strategy_version: str | None
+
+    @property
+    def is_open(self) -> bool:
+        return self.close_time is None

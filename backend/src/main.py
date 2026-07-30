@@ -243,6 +243,8 @@ async def lifespan(app: FastAPI):
         runtime.live_candle.start()
         runtime.health_monitor.start()
     container.news_window_service.start()
+    container.activity_log_retention_service.start()
+    container.wal_checkpoint_service.start()
     yield
     await container.aclose()
     if log_listener is not None:

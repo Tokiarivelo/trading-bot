@@ -13,6 +13,7 @@ from src.broker.domain.account import AccountConfig
 from src.broker.domain.symbol_config import SymbolTradingConfig
 from src.engine.domain.models import RiskCaps
 from src.news.domain.models import ImpactLevel, NewsConfig, TrackedEvent
+from src.shared.config.maintenance import MaintenanceConfig
 from src.shared.config.settings import load_yaml_config
 
 
@@ -129,4 +130,16 @@ def load_alerting_config(configs_dir: Path) -> AlertingConfig:
             refinements=events.get("refinements", True),
             gateway_disconnect=events.get("gateway_disconnect", True),
         ),
+    )
+
+
+def load_maintenance_config(configs_dir: Path) -> MaintenanceConfig:
+    data = load_yaml_config("maintenance", configs_dir)
+    activity_log = data.get("activity_log", {})
+    wal_checkpoint = data.get("wal_checkpoint", {})
+    return MaintenanceConfig(
+        activity_log_retention_days=activity_log.get("retention_days", 90),
+        activity_log_check_interval_hours=activity_log.get("check_interval_hours", 6.0),
+        wal_checkpoint_enabled=wal_checkpoint.get("enabled", True),
+        wal_checkpoint_interval_minutes=wal_checkpoint.get("interval_minutes", 15.0),
     )

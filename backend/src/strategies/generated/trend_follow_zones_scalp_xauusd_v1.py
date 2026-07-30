@@ -151,49 +151,60 @@ def _target_swing(
     return None
 
 
-def _detect_zones(
-    opens: np.ndarray,
-    highs: np.ndarray,
-    lows: np.ndarray,
-    closes: np.ndarray,
-    atr: pd.Series,
-    params: dict,
-) -> list[dict]:
-    """RBR/DBD/RBD/DBR zones over the window, each with an optional flipped
-    counterpart appended when a strong candle invalidates it. Identical
-    detector to `rbr_dbd_zones_scalp_xauusd_v1.py` — see that module for the
-    full mechanics.
+def _classify_bars(
+    closes: np.ndarray, opens: np.ndarray, atr_filled: np.ndarray, base_mult: float
+) -> np.ndarray:
+    """Vectorized per-bar classification: 0 = base (small body, either
+    color); +1/-1 = directional momentum bar. Split out of `_detect_zones`
+    so `TrendFollowZonesScalpXauusd._detect_zones_cached` can reuse it —
+    keep the two in sync (same rule as `pob_snd_zones_xauusd_v1`)."""
+    body = np.abs(closes - opens)
+    return np.where(body <= base_mult * atr_filled, 0, np.where(closes >= opens, 1, -1))
 
-    Zone dict fields: pattern, kind, price_high, price_low, base_start,
-    conf_idx, leg_out_end, retest_idx, broken_idx, flipped (bool).
-    """
-    n = len(closes)
-    valid_atr = atr.dropna()
-    if valid_atr.empty:
+
+def _build_runs_from(classes: np.ndarray, start: int, stop: int | None = None) -> list[list[int]]:
+    """Group `classes[start:stop]` into consecutive-same-class runs, as
+    [cls, start, end] triples of absolute positions — vectorized (matches
+    this module's existing style, unlike the plain-Python-loop version in
+    `pob_snd_zones_xauusd_v1`)."""
+    end_pos = len(classes) if stop is None else stop
+    if end_pos <= start:
         return []
-    atr_filled = atr.fillna(valid_atr.iloc[0]).to_numpy()
+    seg = classes[start:end_pos]
+    change = np.flatnonzero(seg[1:] != seg[:-1]) + 1
+    starts = np.concatenate(([0], change)) + start
+    ends = np.concatenate((change - 1, [len(seg) - 1])) + start
+    return [[int(classes[s]), int(s), int(e)] for s, e in zip(starts, ends, strict=True)]
 
-    base_mult = params["base_body_atr_mult"]
-    leg_mult = params["leg_travel_atr_mult"]
-    max_base = int(params["max_base_candles"])
 
-    cls = np.where(
-        np.abs(closes - opens) <= base_mult * atr_filled,
-        0,
-        np.where(closes >= opens, 1, -1),
-    )
+def _coalesce_adjacent_runs(runs: list[list[int]]) -> list[list[int]]:
+    """Re-join directly-adjacent same-class runs at a splice seam (used
+    when a cached run-list prefix is stitched to freshly-built head/tail
+    segments in `TrendFollowZonesScalpXauusd._detect_zones_cached`) — see
+    `pob_snd_zones_xauusd_v1._coalesce_adjacent_runs` for the full
+    rationale."""
+    out: list[list[int]] = []
+    for r in runs:
+        if out and out[-1][0] == r[0] and out[-1][2] + 1 == r[1]:
+            out[-1][2] = r[2]
+        else:
+            out.append(list(r))
+    return out
 
-    change = np.flatnonzero(cls[1:] != cls[:-1]) + 1
-    starts = np.concatenate(([0], change))
-    ends = np.append(change - 1, n - 1)
-    runs: list[list[int]] = [
-        [int(cls[s]), int(s), int(e)] for s, e in zip(starts, ends, strict=True)
-    ]
 
+def _make_is_leg(closes: np.ndarray, opens: np.ndarray, atr_filled: np.ndarray, leg_mult: float):
     def is_leg(run: list[int]) -> bool:
         cls_, start, end = run
         return cls_ != 0 and abs(closes[end] - opens[start]) >= leg_mult * atr_filled[end]
 
+    return is_leg
+
+
+def _merge_weak_runs(runs: list[list[int]], is_leg, max_base: int) -> list[list[int]]:
+    """Fixed-point pass absorbing a short same-color-bracketed base run into
+    one leg. Mutates and returns `runs` — see
+    `pob_snd_zones_xauusd_v1._merge_weak_runs` for why re-scanning an
+    already-final cached prefix is what keeps the incremental cache exact."""
     merged = True
     while merged:
         merged = False
@@ -208,7 +219,31 @@ def _detect_zones(
             runs[k : k + 3] = [[d1[0], d1[1], d2[2]]]
             merged = True
             break
+    return runs
 
+
+def _build_zones_from_runs(
+    runs: list[list[int]],
+    is_leg,
+    opens: np.ndarray,
+    highs: np.ndarray,
+    lows: np.ndarray,
+    closes: np.ndarray,
+    atr_filled: np.ndarray,
+    max_base: int,
+    params: dict,
+) -> list[dict]:
+    """RBR/DBD/RBD/DBR zones from a run list, each with an optional flipped
+    counterpart appended when a strong candle invalidates it. Retest/break
+    scanning and flip generation are cheap vectorized scans over the full
+    window and run fresh every call — never cached — only the run
+    classification/grouping that produced `runs` is ever cached (see
+    `TrendFollowZonesScalpXauusd._detect_zones_cached`).
+
+    Zone dict fields: pattern, kind, price_high, price_low, base_start,
+    conf_idx, leg_out_end, retest_idx, broken_idx, flipped (bool).
+    """
+    n = len(closes)
     legs = [r for r in runs if is_leg(r)]
 
     def _scan_retest_break(demand: bool, scan_start: int, price_low: float, price_high: float):
@@ -300,6 +335,43 @@ def _detect_zones(
     return zones
 
 
+def _detect_zones(
+    opens: np.ndarray,
+    highs: np.ndarray,
+    lows: np.ndarray,
+    closes: np.ndarray,
+    atr: pd.Series,
+    params: dict,
+) -> list[dict]:
+    """RBR/DBD/RBD/DBR zones over the window, each with an optional flipped
+    counterpart appended when a strong candle invalidates it. Identical
+    detector to `rbr_dbd_zones_scalp_xauusd_v1.py` — see that module for the
+    full mechanics.
+
+    Pure full recompute every call — the stateless ground truth.
+    `TrendFollowZonesScalpXauusd.evaluate()` uses the incremental,
+    cache-backed `_detect_zones_cached` instead for its own
+    (repeatedly-called, sliding-window) zone detection; this function stays
+    untouched for any other one-shot use.
+    """
+    valid_atr = atr.dropna()
+    if valid_atr.empty:
+        return []
+    atr_filled = atr.fillna(valid_atr.iloc[0]).to_numpy()
+
+    base_mult = params["base_body_atr_mult"]
+    leg_mult = params["leg_travel_atr_mult"]
+    max_base = int(params["max_base_candles"])
+
+    classes = _classify_bars(closes, opens, atr_filled, base_mult)
+    runs = _build_runs_from(classes, 0)
+    is_leg = _make_is_leg(closes, opens, atr_filled, leg_mult)
+    runs = _merge_weak_runs(runs, is_leg, max_base)
+    return _build_zones_from_runs(
+        runs, is_leg, opens, highs, lows, closes, atr_filled, max_base, params
+    )
+
+
 class TrendFollowZonesScalpXauusd:
     def __init__(self) -> None:
         self.spec = StrategySpec(
@@ -326,6 +398,128 @@ class TrendFollowZonesScalpXauusd:
                 "trend_slow_period": 50,
             },
         )
+        # Incremental zone-detection cache for `_detect_zones_cached`, keyed
+        # on the window's own bar timestamps (int64 ns) — there is no
+        # zone-TF resample step here (unlike `pob_snd_zones_xauusd_v1`):
+        # `evaluate()` hands this a raw trailing slice of the entry
+        # timeframe (`zone_lookback_bars` M1 candles, oldest dropped /
+        # newest appended each call), so each position's own bar timestamp
+        # is the stable identifier instead of a resampled bucket's end
+        # time. None until the first successful detection; reset to None
+        # whenever a call can't produce a usable ATR.
+        self._zone_cache: dict[str, object] | None = None
+
+    def _detect_zones_cached(
+        self,
+        times_ns: np.ndarray,
+        opens: np.ndarray,
+        highs: np.ndarray,
+        lows: np.ndarray,
+        closes: np.ndarray,
+        atr: pd.Series,
+        params: dict,
+    ) -> list[dict]:
+        """Incremental, bit-identical replacement for module-level
+        `_detect_zones(opens, highs, lows, closes, atr, params)`,
+        exploiting that `evaluate()` calls this with a *sliding* trailing
+        window (`zone_lookback_bars` M1 candles) every time — see
+        `__init__`. Same design as
+        `pob_snd_zones_xauusd_v1.PobSndZonesXauusd._detect_zones_cached`
+        (see that docstring for the full four-step design and the
+        pre-merge-vs-post-merge correctness argument), adapted for a
+        window that is a raw trailing slice rather than a resampled zone
+        frame:
+
+        Stability invariant this relies on: unlike a resampled bucket,
+        every position here is a genuine, complete M1 candle regardless of
+        where it falls in the window — there is no "partial bucket" risk.
+        What IS call-dependent is `_true_range_values`: position 0 of any
+        window has no predecessor inside the array, so its TR is just
+        `high[0] - low[0]` (no gap-vs-prior-close term), whereas that SAME
+        absolute bar, once the window has slid forward and it's no longer
+        position 0, gets a gap-aware TR against its true predecessor. So a
+        bar's classification is only call-invariant once it's no longer
+        position 0 — exactly mirroring the resampled version's "position 0
+        may be a truncated bucket" case. The rolling ATR pushes that
+        boundary out further, the same way: `_atr`'s `rolling(period,
+        min_periods=period)` needs `atr_period` bars of lookback, and the
+        NaN warmup is filled with the first valid value
+        (`atr.fillna(valid_atr.iloc[0])`) — itself computed from bars
+        including position 0 — so classification only becomes
+        call-invariant from position `atr_period` onward, not position 1.
+
+        Retest/break tracking and flip-zone generation
+        (`_build_zones_from_runs`'s `_scan_retest_break` + the flip block)
+        are NOT cached — they're cheap vectorized scans over the current
+        window's full tail and must see every newly-appended bar, so they
+        run fresh, in full, every call, exactly like the merge-loop and
+        leg/zone-building. Only the run classification/grouping upstream
+        of that is ever cached.
+
+        Bit-identical to `_detect_zones(opens, highs, lows, closes, atr,
+        params)` on every call — proven by
+        `tests/unit/strategies/test_trend_follow_zones_scalp_xauusd.py::test_incremental_cache_matches_full_recompute_every_step`.
+        """
+        n = len(closes)
+        valid_atr = atr.dropna()
+        if valid_atr.empty:
+            self._zone_cache = None
+            return []
+        atr_filled = atr.fillna(valid_atr.iloc[0]).to_numpy()
+
+        base_mult = params["base_body_atr_mult"]
+        leg_mult = params["leg_travel_atr_mult"]
+        max_base = int(params["max_base_candles"])
+        atr_period = int(params["atr_period"])
+
+        classes = _classify_bars(closes, opens, atr_filled, base_mult)
+
+        candidates: list[list[int]] = []
+        cache = self._zone_cache
+        if cache is not None and n:
+            old_times = cache["times"]
+            if len(old_times):
+                p = int(np.searchsorted(old_times, times_ns[0]))
+                if 0 <= p < len(old_times):
+                    overlap_len = min(len(old_times) - p, n)
+                    if np.array_equal(old_times[p : p + overlap_len], times_ns[:overlap_len]):
+                        for cls, s_t, e_t in cache["raw_runs"]:
+                            s = int(np.searchsorted(times_ns, s_t))
+                            e = int(np.searchsorted(times_ns, e_t))
+                            ok = (
+                                s < len(times_ns)
+                                and e < len(times_ns)
+                                and times_ns[s] == s_t
+                                and times_ns[e] == e_t
+                                and atr_period <= s
+                                and e <= overlap_len - 2
+                            )
+                            if not ok:
+                                if candidates:
+                                    break
+                                continue
+                            candidates.append([cls, s, e])
+
+        if candidates:
+            head_runs = _build_runs_from(classes, 0, stop=candidates[0][1])
+            tail_runs = _build_runs_from(classes, candidates[-1][2] + 1)
+            raw_runs = _coalesce_adjacent_runs(head_runs + candidates + tail_runs)
+        else:
+            raw_runs = _build_runs_from(classes, 0)
+
+        is_leg = _make_is_leg(closes, opens, atr_filled, leg_mult)
+        # `_merge_weak_runs` mutates its input in place — always give it a
+        # fresh copy so `raw_runs` (what gets cached) stays pre-merge.
+        merged_runs = _merge_weak_runs([list(r) for r in raw_runs], is_leg, max_base)
+        zones = _build_zones_from_runs(
+            merged_runs, is_leg, opens, highs, lows, closes, atr_filled, max_base, params
+        )
+
+        self._zone_cache = {
+            "times": times_ns.copy(),
+            "raw_runs": [[cls, int(times_ns[s]), int(times_ns[e])] for cls, s, e in raw_runs],
+        }
+        return zones
 
     def evaluate(self, ctx: MarketContext) -> Signal | None:
         params = self.spec.params
@@ -341,6 +535,7 @@ class TrendFollowZonesScalpXauusd:
         highs = df["high"].to_numpy()[-lookback:]
         lows = df["low"].to_numpy()[-lookback:]
         closes = df["close"].to_numpy()[-lookback:]
+        times_ns = pd.DatetimeIndex(df["time"]).as_unit("ns").asi8[-lookback:]
 
         swings = _zigzag_swings(highs, lows, wing)
         if len(swings) < 5:
@@ -391,7 +586,7 @@ class TrendFollowZonesScalpXauusd:
         # SL anchor: the RBR/DBD/RBD/DBR base that actually launched this
         # fresh leg — i.e. formed at/after the last opposite-kind swing
         # (`leg_start_idx`), not some unrelated older zone.
-        zones = _detect_zones(opens, highs, lows, closes, atr, params)
+        zones = self._detect_zones_cached(times_ns, opens, highs, lows, closes, atr, params)
         demand = direction == Direction.BUY
         close = float(closes[-1])
         candidate = None

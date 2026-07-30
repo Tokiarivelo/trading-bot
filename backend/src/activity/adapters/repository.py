@@ -132,6 +132,17 @@ class ActivityLogRepository:
             session.commit()
             return result.rowcount or 0
 
+    def delete_older_than(self, cutoff_timestamp: int) -> int:
+        """Deletes every row older than `cutoff_timestamp`, across every
+        account — backs the retention job (`ActivityLogRetentionService`).
+        Unlike `delete_by_filter`, intentionally not account-scoped: activity
+        logs are diagnostic-only and unbounded growth is a process-wide
+        housekeeping concern, not a per-account one."""
+        with self._session_factory() as session:
+            result = session.execute(delete(LogRow).where(LogRow.created_at < cutoff_timestamp))
+            session.commit()
+            return result.rowcount or 0
+
 
 def _to_domain(row: LogRow) -> LogEntry:
     return LogEntry(

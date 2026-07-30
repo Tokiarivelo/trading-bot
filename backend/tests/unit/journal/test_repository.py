@@ -4,6 +4,7 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
+from src.journal.adapters.orm import TradeRow
 from src.journal.adapters.repository import JournalRepository
 from src.journal.domain.models import CandleSnapshot, TradeRecord
 from src.shared.db.base import Base
@@ -301,3 +302,105 @@ def test_get_markers_scopes_to_account(repository):
     repository.save(make_record("2"), account_id="ftmo-2")
 
     assert [r.id for r in repository.get_markers("XAUUSD", account_id="ftmo-1")] == ["1"]
+
+
+def test_get_all_for_analytics_matches_get_all_core_fields(repository):
+    """The slim analytics query (`get_all_for_analytics`) must agree with the
+    full `get_all` fetch on every field analytics.py reads, even though it
+    doesn't fetch the JSON snapshot/structure columns at all."""
+    snapshot = (
+        CandleSnapshot(
+            time=utc(2026, 7, 10, 13, 55), open=1, high=2, low=0.5, close=1.5, tick_volume=100
+        ),
+    )
+    repository.save(
+        make_record(
+            "1",
+            skill="normal/xauusd/breakout_v1",
+            strategy_version="breakout_v1:v1",
+            volume=0.2,
+            close_price=2410.0,
+            close_time=utc(2026, 7, 10, 15, 0),
+            profit=9.65,
+            m5_entry_snapshot=snapshot,
+            h1_entry_snapshot=snapshot,
+            structure=(("HL", 2397.2, utc(2026, 7, 10, 13, 30)),),
+        )
+    )
+    repository.save(make_record("2", symbol="EURUSD"))  # still open
+
+    full = {r.id: r for r in repository.get_all()}
+    slim = {r.id: r for r in repository.get_all_for_analytics()}
+
+    assert slim.keys() == full.keys()
+    for trade_id, slim_record in slim.items():
+        full_record = full[trade_id]
+        assert slim_record.symbol == full_record.symbol
+        assert slim_record.volume == full_record.volume
+        assert slim_record.open_time == full_record.open_time
+        assert slim_record.close_time == full_record.close_time
+        assert slim_record.profit == full_record.profit
+        assert slim_record.skill == full_record.skill
+        assert slim_record.strategy_version == full_record.strategy_version
+        assert slim_record.is_open == full_record.is_open
+
+
+def test_get_all_for_analytics_omits_json_snapshot_and_structure_fields(repository):
+    """Structural proof the slim query drops the four JSON columns
+    analytics.py never reads — `TradeAnalyticsRecord` has no such attributes
+    at all, unlike the `TradeRecord` rows `get_all` returns."""
+    repository.save(make_record("1"))
+
+    slim_record = repository.get_all_for_analytics()[0]
+
+    for attr in (
+        "m5_entry_snapshot",
+        "h1_entry_snapshot",
+        "m5_exit_snapshot",
+        "h1_exit_snapshot",
+        "structure",
+    ):
+        assert not hasattr(slim_record, attr)
+
+
+def test_get_all_for_analytics_scopes_to_account(repository):
+    repository.save(make_record("1"), account_id="ftmo-1")
+    repository.save(make_record("2"), account_id="ftmo-2")
+
+    assert [r.id for r in repository.get_all_for_analytics(account_id="ftmo-1")] == ["1"]
+    assert [r.id for r in repository.get_all_for_analytics(account_id="ftmo-2")] == ["2"]
+    assert repository.get_all_for_analytics(account_id="default") == []
+
+
+def test_trade_row_declares_composite_account_symbol_close_index():
+    """Every hot query (`get_last_n`, `get_markers`, `get_open`, `count_closed`,
+    `search`) filters on account_id AND symbol together; without a composite
+    index SQLite can only use one of the single-column indexes and
+    row-filters the rest. Guards against the index declaration being lost or
+    its column order changed."""
+    index = next(
+        (idx for idx in TradeRow.__table__.indexes if idx.name == "ix_trades_account_symbol_close"),
+        None,
+    )
+    assert index is not None
+    assert [col.name for col in index.columns] == ["account_id", "symbol", "close_time"]
+
+
+def test_composite_index_is_created_in_sqlite(tmp_path):
+    """Proves the ORM `Index(...)` declaration actually materializes as a
+    real SQLite index (not just a Python-side artifact) when the schema is
+    created — same `create_all` path the `repository` fixture above uses."""
+    engine = create_engine(f"sqlite:///{tmp_path}/index_check.db")
+    Base.metadata.create_all(engine)
+    with engine.connect() as conn:
+        index_names = {
+            row[1] for row in conn.exec_driver_sql("PRAGMA index_list('trades')").fetchall()
+        }
+        assert "ix_trades_account_symbol_close" in index_names
+        columns = [
+            row[2]
+            for row in conn.exec_driver_sql(
+                "PRAGMA index_info('ix_trades_account_symbol_close')"
+            ).fetchall()
+        ]
+        assert columns == ["account_id", "symbol", "close_time"]

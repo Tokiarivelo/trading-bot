@@ -214,8 +214,10 @@ class FakeOrderService:
 class FakeAccountService:
     def __init__(self, balance: float | None = 10_000.0):
         self.balance = balance
+        self.calls = 0
 
     async def status(self):
+        self.calls += 1
         account = {"balance": self.balance} if self.balance is not None else None
         return {"account": account}
 
@@ -877,3 +879,89 @@ async def test_close_on_opposite_signal_false_leaves_opposite_position_open():
 
     assert order_service.closed == []
     assert len(order_service.opened) == 1
+
+
+async def test_account_status_fetched_once_per_symbol_not_per_bot():
+    # Regression for the redundant-gateway-call bug: three candidate bots on
+    # one symbol/candle must share a single AccountService.status() call,
+    # not trigger three (one real gateway HTTP round trip + keyring read
+    # each) — matching the candles/symbol_info hoisting pattern above it.
+    decisions = [
+        SkillDecision(allowed=True, skill_name="normal/xauusd/a", strategy_name="a", magic=111),
+        SkillDecision(allowed=True, skill_name="normal/xauusd/b", strategy_name="b", magic=222),
+        SkillDecision(allowed=True, skill_name="normal/xauusd/c", strategy_name="c", magic=333),
+    ]
+    strategy_source = FakeStrategySource(
+        {
+            "a": FakeStrategy(BUY_SIGNAL),
+            "b": FakeStrategy(BUY_SIGNAL),
+            "c": FakeStrategy(BUY_SIGNAL),
+        }
+    )
+    account = FakeAccountService(balance=10_000.0)
+    engine, order_service, *_ = make_engine(
+        skill_selector=FakeSkillSelector(decisions),
+        strategy_source=strategy_source,
+        account=account,
+    )
+
+    await engine.on_candle_closed(CandleClosed(symbol="XAUUSD", timeframe="M5"))
+
+    assert len(order_service.opened) == 3
+    assert account.calls == 1
+
+
+async def test_account_status_refetched_after_close_on_opposite_signal_closes():
+    # `_close_opposite_position` is the only thing that can change balance
+    # mid-loop (a realized close), so a bot that flips its own position
+    # must trigger exactly one re-fetch of account status on top of the
+    # one hoisted per-symbol fetch — total 2, not 1 and not 3 (one per bot).
+    existing = Position(
+        ticket=7,
+        symbol="XAUUSD",
+        side=Side.SELL,
+        volume=0.1,
+        open_price=2450.0,
+        sl=2460.0,
+        tp=2430.0,
+        open_time=datetime.now(UTC),
+        profit=0.0,
+        magic=999,
+    )
+    order_service = FakeOrderService(positions=[existing])
+    strategy = FakeStrategy(BUY_SIGNAL, close_on_opposite_signal=True)
+    account = FakeAccountService(balance=10_000.0)
+    engine, order_service, *_ = make_engine(
+        order_service=order_service, strategy=strategy, account=account
+    )
+
+    await engine.on_candle_closed(CandleClosed(symbol="XAUUSD", timeframe="M5"))
+
+    assert order_service.closed == [7]
+    assert len(order_service.opened) == 1
+    assert account.calls == 2
+
+
+async def test_account_status_not_refetched_when_no_close_on_opposite_signal_happens():
+    # Two bots, neither of which closes anything mid-loop (default
+    # close_on_opposite_signal=False) — still exactly one status() call for
+    # the whole candle, confirming the second bot reuses the first's value
+    # rather than independently re-fetching or re-triggering a refetch.
+    decisions = [
+        SkillDecision(allowed=True, skill_name="normal/xauusd/a", strategy_name="a", magic=111),
+        SkillDecision(allowed=True, skill_name="normal/xauusd/b", strategy_name="b", magic=222),
+    ]
+    strategy_source = FakeStrategySource(
+        {"a": FakeStrategy(BUY_SIGNAL), "b": FakeStrategy(BUY_SIGNAL)}
+    )
+    account = FakeAccountService(balance=10_000.0)
+    engine, order_service, *_ = make_engine(
+        skill_selector=FakeSkillSelector(decisions),
+        strategy_source=strategy_source,
+        account=account,
+    )
+
+    await engine.on_candle_closed(CandleClosed(symbol="XAUUSD", timeframe="M5"))
+
+    assert len(order_service.opened) == 2
+    assert account.calls == 1

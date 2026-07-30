@@ -179,57 +179,72 @@ def _mtf_confirms(ctx: MarketContext, tf: str, direction: Direction, params: dic
     return False
 
 
-def _detect_zones(
-    opens: np.ndarray,
-    highs: np.ndarray,
-    lows: np.ndarray,
-    closes: np.ndarray,
-    atr: pd.Series,
-    params: dict,
-) -> list[dict]:
-    """RBR/DBD/RBD/DBR zones over the window — port of the frontend `sndZones()`.
-
-    Returns chronological zone dicts:
-      pattern ("RBR"|"DBD"|"RBD"|"DBR"), kind (ZoneKind), price_high,
-      price_low, base_start / conf_idx / leg_out_end (integer positions in
-      the window), retest_idx (first bar back in the band after the leg-out,
-      or None), broken_idx (first bar CLOSING through the far side, or None).
-    """
-    n = len(closes)
-    valid_atr = atr.dropna()
-    if valid_atr.empty:
-        return []
-    # Pad the ATR warmup bars with the first available value so early
-    # candles still classify (same padding the chart indicator does).
-    atr_filled = atr.fillna(valid_atr.iloc[0]).to_numpy()
-
-    base_mult = params["base_body_atr_mult"]
-    leg_mult = params["leg_travel_atr_mult"]
-    max_base = int(params["max_base_candles"])
-
-    # 0 = base (small body, either color); +1/-1 = directional momentum bar.
-    cls = np.where(
+def _classify_bars(
+    closes: np.ndarray, opens: np.ndarray, atr_filled: np.ndarray, base_mult: float
+) -> np.ndarray:
+    """Vectorized per-bar classification: 0 = base (small body, either
+    color); +1/-1 = directional momentum bar. Split out of `_detect_zones`
+    to keep it in sync with `PobSndZonesVix75._detect_zones_cached`."""
+    return np.where(
         np.abs(closes - opens) <= base_mult * atr_filled,
         0,
         np.where(closes >= opens, 1, -1),
     )
 
-    # Runs of consecutive same-class candles, as mutable [cls, start, end].
-    change = np.flatnonzero(cls[1:] != cls[:-1]) + 1
-    starts = np.concatenate(([0], change))
-    ends = np.append(change - 1, n - 1)
-    runs: list[list[int]] = [
-        [int(cls[s]), int(s), int(e)] for s, e in zip(starts, ends, strict=True)
+
+def _build_runs_from(classes: np.ndarray, start: int, stop: int | None = None) -> list[list[int]]:
+    """Group `classes[start:stop]` into consecutive-same-class runs, as
+    [cls, start, end] triples of absolute positions. Vectorized (diff +
+    flatnonzero) to match this file's existing numpy-array style — see the
+    module docstring's perf note — used both for the full recompute and
+    the head/tail segments in `PobSndZonesVix75._detect_zones_cached`."""
+    end_pos = len(classes) if stop is None else stop
+    seg = classes[start:end_pos]
+    if len(seg) == 0:
+        return []
+    change = np.flatnonzero(seg[1:] != seg[:-1]) + 1
+    seg_starts = np.concatenate(([0], change))
+    seg_ends = np.append(change - 1, len(seg) - 1)
+    abs_starts = seg_starts + start
+    abs_ends = seg_ends + start
+    return [
+        [int(classes[s]), int(s), int(e)]
+        for s, e in zip(abs_starts, abs_ends, strict=True)
     ]
 
+
+def _coalesce_adjacent_runs(runs: list[list[int]]) -> list[list[int]]:
+    """Re-join directly-adjacent same-class runs at a splice seam (used
+    when a cached run-list prefix is stitched to freshly-built head/tail
+    segments in `PobSndZonesVix75._detect_zones_cached`). A from-scratch
+    `_build_runs_from` pass never produces two adjacent same-class runs, so
+    any that appear at a seam are a splicing artifact, not a real
+    boundary — the weak-run merge-loop's 3-run window assumes that
+    invariant holds."""
+    out: list[list[int]] = []
+    for r in runs:
+        if out and out[-1][0] == r[0] and out[-1][2] + 1 == r[1]:
+            out[-1][2] = r[2]
+        else:
+            out.append(list(r))
+    return out
+
+
+def _make_is_leg(closes: np.ndarray, opens: np.ndarray, atr_filled: np.ndarray, leg_mult: float):
     def is_leg(run: list[int]) -> bool:
         cls_, start, end = run
         return cls_ != 0 and abs(closes[end] - opens[start]) >= leg_mult * atr_filled[end]
 
-    # Weak same-direction runs split by a short base run merge into one run
-    # (a rally printing 0.7-ATR candles around a doji is one leg, not two
-    # non-legs). Runs that BOTH already qualify as legs stay separate: the
-    # pause between them is a stacked-zone base, not leg interior.
+    return is_leg
+
+
+def _merge_weak_runs(runs: list[list[int]], is_leg, max_base: int) -> list[list[int]]:
+    """Fixed-point pass absorbing a short same-color-bracketed base run into
+    one leg (see the `_detect_zones` module docstring). Mutates and returns
+    `runs`. Cheap even when `runs` includes an already-final cached prefix:
+    re-scanning entries that can't merge again is what makes the
+    incremental cache exact rather than approximate — see
+    `PobSndZonesVix75._detect_zones_cached`."""
     merged = True
     while merged:
         merged = False
@@ -244,7 +259,21 @@ def _detect_zones(
             runs[k : k + 3] = [[d1[0], d1[1], d2[2]]]
             merged = True
             break
+    return runs
 
+
+def _build_zones_from_runs(
+    runs: list[list[int]],
+    is_leg,
+    highs: np.ndarray,
+    lows: np.ndarray,
+    closes: np.ndarray,
+    max_base: int,
+) -> list[dict]:
+    """Zone geometry only (pattern/kind/price bounds/base_start/conf_idx/
+    leg_out_end) — retest/break tracking is a separate step
+    (`_track_retest_and_break`) since it depends on the full current
+    window, not just the runs."""
     legs = [r for r in runs if is_leg(r)]
 
     zones: list[dict] = []
@@ -276,42 +305,96 @@ def _detect_zones(
             pattern = "RBR" if leg_out_up else "RBD"
         else:
             pattern = "DBR" if leg_out_up else "DBD"
-        demand = leg_out_up
-
-        # Retest/break scan starts after the whole leg-out run — its own
-        # early candles' wicks still overlap the base and aren't a return.
-        # Vectorized version of the old per-bar walk: the retest is the
-        # first touch bar, kept only if it lands at or before the first
-        # break bar (a touch check preceded the break check on the same bar).
-        scan_start = leg_out[2] + 1
-        if demand:
-            touched = lows[scan_start:] <= price_high
-            broke = closes[scan_start:] < price_low
-        else:
-            touched = highs[scan_start:] >= price_low
-            broke = closes[scan_start:] > price_high
-        touch_hits = np.flatnonzero(touched)
-        break_hits = np.flatnonzero(broke)
-        broken_idx = int(break_hits[0]) + scan_start if len(break_hits) else None
-        retest_idx = None
-        if len(touch_hits):
-            first_touch = int(touch_hits[0]) + scan_start
-            if broken_idx is None or first_touch <= broken_idx:
-                retest_idx = first_touch
 
         zones.append(
             {
                 "pattern": pattern,
-                "kind": ZoneKind.DEMAND if demand else ZoneKind.SUPPLY,
+                "kind": ZoneKind.DEMAND if leg_out_up else ZoneKind.SUPPLY,
                 "price_high": price_high,
                 "price_low": price_low,
                 "base_start": base_start,
                 "conf_idx": conf_idx,
                 "leg_out_end": leg_out[2],
-                "retest_idx": retest_idx,
-                "broken_idx": broken_idx,
             }
         )
+    return zones
+
+
+def _track_retest_and_break(
+    zone: dict, highs: np.ndarray, lows: np.ndarray, closes: np.ndarray
+) -> tuple[int | None, int | None]:
+    """First bar back in the band after the leg-out (retest_idx) and first
+    bar CLOSING through the far side (broken_idx), scanned (vectorized,
+    matching this file's existing style) from just after the leg-out run —
+    its own early candles' wicks still overlap the base and aren't a
+    return. Split out of `_detect_zones` so both the full recompute and
+    `_detect_zones_cached` share it; this is an O(window) scan per zone
+    regardless of what's cached, so it's NOT part of the incremental
+    cache — it runs fresh every call, same as the M5 retest tracking in the
+    `pob_snd_zones_xauusd_v1.py` reference this pattern was replicated
+    from."""
+    demand = zone["kind"] == ZoneKind.DEMAND
+    price_high = zone["price_high"]
+    price_low = zone["price_low"]
+    scan_start = zone["leg_out_end"] + 1
+    if demand:
+        touched = lows[scan_start:] <= price_high
+        broke = closes[scan_start:] < price_low
+    else:
+        touched = highs[scan_start:] >= price_low
+        broke = closes[scan_start:] > price_high
+    touch_hits = np.flatnonzero(touched)
+    break_hits = np.flatnonzero(broke)
+    broken_idx = int(break_hits[0]) + scan_start if len(break_hits) else None
+    retest_idx = None
+    if len(touch_hits):
+        first_touch = int(touch_hits[0]) + scan_start
+        if broken_idx is None or first_touch <= broken_idx:
+            retest_idx = first_touch
+    return retest_idx, broken_idx
+
+
+def _detect_zones(
+    opens: np.ndarray,
+    highs: np.ndarray,
+    lows: np.ndarray,
+    closes: np.ndarray,
+    atr: pd.Series,
+    params: dict,
+) -> list[dict]:
+    """RBR/DBD/RBD/DBR zones over the window — port of the frontend `sndZones()`.
+
+    Returns chronological zone dicts:
+      pattern ("RBR"|"DBD"|"RBD"|"DBR"), kind (ZoneKind), price_high,
+      price_low, base_start / conf_idx / leg_out_end (integer positions in
+      the window), retest_idx (first bar back in the band after the leg-out,
+      or None), broken_idx (first bar CLOSING through the far side, or None).
+
+    Pure full recompute, O(n) classify + O(runs^2)-ish merge every call —
+    this is the stateless ground truth. `PobSndZonesVix75` uses the
+    incremental, cache-backed `_detect_zones_cached` for its own
+    (repeatedly-called, sliding-window) `evaluate()` instead; this function
+    stays untouched and is available for any other one-shot use / direct
+    testing.
+    """
+    valid_atr = atr.dropna()
+    if valid_atr.empty:
+        return []
+    # Pad the ATR warmup bars with the first available value so early
+    # candles still classify (same padding the chart indicator does).
+    atr_filled = atr.fillna(valid_atr.iloc[0]).to_numpy()
+
+    base_mult = params["base_body_atr_mult"]
+    leg_mult = params["leg_travel_atr_mult"]
+    max_base = int(params["max_base_candles"])
+
+    classes = _classify_bars(closes, opens, atr_filled, base_mult)
+    runs = _build_runs_from(classes, 0)
+    is_leg = _make_is_leg(closes, opens, atr_filled, leg_mult)
+    runs = _merge_weak_runs(runs, is_leg, max_base)
+    zones = _build_zones_from_runs(runs, is_leg, highs, lows, closes, max_base)
+    for z in zones:
+        z["retest_idx"], z["broken_idx"] = _track_retest_and_break(z, highs, lows, closes)
     return zones
 
 
@@ -348,6 +431,144 @@ class PobSndZonesVix75:
                 "min_confidence": 0.5,
             },
         )
+        # Incremental zone-detection cache for `_detect_zones_cached`, keyed
+        # on the window's own M5 bar timestamps (int64 ns) rather than
+        # position — positions are meaningless across calls because
+        # `evaluate()` hands this strategy a fixed-size TRAILING window
+        # (`zone_lookback_bars`) that slides forward each call (oldest bar
+        # dropped, newest appended) with a fresh 0-based index every time.
+        # None until the first successful detection; reset to None whenever
+        # a call can't produce a usable ATR (mirrors `_detect_zones`
+        # returning `[]` early). Same design as
+        # `pob_snd_zones_xauusd_v1.PobSndZonesXauusd._detect_zones_cached`,
+        # adapted for a window that's raw M5 bars (no zone-TF resample
+        # step): every position's OHLC is that bar's own value and is
+        # invariant across calls regardless of where the window starts —
+        # only the ATR warmup band (position < atr_period) and the old
+        # window's own still-growing last run are excluded from reuse.
+        self._zone_cache: dict[str, object] | None = None
+
+    def _detect_zones_cached(
+        self,
+        opens: np.ndarray,
+        highs: np.ndarray,
+        lows: np.ndarray,
+        closes: np.ndarray,
+        t_ns: np.ndarray,
+        atr: pd.Series,
+        params: dict,
+    ) -> list[dict]:
+        """Incremental, bit-identical replacement for module-level
+        `_detect_zones(opens, highs, lows, closes, atr, params)`,
+        exploiting that `evaluate()` calls this with a *sliding* window
+        over the same M5 bar stream every time (see `__init__`). `t_ns` is
+        the window's bar timestamps (int64 ns), positionally aligned 1:1
+        with opens/highs/lows/closes, ascending. Unlike the XAUUSD
+        reference (`pob_snd_zones_xauusd_v1.py`) this strategy has no
+        zone-TF resample step — the window is raw M5 bars — so every
+        position's OHLC is that bar's own value and is invariant across
+        calls regardless of where the window starts; only the rolling
+        ATR's NaN-warmup fill (`atr.fillna(valid_atr.iloc[0])`, whose fill
+        value is computed over bars including position 0) makes a run's
+        classification call-variant before position `atr_period`.
+
+        Algorithm per call (see the reference's `_detect_zones_cached`
+        docstring for the fully-annotated original this was replicated
+        from, including why raw pre-merge runs — not post-merge output —
+        must be cached):
+          1. Diff `t_ns` against the previous call's cached array for a
+             contiguous prefix match. No match (cold start, session gap,
+             non-contiguous jump) -> full recompute, reseed the cache.
+          2. Translate the previous call's cached RAW (pre-merge) runs into
+             this call's positions; keep a contiguous prefix satisfying
+             `atr_period <= start` (ATR warmup) and `end <= overlap_len -
+             2` (excludes the old window's own last position — still
+             open/growing as of that call).
+          3. Re-run classify+group only over the head (before the cached
+             prefix) and tail (after it — newly-appended bars plus the old
+             window's still-growing final run).
+          4. Splice head + cached raw runs + tail, coalesce any same-class
+             seam, then run the weak-run merge-loop and zone-building
+             fresh, in full, over the spliced raw list every call.
+
+        Retest/break tracking (`_track_retest_and_break`) is NOT cached —
+        it's an O(window) vectorized scan per zone that must see the full
+        current window every call, same as the M5 retest tracking in the
+        XAUUSD reference.
+
+        Bit-identical to `_detect_zones(opens, highs, lows, closes, atr,
+        params)` on every call — proven by
+        `tests/unit/strategies/test_pob_snd_zones_vix75_v1.py::test_incremental_cache_matches_full_recompute_every_step`.
+        """
+        n = len(closes)
+        valid_atr = atr.dropna()
+        if valid_atr.empty:
+            self._zone_cache = None
+            return []
+        atr_filled = atr.fillna(valid_atr.iloc[0]).to_numpy()
+
+        base_mult = params["base_body_atr_mult"]
+        leg_mult = params["leg_travel_atr_mult"]
+        max_base = int(params["max_base_candles"])
+        atr_period = int(params["atr_period"])
+
+        classes = _classify_bars(closes, opens, atr_filled, base_mult)
+
+        candidates: list[list[int]] = []
+        cache = self._zone_cache
+        if cache is not None and n:
+            old_t = cache["t_ns"]
+            if len(old_t):
+                p = int(np.searchsorted(old_t, t_ns[0]))
+                if 0 <= p < len(old_t):
+                    overlap_len = min(len(old_t) - p, n)
+                    if np.array_equal(old_t[p : p + overlap_len], t_ns[:overlap_len]):
+                        # Exclude any run touching the OLD window's own last
+                        # position (index `overlap_len - 1` here) — that run
+                        # was still open/growing as of the old call.
+                        for cls, s_ns, e_ns in cache["raw_runs"]:
+                            s = int(np.searchsorted(t_ns, s_ns))
+                            e = int(np.searchsorted(t_ns, e_ns))
+                            ok = (
+                                s < len(t_ns)
+                                and e < len(t_ns)
+                                and t_ns[s] == s_ns
+                                and t_ns[e] == e_ns
+                                and atr_period <= s
+                                and e <= overlap_len - 2
+                            )
+                            if not ok:
+                                # Cached runs are position-ordered, so once
+                                # we've started collecting a contiguous
+                                # trustworthy block, the first one that no
+                                # longer fits marks its end; before that,
+                                # keep skipping runs too close to position 0
+                                # / the ATR warmup edge.
+                                if candidates:
+                                    break
+                                continue
+                            candidates.append([cls, s, e])
+
+        if candidates:
+            head_runs = _build_runs_from(classes, 0, stop=candidates[0][1])
+            tail_runs = _build_runs_from(classes, candidates[-1][2] + 1)
+            raw_runs = _coalesce_adjacent_runs(head_runs + candidates + tail_runs)
+        else:
+            raw_runs = _build_runs_from(classes, 0)
+
+        is_leg = _make_is_leg(closes, opens, atr_filled, leg_mult)
+        # `_merge_weak_runs` mutates its input in place — always give it a
+        # fresh copy so `raw_runs` (what gets cached) stays pre-merge.
+        merged_runs = _merge_weak_runs([list(r) for r in raw_runs], is_leg, max_base)
+        zones = _build_zones_from_runs(merged_runs, is_leg, highs, lows, closes, max_base)
+        for z in zones:
+            z["retest_idx"], z["broken_idx"] = _track_retest_and_break(z, highs, lows, closes)
+
+        self._zone_cache = {
+            "t_ns": t_ns.copy(),
+            "raw_runs": [[cls, int(t_ns[s]), int(t_ns[e])] for cls, s, e in raw_runs],
+        }
+        return zones
 
     def evaluate(self, ctx: MarketContext) -> Signal | None:
         params = self.spec.params
@@ -361,6 +582,7 @@ class PobSndZonesVix75:
         highs = df["high"].to_numpy()[-lookback:]
         lows = df["low"].to_numpy()[-lookback:]
         closes = df["close"].to_numpy()[-lookback:]
+        t_ns = pd.DatetimeIndex(df["time"]).as_unit("ns").asi8[-lookback:]
 
         atr = _atr(highs, lows, closes, int(params["atr_period"]))
         atr_val = atr.iloc[-1]
@@ -368,7 +590,7 @@ class PobSndZonesVix75:
             return None
         atr_val = float(atr_val)
 
-        zones = _detect_zones(opens, highs, lows, closes, atr, params)
+        zones = self._detect_zones_cached(opens, highs, lows, closes, t_ns, atr, params)
         last_i = len(closes) - 1
 
         # Most recent live zone whose FIRST retest is happening right now

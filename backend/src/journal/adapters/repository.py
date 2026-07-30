@@ -9,7 +9,7 @@ from sqlalchemy import ColumnElement, func, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from src.journal.adapters.orm import TradeRow
-from src.journal.domain.models import CandleSnapshot, TradeRecord
+from src.journal.domain.models import CandleSnapshot, TradeAnalyticsRecord, TradeRecord
 
 Outcome = Literal["win", "loss", "breakeven", "open"]
 OrderField = Literal["open_time", "close_time", "profit"]
@@ -90,6 +90,42 @@ class JournalRepository:
         with self._session_factory() as session:
             rows = session.scalars(query).all()
         return [_to_domain(row) for row in rows]
+
+    def get_all_for_analytics(self, account_id: str = "default") -> list[TradeAnalyticsRecord]:
+        """Same rows as `get_all`, but selects only the columns
+        `domain/analytics.py`'s aggregation reads (id, symbol, volume,
+        open/close time, profit, skill, strategy_version) instead of the
+        whole row — SQLAlchemy never fetches or deserializes the four JSON
+        snapshot/structure columns (`m5/h1_entry/exit_snapshot`, `structure`)
+        this way. Backs `get_symbol_analytics`/`get_bot_analytics`, which
+        never look at chart snapshots or swing structure."""
+        query = select(
+            TradeRow.id,
+            TradeRow.symbol,
+            TradeRow.volume,
+            TradeRow.open_time,
+            TradeRow.close_time,
+            TradeRow.profit,
+            TradeRow.skill,
+            TradeRow.strategy_version,
+        ).where(TradeRow.account_id == account_id)
+        with self._session_factory() as session:
+            rows = session.execute(query).all()
+        return [
+            TradeAnalyticsRecord(
+                id=row.id,
+                symbol=row.symbol,
+                volume=row.volume,
+                open_time=datetime.fromtimestamp(row.open_time, tz=UTC),
+                close_time=datetime.fromtimestamp(row.close_time, tz=UTC)
+                if row.close_time
+                else None,
+                profit=row.profit,
+                skill=row.skill,
+                strategy_version=row.strategy_version,
+            )
+            for row in rows
+        ]
 
     def get_open(
         self, symbol: str | None = None, account_id: str = "default"

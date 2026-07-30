@@ -30,6 +30,7 @@ from dotenv import dotenv_values
 
 from src.activity.adapters.repository import ActivityLogRepository
 from src.activity.application.activity_log_service import ActivityLogService
+from src.activity.application.retention_service import ActivityLogRetentionService
 from src.ai.adapters.claude import ClaudeAdapter
 from src.ai.adapters.claude_code import ClaudeCodeAdapter
 from src.ai.adapters.gemini import GeminiAdapter
@@ -90,6 +91,7 @@ from src.shared.config.loaders import (
     load_accounts_config,
     load_alerting_config,
     load_llm_provider_config,
+    load_maintenance_config,
     load_news_config,
     load_refinement_config,
     load_risk_caps,
@@ -97,6 +99,7 @@ from src.shared.config.loaders import (
 )
 from src.shared.config.settings import REPO_ROOT, Settings, load_yaml_config
 from src.shared.db.base import make_session_factory
+from src.shared.db.checkpoint import WalCheckpointService
 from src.shared.events.bus import EventBus
 from src.shared.events.definitions import (
     CandleClosed,
@@ -252,6 +255,8 @@ class Container:
     provider_settings: ProviderSettingsService
     news_client: httpx.AsyncClient
     news_window_service: NewsWindowService
+    activity_log_retention_service: ActivityLogRetentionService
+    wal_checkpoint_service: WalCheckpointService
     accounts: dict[str, AccountRuntime]
     primary_account_id: str
 
@@ -361,6 +366,8 @@ class Container:
         for runtime in self.accounts.values():
             await runtime.aclose()
         await self.news_window_service.stop()
+        await self.activity_log_retention_service.stop()
+        await self.wal_checkpoint_service.stop()
         await self.news_client.aclose()
         if self.alert_telegram_client is not None:
             await self.alert_telegram_client.aclose()
@@ -391,6 +398,21 @@ def build_container(settings: Settings | None = None) -> Container:
     journal_repository = JournalRepository(session_factory)
     activity_log_repository = ActivityLogRepository(session_factory)
     strategy_version_repository = StrategyVersionRepository(session_factory)
+
+    # --- housekeeping: activity_logs retention + SQLite WAL checkpoint ---
+    # Both grow/accumulate unbounded otherwise (configs/maintenance.yaml) —
+    # process-wide, not per-account, since there's one shared SQLite db.
+    maintenance_config = load_maintenance_config(settings.configs_dir)
+    activity_log_retention_service = ActivityLogRetentionService(
+        activity_log_repository,
+        retention_days=maintenance_config.activity_log_retention_days,
+        check_interval_s=maintenance_config.activity_log_check_interval_hours * 3600,
+    )
+    wal_checkpoint_service = WalCheckpointService(
+        session_factory,
+        interval_s=maintenance_config.wal_checkpoint_interval_minutes * 60,
+        enabled=maintenance_config.wal_checkpoint_enabled,
+    )
 
     global_risk_caps = load_risk_caps(settings.configs_dir)
     account_risk_caps = {
@@ -565,6 +587,8 @@ def build_container(settings: Settings | None = None) -> Container:
         provider_settings=provider_settings,
         news_client=news_client,
         news_window_service=news_window_service,
+        activity_log_retention_service=activity_log_retention_service,
+        wal_checkpoint_service=wal_checkpoint_service,
         accounts=accounts,
         primary_account_id=primary_account_id,
         alert_telegram_client=alert_telegram_client,

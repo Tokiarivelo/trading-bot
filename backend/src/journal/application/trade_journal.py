@@ -153,11 +153,11 @@ class TradeJournalService:
         return await asyncio.to_thread(self._repository.get_open, symbol, self._account_id)
 
     async def get_symbol_analytics(self) -> list[SymbolAnalytics]:
-        trades = await asyncio.to_thread(self._repository.get_all, self._account_id)
+        trades = await asyncio.to_thread(self._repository.get_all_for_analytics, self._account_id)
         return compute_symbol_analytics(trades)
 
     async def get_bot_analytics(self) -> list[BotAnalytics]:
-        trades = await asyncio.to_thread(self._repository.get_all, self._account_id)
+        trades = await asyncio.to_thread(self._repository.get_all_for_analytics, self._account_id)
         return compute_bot_analytics(trades)
 
     async def search_trades(

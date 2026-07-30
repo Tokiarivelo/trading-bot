@@ -10,12 +10,17 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
+import numpy as np
 import pandas as pd
 import pytest
 
+import src.strategies.generated.pob_trend_confluence_xauusd_v2 as pob_trend_confluence_xauusd_v2
 from src.strategies.domain.models import Direction, MarketContext, ZoneKind
 from src.strategies.generated.pob_trend_confluence_xauusd_v2 import (
     PobTrendConfluenceXauusdV2,
+    _atr,
+    _detect_zones,
+    _resample,
 )
 
 START = datetime(2026, 1, 1, tzinfo=UTC)
@@ -308,3 +313,179 @@ def test_spec_shape() -> None:
     assert strategy.spec.params["tp_rr"] >= 1.55  # headroom over xauusd min_rr 1.5
     assert strategy.spec.params["session_windows"] == ()  # trades all sessions
     assert strategy.spec.params["max_retest_episodes"] == 2
+
+
+# --- Incremental zone-detection cache: bit-identical proof -----------------
+#
+# `PobTrendConfluenceXauusdV2._detect_zones_cached` is a timestamp-keyed
+# incremental replacement for the stateless `_detect_zones(zone_frame, atr,
+# params)` full recompute, replicated from the proven design on
+# `pob_snd_zones_xauusd_v1.PobSndZonesXauusd._detect_zones_cached` (see
+# OPTIMIZATION_CHECKLIST.md). These tests are the actual proof it's safe: a
+# long synthetic walk-forward series is fed through a fixed-size sliding
+# window one bar at a time, and at EVERY step the incremental cache's output
+# must exactly match a from-scratch `_detect_zones` recompute on the
+# identical zone_frame. Called directly on `_detect_zones_cached` (bypassing
+# `evaluate()`'s trend-alignment gate) so the cache mechanism itself is
+# exercised on every step, not just the subset of bars where Setup A fires.
+
+CONTEXT_BARS = 200  # engine/backtest window size, per the module docstring
+ZONE_TF_MINUTES = 30  # production default (see PobTrendConfluenceXauusdV2.__init__)
+ATR_PERIOD = 14  # production default
+
+
+def _make_walk_forward_series(n_bars: int, seed: int) -> list[dict]:
+    """Multi-week synthetic M5 OHLC series with regime-switching drift
+    (trend-up / trend-down / chop) so the zone-TF-resampled bars produce a
+    realistic mix of legs, bases, and weak-run merges — not just noise.
+    Skips Saturdays like a real forex/CFD feed, exercising the cache's
+    session-gap fallback (no timestamp overlap -> full recompute)."""
+    rng = np.random.default_rng(seed)
+    bars: list[dict] = []
+    t = START
+    price = 2000.0
+    regime = 0
+    regime_len = 0
+    while len(bars) < n_bars:
+        if t.weekday() == 5:  # Saturday: jump the weekend gap
+            t = t + timedelta(days=2)
+            continue
+        if regime_len <= 0:
+            regime = int(rng.choice([-1, 0, 1], p=[0.35, 0.3, 0.35]))
+            regime_len = int(rng.integers(4, 20))
+        drift = {-1: -0.35, 0: 0.0, 1: 0.35}[regime] * rng.uniform(0.5, 1.5)
+        noise = rng.normal(0, 0.15)
+        o = price
+        c = o + drift + noise
+        hi = max(o, c) + abs(rng.normal(0, 0.08))
+        lo = min(o, c) - abs(rng.normal(0, 0.08))
+        bars.append({"time": t, "open": o, "high": hi, "low": lo, "close": c, "tick_volume": 1000})
+        price = c
+        t = t + STEP
+        regime_len -= 1
+    return bars
+
+
+def _zone_fingerprint(zone: dict, zone_end_ns: np.ndarray) -> tuple:
+    """Normalize a zone dict for cross-call comparison: positions
+    (base_start/conf_idx/leg_out_end) are only meaningful within the
+    zone_frame that produced them, so translate them to the bucket's
+    absolute end timestamp — the stable identifier — before comparing."""
+    return (
+        zone["pattern"],
+        zone["kind"],
+        round(zone["price_high"], 6),
+        round(zone["price_low"], 6),
+        int(zone_end_ns[zone["base_start"]]),
+        int(zone_end_ns[zone["conf_idx"]]),
+        int(zone_end_ns[zone["leg_out_end"]]),
+    )
+
+
+def test_incremental_cache_matches_full_recompute_every_step() -> None:
+    """Walk ~4000 M5 bars forward one bar at a time through a fixed-size
+    200-bar sliding window (rolling the window over ~19 times), and at
+    EVERY single step assert the incremental cache
+    (`PobTrendConfluenceXauusdV2._detect_zones_cached`, called on one
+    persistent strategy instance so its cache carries forward) produces
+    exactly the same zones as the stateless full recompute (`_detect_zones`)
+    on the identical zone_frame — not just at the end of the walk."""
+    all_bars = _make_walk_forward_series(4200, seed=20260729)
+    df_all = pd.DataFrame(all_bars)
+    params = PobTrendConfluenceXauusdV2().spec.params
+    incremental = PobTrendConfluenceXauusdV2()
+
+    checked_steps = 0
+    found_any_zone = False
+    for end in range(CONTEXT_BARS, len(df_all)):
+        window = df_all.iloc[end - CONTEXT_BARS : end].reset_index(drop=True)
+        resampled = _resample(window, ZONE_TF_MINUTES)
+        if resampled is None:
+            continue
+        zone_frame, zone_end_ns = resampled
+        atr_series = _atr(zone_frame, ATR_PERIOD)
+        if atr_series.dropna().empty:
+            continue
+
+        ground_truth = _detect_zones(zone_frame, atr_series, params)
+        cached = incremental._detect_zones_cached(zone_frame, zone_end_ns, atr_series, params)
+
+        gt_fp = [_zone_fingerprint(z, zone_end_ns) for z in ground_truth]
+        cached_fp = [_zone_fingerprint(z, zone_end_ns) for z in cached]
+        assert cached_fp == gt_fp, f"zone mismatch at window end={end}: {cached_fp} != {gt_fp}"
+        checked_steps += 1
+        found_any_zone = found_any_zone or bool(ground_truth)
+
+    # Sanity: the walk actually exercised a meaningful number of steps
+    # (rolling the 200-bar window over many times), and zones were actually
+    # found somewhere along the way — this isn't vacuously passing on empty
+    # output the entire walk.
+    assert checked_steps > 3000
+    assert found_any_zone
+
+
+def test_incremental_cache_reprocesses_far_fewer_bars_than_full_recompute() -> None:
+    """Prove the algorithmic claim from the design (not a wall-clock
+    benchmark): in steady state, `_detect_zones_cached`'s classify+run-
+    grouping loop (`_build_runs_from`) only walks the ATR-warmup head and
+    the newly-appended tail of the zone_frame, never the cached middle —
+    while a cold instance (no cache yet, e.g. right after engine restart)
+    walks the whole thing, exactly like a bare `_detect_zones` recompute
+    would."""
+    all_bars = _make_walk_forward_series(1400, seed=99)
+    df_all = pd.DataFrame(all_bars)
+    params = PobTrendConfluenceXauusdV2().spec.params
+    incremental = PobTrendConfluenceXauusdV2()
+
+    bars_walked: list[int] = []
+    orig = pob_trend_confluence_xauusd_v2._build_runs_from
+
+    def counting(classes, start, stop=None):
+        stop_pos = len(classes) if stop is None else stop
+        bars_walked.append(max(0, stop_pos - start))
+        return orig(classes, start, stop)
+
+    # Warm the cache up over many steady-state steps first, uninstrumented.
+    warm_end = CONTEXT_BARS + 600
+    for end in range(CONTEXT_BARS, warm_end):
+        window = df_all.iloc[end - CONTEXT_BARS : end].reset_index(drop=True)
+        resampled = _resample(window, ZONE_TF_MINUTES)
+        if resampled is None:
+            continue
+        zone_frame, zone_end_ns = resampled
+        atr_series = _atr(zone_frame, ATR_PERIOD)
+        if atr_series.dropna().empty:
+            continue
+        incremental._detect_zones_cached(zone_frame, zone_end_ns, atr_series, params)
+
+    # One more steady-state step, instrumented, compared against a cold
+    # (freshly-constructed, no cache) instance evaluating the *identical*
+    # window.
+    window = df_all.iloc[warm_end - CONTEXT_BARS : warm_end].reset_index(drop=True)
+    zone_frame, zone_end_ns = _resample(window, ZONE_TF_MINUTES)
+    atr_series = _atr(zone_frame, ATR_PERIOD)
+    n_bars_in_frame = len(zone_frame)
+    assert n_bars_in_frame > 0
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(pob_trend_confluence_xauusd_v2, "_build_runs_from", counting)
+
+        bars_walked.clear()
+        incremental._detect_zones_cached(zone_frame, zone_end_ns, atr_series, params)
+        incremental_bars = sum(bars_walked)
+
+        bars_walked.clear()
+        cold = PobTrendConfluenceXauusdV2()
+        cold._detect_zones_cached(zone_frame, zone_end_ns, atr_series, params)
+        cold_bars = sum(bars_walked)
+
+    # Cold (no cache yet) always falls back to a full recompute: every bar
+    # in the frame goes through the classify+group loop, same as
+    # `_detect_zones` would process unconditionally.
+    assert cold_bars == n_bars_in_frame
+    # The warmed-up incremental instance reprocesses strictly fewer bars —
+    # only the ATR-warmup head (`atr_period` bars, never cacheable — see
+    # `_detect_zones_cached` docstring) plus the newly-appended tail, not
+    # the whole window.
+    assert incremental_bars < cold_bars
+    assert incremental_bars <= n_bars_in_frame * 0.75

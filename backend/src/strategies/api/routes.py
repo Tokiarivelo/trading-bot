@@ -7,6 +7,7 @@ archives whatever was active — nothing is ever edited in place.
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Path, Query, Request
@@ -111,7 +112,7 @@ async def activate_version(
 ) -> StrategyVersionOut:
     service = _service(account)
     try:
-        version = service.activate_version(version_id)
+        version = await asyncio.to_thread(service.activate_version, version_id)
     except StrategyValidationError as exc:
         raise HTTPException(status_code=422, detail="; ".join(exc.errors)) from exc
     except ValueError as exc:
@@ -150,7 +151,8 @@ async def duplicate_version(
 ) -> StrategyVersionOut:
     service = _service(account)
     try:
-        duplicated = service.duplicate_version(
+        duplicated = await asyncio.to_thread(
+            service.duplicate_version,
             version_id,
             new_name=body.name,
             symbols=tuple(body.symbols) if body.symbols else None,
@@ -187,7 +189,7 @@ async def rename_version(
 ) -> StrategyVersionOut:
     service = _service(account)
     try:
-        renamed = service.rename_family(version_id, body.name)
+        renamed = await asyncio.to_thread(service.rename_family, version_id, body.name)
     except StrategyNameConflictError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:
@@ -226,7 +228,9 @@ async def edit_version_code(
 ) -> StrategyVersionDetailOut:
     service = _service(account)
     try:
-        edited = service.edit_code(version_id, body.code, new_name=body.new_name)
+        edited = await asyncio.to_thread(
+            service.edit_code, version_id, body.code, new_name=body.new_name
+        )
     except StrategyNameConflictError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except StrategyValidationError as exc:
@@ -258,7 +262,9 @@ async def update_version_spec(
 ) -> StrategyVersionOut:
     service = _service(account)
     try:
-        updated = service.update_spec(version_id, body.model_dump())
+        updated = await asyncio.to_thread(
+            service.update_spec, version_id, body.model_dump()
+        )
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     return StrategyVersionOut.from_domain(updated)
@@ -286,7 +292,7 @@ async def archive_version(
 ) -> StrategyVersionOut:
     service = _service(account)
     try:
-        archived = service.archive_version(version_id)
+        archived = await asyncio.to_thread(service.archive_version, version_id)
     except VersionAlreadyArchivedError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:
@@ -315,7 +321,7 @@ async def delete_version(
 ) -> None:
     service = _service(account)
     try:
-        service.delete_version(version_id)
+        await asyncio.to_thread(service.delete_version, version_id)
     except VersionActiveError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:
@@ -344,7 +350,7 @@ async def pause_version(
 ) -> StrategyVersionOut:
     service = _service(account)
     try:
-        paused = service.pause_version(version_id)
+        paused = await asyncio.to_thread(service.pause_version, version_id)
     except VersionNotActiveError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:
@@ -369,7 +375,7 @@ async def resume_version(
 ) -> StrategyVersionOut:
     service = _service(account)
     try:
-        resumed = service.resume_version(version_id)
+        resumed = await asyncio.to_thread(service.resume_version, version_id)
     except VersionNotActiveError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:

@@ -1,0 +1,15 @@
+# Housekeeping for tables/files that grow unbounded otherwise (SQLite has no
+# built-in retention — see docs/ for the investigation that led here).
+
+# activity_logs mirrors every `logging.getLogger("src.*")` INFO+ call
+# (see shared/logging) — diagnostic only, safe to age out.
+activity_log:
+  retention_days: 90        # rows older than this get purged
+  check_interval_hours: 6   # how often the purge job runs
+
+# `PRAGMA journal_mode=wal` lets the -wal file grow unbounded between
+# checkpoints. No-ops automatically on a non-SQLite engine (e.g. after the
+# planned PostgreSQL migration, see IMPLEMENTATION_PLAN.md).
+wal_checkpoint:
+  enabled: true
+  interval_minutes: 15

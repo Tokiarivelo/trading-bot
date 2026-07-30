@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import dataclasses
 from datetime import UTC, datetime
 
 from src.journal.domain.analytics import compute_bot_analytics, compute_symbol_analytics
-from src.journal.domain.models import TradeRecord
+from src.journal.domain.models import CandleSnapshot, TradeAnalyticsRecord, TradeRecord
 
 
 def utc(*args) -> datetime:
@@ -96,6 +97,118 @@ def test_symbol_analytics_profit_factor_none_with_no_losses():
     result = compute_symbol_analytics(trades)[0]
 
     assert result.profit_factor is None
+
+
+# ── slim TradeAnalyticsRecord projection (optimization: repository.py's
+#    get_all_for_analytics skips the JSON snapshot/structure columns this
+#    aggregation never reads) ─────────────────────────────────────────────
+
+
+def _to_analytics_record(record: TradeRecord) -> TradeAnalyticsRecord:
+    """Mirrors what `JournalRepository.get_all_for_analytics` projects from a
+    full row — only the fields `compute_symbol_analytics`/`compute_bot_analytics`
+    actually touch."""
+    return TradeAnalyticsRecord(
+        id=record.id,
+        symbol=record.symbol,
+        volume=record.volume,
+        open_time=record.open_time,
+        close_time=record.close_time,
+        profit=record.profit,
+        skill=record.skill,
+        strategy_version=record.strategy_version,
+    )
+
+
+def _make_full_trades() -> list[TradeRecord]:
+    snapshot = (
+        CandleSnapshot(
+            time=utc(2026, 7, 10, 13, 55), open=1, high=2, low=0.5, close=1.5, tick_volume=100
+        ),
+    )
+    return [
+        make_record(
+            "1",
+            symbol="XAUUSD",
+            skill="normal/xauusd/a",
+            strategy_version="breakout_v1:v1",
+            volume=0.2,
+            open_time=utc(2026, 7, 10, 14, 0),
+            close_time=utc(2026, 7, 10, 15, 0),
+            profit=10.0,
+            m5_entry_snapshot=snapshot,
+            h1_entry_snapshot=snapshot,
+            m5_exit_snapshot=snapshot,
+            h1_exit_snapshot=snapshot,
+            reason="RBR base retest",
+            confidence=0.82,
+            zone_kind="demand",
+            structure=(("HL", 2397.2, utc(2026, 7, 10, 13, 30)),),
+        ),
+        make_record(
+            "2",
+            symbol="XAUUSD",
+            skill="normal/xauusd/b",
+            strategy_version="breakout_v1:v1",
+            volume=0.1,
+            open_time=utc(2026, 7, 10, 15, 0),
+            close_time=utc(2026, 7, 10, 16, 0),
+            profit=-4.0,
+        ),
+        make_record(
+            "3",
+            symbol="XAUUSD",
+            open_time=utc(2026, 7, 10, 16, 0),
+        ),  # still open
+        make_record(
+            "4",
+            symbol="EURUSD",
+            skill="normal/eurusd/a",
+            strategy_version="meanrev_v2:v1",
+            open_time=utc(2026, 7, 10, 17, 0),
+            close_time=utc(2026, 7, 10, 18, 0),
+            profit=2.0,
+        ),
+    ]
+
+
+def test_compute_symbol_analytics_bit_identical_for_slim_records():
+    full_trades = _make_full_trades()
+    slim_trades = [_to_analytics_record(t) for t in full_trades]
+
+    assert compute_symbol_analytics(slim_trades) == compute_symbol_analytics(full_trades)
+
+
+def test_compute_bot_analytics_bit_identical_for_slim_records():
+    full_trades = _make_full_trades()
+    slim_trades = [_to_analytics_record(t) for t in full_trades]
+
+    assert compute_bot_analytics(slim_trades) == compute_bot_analytics(full_trades)
+
+
+def test_trade_analytics_record_has_no_json_snapshot_or_structure_fields():
+    """The slim projection must not carry the four JSON columns
+    (m5/h1_entry/exit_snapshot, structure) that analytics.py never reads —
+    that's the whole point of `get_all_for_analytics` over `get_all`."""
+    field_names = {f.name for f in dataclasses.fields(TradeAnalyticsRecord)}
+    assert field_names == {
+        "id",
+        "symbol",
+        "volume",
+        "open_time",
+        "close_time",
+        "profit",
+        "skill",
+        "strategy_version",
+    }
+    excluded = {
+        "m5_entry_snapshot",
+        "h1_entry_snapshot",
+        "m5_exit_snapshot",
+        "h1_exit_snapshot",
+        "structure",
+    }
+    assert field_names.isdisjoint(excluded)
 
 
 def test_symbol_analytics_empty_input_returns_empty_list():

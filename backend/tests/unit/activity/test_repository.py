@@ -154,6 +154,33 @@ def test_delete_by_ids_does_not_cross_accounts(repository):
     assert total == 1
 
 
+def test_delete_older_than_removes_only_old_rows(repository):
+    repository.save(created_at=100, level="INFO", logger="src.engine", message="old")
+    repository.save(created_at=200, level="INFO", logger="src.engine", message="new")
+
+    deleted = repository.delete_older_than(150)
+
+    assert deleted == 1
+    remaining, total = repository.search()
+    assert total == 1
+    assert remaining[0].message == "new"
+
+
+def test_delete_older_than_ignores_account_id(repository):
+    repository.save(
+        created_at=100, level="INFO", logger="src.engine", message="a", account_id="ftmo-1"
+    )
+    repository.save(
+        created_at=100, level="INFO", logger="src.engine", message="b", account_id="ftmo-2"
+    )
+
+    deleted = repository.delete_older_than(150)
+
+    assert deleted == 2
+    assert repository.search(account_id="ftmo-1") == ([], 0)
+    assert repository.search(account_id="ftmo-2") == ([], 0)
+
+
 def test_delete_by_filter_scopes_to_account_id(repository):
     repository.save(
         created_at=100, level="INFO", logger="src.engine", message="a", account_id="ftmo-1"

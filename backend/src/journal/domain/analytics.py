@@ -10,7 +10,13 @@ from __future__ import annotations
 from collections import defaultdict
 from dataclasses import dataclass
 
-from src.journal.domain.models import TradeRecord
+from src.journal.domain.models import TradeAnalyticsRecord, TradeRecord
+
+# Both aggregation functions only touch the fields the two types share
+# (id, symbol, volume, open_time, close_time, profit, skill,
+# strategy_version, is_open) — callers may pass either the full
+# `TradeRecord` or the slim `TradeAnalyticsRecord` projection.
+AnalyticsRecord = TradeRecord | TradeAnalyticsRecord
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -82,13 +88,13 @@ class BotAnalytics:
     equity_curve: tuple[EquityPoint, ...]
 
 
-def _closed(trades: list[TradeRecord]) -> list[TradeRecord]:
+def _closed(trades: list[AnalyticsRecord]) -> list[AnalyticsRecord]:
     return [t for t in trades if not t.is_open]
 
 
 def _wins_losses_breakeven(
-    closed: list[TradeRecord],
-) -> tuple[list[TradeRecord], list[TradeRecord], list[TradeRecord]]:
+    closed: list[AnalyticsRecord],
+) -> tuple[list[AnalyticsRecord], list[AnalyticsRecord], list[AnalyticsRecord]]:
     wins = [t for t in closed if (t.profit or 0.0) > 0]
     losses = [t for t in closed if (t.profit or 0.0) < 0]
     breakeven = [t for t in closed if (t.profit or 0.0) == 0]
@@ -103,7 +109,7 @@ def _profit_factor(gross_profit: float, gross_loss: float) -> float | None:
     return gross_profit / gross_loss
 
 
-def _equity_curve(closed: list[TradeRecord]) -> tuple[EquityPoint, ...]:
+def _equity_curve(closed: list[AnalyticsRecord]) -> tuple[EquityPoint, ...]:
     ordered = sorted(closed, key=lambda t: t.close_time)  # close_time set on every closed trade
     points = []
     running = 0.0
@@ -129,9 +135,9 @@ def _max_drawdown(equity_curve: tuple[EquityPoint, ...]) -> float:
     return max_dd
 
 
-def compute_symbol_analytics(trades: list[TradeRecord]) -> list[SymbolAnalytics]:
+def compute_symbol_analytics(trades: list[AnalyticsRecord]) -> list[SymbolAnalytics]:
     """One entry per distinct symbol, ranked by total realized profit."""
-    by_symbol: dict[str, list[TradeRecord]] = defaultdict(list)
+    by_symbol: dict[str, list[AnalyticsRecord]] = defaultdict(list)
     for t in trades:
         by_symbol[t.symbol].append(t)
 
@@ -171,11 +177,11 @@ def compute_symbol_analytics(trades: list[TradeRecord]) -> list[SymbolAnalytics]
     return sorted(results, key=lambda s: s.total_profit, reverse=True)
 
 
-def compute_bot_analytics(trades: list[TradeRecord]) -> list[BotAnalytics]:
+def compute_bot_analytics(trades: list[AnalyticsRecord]) -> list[BotAnalytics]:
     """One entry per distinct bot (`skill`), ranked by total realized profit.
     Trades with no skill (manual/API-placed) are excluded — they aren't
     attributable to any bot's performance."""
-    by_skill: dict[str, list[TradeRecord]] = defaultdict(list)
+    by_skill: dict[str, list[AnalyticsRecord]] = defaultdict(list)
     for t in trades:
         if t.skill:
             by_skill[t.skill].append(t)

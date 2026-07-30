@@ -251,3 +251,34 @@ async def test_get_markers_skill_filter_proxies_through(service):
     markers = await service.get_markers("XAUUSD", skill="normal/xauusd/a")
 
     assert [m.id for m in markers] == ["a"]
+
+
+async def test_analytics_methods_use_slim_query_not_full_get_all(service, repository):
+    """get_symbol_analytics/get_bot_analytics must go through the slim
+    get_all_for_analytics query (which skips the JSON snapshot/structure
+    columns) rather than the full get_all() — the optimization this test
+    guards against regressing."""
+    await service.on_position_opened(opened_event())
+    await service.on_position_closed(closed_event())
+
+    calls = {"get_all": 0, "get_all_for_analytics": 0}
+    orig_get_all = repository.get_all
+    orig_slim = repository.get_all_for_analytics
+
+    def counted_get_all(*args, **kwargs):
+        calls["get_all"] += 1
+        return orig_get_all(*args, **kwargs)
+
+    def counted_slim(*args, **kwargs):
+        calls["get_all_for_analytics"] += 1
+        return orig_slim(*args, **kwargs)
+
+    repository.get_all = counted_get_all
+    repository.get_all_for_analytics = counted_slim
+
+    symbol_analytics = await service.get_symbol_analytics()
+    bot_analytics = await service.get_bot_analytics()
+
+    assert calls == {"get_all": 0, "get_all_for_analytics": 2}
+    assert len(symbol_analytics) == 1
+    assert len(bot_analytics) == 1

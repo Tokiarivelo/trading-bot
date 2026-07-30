@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from sqlalchemy import JSON, Float, Integer, String
+from sqlalchemy import JSON, Float, Index, Integer, String
 from sqlalchemy.orm import Mapped, mapped_column
 
 from src.shared.db.base import Base
@@ -10,6 +10,14 @@ from src.shared.db.base import Base
 
 class TradeRow(Base):
     __tablename__ = "trades"
+    __table_args__ = (
+        # Every hot query (`get_last_n`, `get_markers`, `get_open`, `count_closed`,
+        # `search`) filters on account_id AND symbol together; the previous
+        # single-column indexes on each let SQLite use only one and row-filter
+        # the rest. This composite index (with close_time trailing, since several
+        # of those queries also filter/order on it) serves the whole filter shape.
+        Index("ix_trades_account_symbol_close", "account_id", "symbol", "close_time"),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
     account_id: Mapped[str] = mapped_column(String(64), index=True)
