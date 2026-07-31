@@ -526,18 +526,20 @@ async def evaluate_custom_code(
         ctx = MarketContext(symbol=body.symbol, candles=sliced_candles, spread_points=20.0)
 
         try:
-            sig = strategy.evaluate(ctx)
-            if sig:
-                signals.append(
-                    CustomSignalOut(
-                        time=int(current_time.timestamp()),
-                        direction=sig.direction.value,
-                        sl_points=sig.sl_points,
-                        tp_points=sig.tp_points,
-                        confidence=sig.confidence,
-                        reason=sig.reason,
+            sig_res = strategy.evaluate(ctx)
+            if sig_res:
+                sig_list = sig_res if isinstance(sig_res, (list, tuple)) else [sig_res]
+                for sig in sig_list:
+                    signals.append(
+                        CustomSignalOut(
+                            time=int(current_time.timestamp()),
+                            direction=sig.direction.value,
+                            sl_points=sig.sl_points,
+                            tp_points=sig.tp_points,
+                            confidence=sig.confidence,
+                            reason=sig.reason,
+                        )
                     )
-                )
         except Exception:
             # Silently ignore evaluation errors on specific candles
             pass

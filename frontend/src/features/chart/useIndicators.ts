@@ -71,14 +71,14 @@ import {
   swingStructure,
   vwap,
 } from './indicators';
-import { cssVar, derivePeriodParam, hexToRgba, usesSndZones } from './chartFormat';
+import { cssVar, derivePeriodParam, hexToRgba, pickZoneColor, usesSndZones } from './chartFormat';
 import {
   loadManualIndicators,
   saveManualIndicators,
   SEPARATOR_DRAWING_PREFIX,
   STRATEGY_DRAWING_PREFIX,
 } from './chartStorage';
-import type { ChartEngineController, ManualIndicator } from './types';
+import type { ChartEngineController, ManualIndicator, ZoneColorStyle } from './types';
 
 // Shared swing-detection constants for the 'structure'/'qml' indicators,
 // matching the backend vix75 strategy's defaults (atr_period: 14,
@@ -129,6 +129,9 @@ export interface UseIndicatorsParams {
   /** The live-bot eye view flips SignalsDock open when it resolves a bot's
    * indicators — same side effect the original combined effect had. */
   setShowSignalsDock: Dispatch<SetStateAction<boolean>>;
+  /** User-configurable zone-rectangle colors (Zone colors settings panel) —
+   * see `pickZoneColor` in chartFormat.ts. */
+  zoneColorStyle: ZoneColorStyle;
 }
 
 export function useIndicators(params: UseIndicatorsParams) {
@@ -147,6 +150,7 @@ export function useIndicators(params: UseIndicatorsParams) {
     accountId,
     liveBotSkill,
     setShowSignalsDock,
+    zoneColorStyle,
   } = params;
 
   // Manually added indicators (independent of the active strategy's spec),
@@ -201,6 +205,9 @@ export function useIndicators(params: UseIndicatorsParams) {
       const chart = chartController?.getChart();
       const manager = chartController?.getDrawingManager();
       if (!chart || !manager) return;
+      // chart/manager only resolve non-null when chartController itself is
+      // non-null (both come from it via optional chaining above).
+      const zoneMeta = chartController!.getZoneMetaMap();
 
       for (const series of indicatorSeriesRef.current) {
         try {
@@ -216,6 +223,7 @@ export function useIndicators(params: UseIndicatorsParams) {
           drawing.id.startsWith(SEPARATOR_DRAWING_PREFIX)
         ) {
           manager.removeDrawing(drawing.id);
+          zoneMeta.delete(drawing.id);
         }
       }
       // Note: BACKTEST_DRAWING_PREFIX drawings are intentionally left alone
@@ -597,11 +605,17 @@ export function useIndicators(params: UseIndicatorsParams) {
               // the head (maximum pain level), from the head until the
               // zone is broken past the head — or still-open to the latest candle.
               // Supply (sell) tint for QML, demand (buy) for the inverse.
-              const zoneColor =
-                zone.kind === 'QML' ? cssVar('--color-sell') : cssVar('--color-buy');
+              const qmlTouched = zone.retestTime !== undefined;
+              const zoneColor = pickZoneColor(
+                zoneColorStyle.qml,
+                zone.kind === 'QML_INV',
+                qmlTouched,
+                zoneColorStyle.customColors,
+              );
+              const qmlZoneId = `${STRATEGY_DRAWING_PREFIX}qml-zone:${manualIndicator.id}:${zoneIdx}`;
               manager.addDrawing(
                 new Rectangle(
-                  `${STRATEGY_DRAWING_PREFIX}qml-zone:${manualIndicator.id}:${zoneIdx}`,
+                  qmlZoneId,
                   [
                     { time: zone.headTime, price: zone.headPrice },
                     { time: zone.retestTime ?? lastTime, price: zone.price },
@@ -615,6 +629,18 @@ export function useIndicators(params: UseIndicatorsParams) {
                   { filled: true, locked: true },
                 ),
               );
+              zoneMeta.set(qmlZoneId, {
+                indicator: 'qml',
+                indicatorLabel: 'Quasimodo',
+                pattern: zone.kind,
+                kind: zone.kind === 'QML' ? 'supply' : 'demand',
+                priceLow: Math.min(zone.headPrice, zone.price),
+                priceHigh: Math.max(zone.headPrice, zone.price),
+                timeStart: zone.headTime as number,
+                timeEnd: zone.retestTime ? (zone.retestTime as number) : null,
+                state: qmlTouched ? 'touched' : 'fresh',
+                extra: { 'Neckline price': zone.necklinePrice, 'Head price': zone.headPrice },
+              });
               // Retest of the QML level after the break = the actual
               // entry signal (sell for QML, buy for the inversed pattern).
               if (zone.retestTime) {
@@ -647,11 +673,12 @@ export function useIndicators(params: UseIndicatorsParams) {
                 const touched = zone.touchedTime !== undefined;
                 // Demand (buy) tint for RBR/DBR, supply (sell) for DBD/RBD;
                 // a touched (consumed, invalid) zone is greyed instead.
-                const zoneColor = touched
-                  ? cssVar('--color-ink-muted')
-                  : demand
-                    ? cssVar('--color-buy')
-                    : cssVar('--color-sell');
+                const zoneColor = pickZoneColor(
+                  zoneColorStyle.snd,
+                  demand,
+                  touched,
+                  zoneColorStyle.customColors,
+                );
                 structureMarkers.push({
                   time: zone.time,
                   position: 'atPriceMiddle',
@@ -663,9 +690,10 @@ export function useIndicators(params: UseIndicatorsParams) {
                 // The rectangle spans the base candles' extremes from the
                 // first base candle until the zone is first touched — or
                 // still-open to the latest candle while fresh.
+                const sndZoneId = `${STRATEGY_DRAWING_PREFIX}snd-zone:${manualIndicator.id}:${zoneIdx}`;
                 manager.addDrawing(
                   new Rectangle(
-                    `${STRATEGY_DRAWING_PREFIX}snd-zone:${manualIndicator.id}:${zoneIdx}`,
+                    sndZoneId,
                     [
                       { time: zone.baseStartTime, price: zone.priceHigh },
                       { time: zone.touchedTime ?? lastTime, price: zone.priceLow },
@@ -679,6 +707,17 @@ export function useIndicators(params: UseIndicatorsParams) {
                     { filled: true, locked: true },
                   ),
                 );
+                zoneMeta.set(sndZoneId, {
+                  indicator: 'snd',
+                  indicatorLabel: 'S&D Zones v1',
+                  pattern: zone.pattern,
+                  kind: zone.kind,
+                  priceLow: zone.priceLow,
+                  priceHigh: zone.priceHigh,
+                  timeStart: zone.baseStartTime as number,
+                  timeEnd: zone.touchedTime ? (zone.touchedTime as number) : null,
+                  state: touched ? 'touched' : 'fresh',
+                });
                 // The touch itself is the entry (buy the demand base, sell
                 // the supply base) and where the zone was consumed.
                 if (zone.touchedTime) {
@@ -707,20 +746,28 @@ export function useIndicators(params: UseIndicatorsParams) {
             sndZonesV2(candles, manualIndicator.period, STRUCTURE_ATR_PERIOD).forEach(
               (zone, zoneIdx) => {
                 const demand = zone.kind === 'demand';
-                const mutedColor = cssVar('--color-ink-muted');
                 const touched = zone.state === 'touched';
-                const zoneColor = demand
-                  ? cssVar('--color-buy')
-                  : cssVar('--color-sell');
                 // A touched (consumed, invalid) zone greys out; a fresh one
                 // keeps its buy/sell tint and stays drawn to the right edge.
+                // The BUY/SELL touch marker below always keeps the untouched
+                // buy/sell tint (it marks the entry action itself), even
+                // though the rectangle it sits inside has gone muted.
+                const freshColor = pickZoneColor(
+                  zoneColorStyle.sndV2,
+                  demand,
+                  false,
+                  zoneColorStyle.customColors,
+                );
+                const lineColor = touched
+                  ? pickZoneColor(zoneColorStyle.sndV2, demand, true, zoneColorStyle.customColors)
+                  : freshColor;
                 const fillColor = touched
-                  ? hexToRgba(mutedColor, 0.06)
-                  : hexToRgba(zoneColor, 0.2);
-                const lineColor = touched ? mutedColor : zoneColor;
+                  ? hexToRgba(lineColor, 0.06)
+                  : hexToRgba(lineColor, 0.2);
+                const sndV2ZoneId = `${STRATEGY_DRAWING_PREFIX}snd2-zone:${manualIndicator.id}:${zoneIdx}`;
                 manager.addDrawing(
                   new Rectangle(
-                    `${STRATEGY_DRAWING_PREFIX}snd2-zone:${manualIndicator.id}:${zoneIdx}`,
+                    sndV2ZoneId,
                     [
                       { time: zone.baseStartTime, price: zone.priceHigh },
                       { time: zone.touchedTime ?? lastTime, price: zone.priceLow },
@@ -734,6 +781,18 @@ export function useIndicators(params: UseIndicatorsParams) {
                     { filled: true, locked: true },
                   ),
                 );
+                zoneMeta.set(sndV2ZoneId, {
+                  indicator: 'snd_v2',
+                  indicatorLabel: 'S&D Zones v2',
+                  pattern: zone.pattern,
+                  kind: zone.kind,
+                  priceLow: zone.priceLow,
+                  priceHigh: zone.priceHigh,
+                  timeStart: zone.baseStartTime as number,
+                  timeEnd: zone.touchedTime ? (zone.touchedTime as number) : null,
+                  state: touched ? 'touched' : 'fresh',
+                  extra: zone.hasLegIn ? undefined : { Origin: 'No leg-in (origin base)' },
+                });
                 // Confirmation marker at the proximal edge, tagged with the
                 // pattern (RBR/DBR/RBD/DBD, or DZ/SZ for an origin base) and
                 // whether the zone is still fresh or has been touched.
@@ -752,7 +811,7 @@ export function useIndicators(params: UseIndicatorsParams) {
                     time: zone.touchedTime,
                     position: 'atPriceMiddle',
                     price: zone.proximal,
-                    color: zoneColor,
+                    color: freshColor,
                     shape: demand ? 'arrowUp' : 'arrowDown',
                     text: demand ? 'BUY' : 'SELL',
                   });
@@ -771,7 +830,14 @@ export function useIndicators(params: UseIndicatorsParams) {
             const baseColor = cssVar('--color-ink-muted');
             const targetColor = manualIndicator.color || baseColor;
             const targetDash = manualIndicator.lineStyle === 'solid' ? undefined : manualIndicator.lineStyle === 'dotted' ? [2, 2] : [4, 4];
-            bases.slice(-3).forEach((base, baseIdx) => {
+            const slicedBases = bases.slice(-3);
+            slicedBases.forEach((base, baseIdx) => {
+              const opacity = slicedBases.length > 1
+                ? 0.4 + (baseIdx / (slicedBases.length - 1)) * 0.6
+                : 1.0;
+              const lineColor = targetColor.startsWith('#')
+                ? hexToRgba(targetColor, opacity)
+                : targetColor;
               for (const [edge, price, labelText] of [
                 ['hi', base.high, 'Base high'],
                 ['lo', base.low, 'Base low'],
@@ -782,7 +848,7 @@ export function useIndicators(params: UseIndicatorsParams) {
                     price,
                     anchorTime,
                     {
-                      lineColor: targetColor,
+                      lineColor,
                       lineWidth: lineWidthVal,
                       lineDash: targetDash,
                     },
@@ -1011,7 +1077,7 @@ export function useIndicators(params: UseIndicatorsParams) {
       recomputeIndicatorsRef.current();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [chartController, manualIndicators, activeStrategy, showSeparators]);
+  }, [chartController, manualIndicators, activeStrategy, showSeparators, zoneColorStyle]);
 
   // Saved custom (backend-Python) indicators need an API round trip to
   // compute, unlike every other manual-indicator type, so they can't live

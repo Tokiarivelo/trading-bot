@@ -1,23 +1,62 @@
 "use client";
 
 import Link from "next/link";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useCallback, useEffect, useState } from "react";
 import { useActiveAccount } from "@/shared/api/account-context";
-import { getStrategyVersion, getStrategyVersions, type StrategyVersionSummary } from "@/shared/api/client";
+import {
+  getStrategyVersion,
+  getStrategyVersions,
+  type ExtractedStrategySpec,
+  type StrategyVersionSummary,
+} from "@/shared/api/client";
 import { downloadJson } from "@/shared/utils/download";
+import { BulkVersionActions } from "./BulkVersionActions";
 import { DuplicateVersionForm } from "./DuplicateVersionForm";
 import { StatusBadge } from "./StatusBadge";
+import { SymbolChipsEditor } from "./SymbolChipsEditor";
 import { VersionLifecycleActions } from "./VersionLifecycleActions";
+
+const FILTER_QUERY_KEY = "q";
 
 /** Every recorded strategy version, newest first per name. Pass `name` to
  * restrict to one strategy family (used on the draft detail page once code
- * has been generated for it). */
+ * has been generated for it) — bulk selection and the URL-synced search box
+ * only make sense on the full library table, so both are skipped when `name`
+ * is set. */
 export function StrategyVersionList({ name }: { name?: string }) {
   const accountId = useActiveAccount();
+  const router = useRouter();
+  const pathname = usePathname();
+  const searchParams = useSearchParams();
   const [versions, setVersions] = useState<StrategyVersionSummary[] | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [filter, setFilter] = useState("");
+  const [filter, setFilter] = useState(() => (name ? "" : searchParams.get(FILTER_QUERY_KEY) ?? ""));
   const [exportingId, setExportingId] = useState<string | null>(null);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+
+  function updateFilter(value: string) {
+    setFilter(value);
+    if (name) return;
+    const params = new URLSearchParams(searchParams.toString());
+    if (value) params.set(FILTER_QUERY_KEY, value);
+    else params.delete(FILTER_QUERY_KEY);
+    const query = params.toString();
+    router.replace(query ? `${pathname}?${query}` : pathname, { scroll: false });
+  }
+
+  function handleSpecUpdated(versionId: string, spec: ExtractedStrategySpec) {
+    setVersions((prev) => prev?.map((v) => (v.id === versionId ? { ...v, spec } : v)) ?? prev);
+  }
+
+  function toggleSelected(id: string) {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
 
   async function handleExport(id: string, name: string, version: number) {
     if (!accountId) return;
@@ -84,20 +123,35 @@ export function StrategyVersionList({ name }: { name?: string }) {
       )
     : versions;
 
+  const allFilteredSelected = filtered.length > 0 && filtered.every((v) => selectedIds.has(v.id));
+
+  function toggleSelectAll() {
+    setSelectedIds(allFilteredSelected ? new Set() : new Set(filtered.map((v) => v.id)));
+  }
+
   return (
     <div className="flex flex-col gap-4 p-4">
       {!name && (
-        <div className="relative w-full max-w-sm">
-          <span className="absolute inset-y-0 left-0 flex items-center pl-3 pointer-events-none text-ink-muted">
-            <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
-            </svg>
-          </span>
-          <input
-            className="w-full rounded-lg border border-line bg-bg/60 pl-9 pr-4 py-2 text-sm text-ink placeholder:text-ink-muted focus:border-accent focus:ring-1 focus:ring-accent focus:outline-none transition-all duration-200"
-            placeholder="Filter by strategy name or symbol..."
-            value={filter}
-            onChange={(e) => setFilter(e.target.value)}
+        <div className="flex flex-wrap items-center gap-3">
+          <div className="relative w-full max-w-sm">
+            <span className="absolute inset-y-0 left-0 flex items-center pl-3 pointer-events-none text-ink-muted">
+              <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+              </svg>
+            </span>
+            <input
+              className="w-full rounded-lg border border-line bg-bg/60 pl-9 pr-4 py-2 text-sm text-ink placeholder:text-ink-muted focus:border-accent focus:ring-1 focus:ring-accent focus:outline-none transition-all duration-200"
+              placeholder="Filter by strategy name or symbol..."
+              value={filter}
+              onChange={(e) => updateFilter(e.target.value)}
+            />
+          </div>
+          <BulkVersionActions
+            selectedIds={Array.from(selectedIds)}
+            onDone={() => {
+              setSelectedIds(new Set());
+              reload();
+            }}
           />
         </div>
       )}
@@ -106,6 +160,17 @@ export function StrategyVersionList({ name }: { name?: string }) {
         <table className="w-full min-w-[720px] border-collapse text-sm text-left">
           <thead>
             <tr className="border-b border-line bg-panel/50 text-[10px] font-semibold text-ink-muted uppercase tracking-wider">
+              {!name && (
+                <th className="px-4 py-3 font-semibold w-8">
+                  <input
+                    type="checkbox"
+                    className="cursor-pointer accent-accent"
+                    checked={allFilteredSelected}
+                    onChange={toggleSelectAll}
+                    aria-label="Select all strategy versions"
+                  />
+                </th>
+              )}
               <th className="px-4 py-3 font-semibold">Strategy Name</th>
               <th className="px-4 py-3 font-semibold text-right">Version</th>
               <th className="px-4 py-3 font-semibold">Symbols</th>
@@ -118,6 +183,17 @@ export function StrategyVersionList({ name }: { name?: string }) {
           <tbody className="divide-y divide-line/40">
             {filtered.map((v) => (
               <tr key={v.id} className="hover:bg-panel/40 transition-colors duration-150">
+                {!name && (
+                  <td className="px-4 py-3">
+                    <input
+                      type="checkbox"
+                      className="cursor-pointer accent-accent"
+                      checked={selectedIds.has(v.id)}
+                      onChange={() => toggleSelected(v.id)}
+                      aria-label={`Select ${v.name} v${v.version}`}
+                    />
+                  </td>
+                )}
                 <td className="px-4 py-3 font-medium">
                   <Link
                     href={`/strategies/versions/${v.id}`}
@@ -128,14 +204,12 @@ export function StrategyVersionList({ name }: { name?: string }) {
                 </td>
                 <td className="px-4 py-3 text-right font-mono text-ink/80">v{v.version}</td>
                 <td className="px-4 py-3 text-ink/80">
-                  {v.spec?.symbols.length ? (
-                    <span className="flex flex-wrap gap-1">
-                      {v.spec.symbols.map((sym) => (
-                        <span key={sym} className="text-2xs bg-bg px-1.5 py-0.5 rounded border border-line font-mono">
-                          {sym}
-                        </span>
-                      ))}
-                    </span>
+                  {v.spec ? (
+                    <SymbolChipsEditor
+                      versionId={v.id}
+                      spec={v.spec}
+                      onUpdated={(spec) => handleSpecUpdated(v.id, spec)}
+                    />
                   ) : (
                     <span className="text-ink-muted">—</span>
                   )}

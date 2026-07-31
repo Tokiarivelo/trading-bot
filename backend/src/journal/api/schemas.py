@@ -19,6 +19,15 @@ class ZoneOut(BaseModel):
     time_end: int = Field(
         description="Epoch seconds UTC — right edge of the zone rectangle (the entry candle)."
     )
+    pattern: str | None = Field(
+        default=None,
+        description=(
+            "The zone's own subtype, e.g. 'RBR', 'DBD', 'RBD', 'DBR' — distinct from the "
+            "trade's own `pattern` (confirming candlestick pattern). Null for strategies "
+            "that don't label their zone detector's setup type, or trades predating "
+            "this field."
+        ),
+    )
 
 
 class StructurePointOut(BaseModel):
@@ -29,6 +38,32 @@ class StructurePointOut(BaseModel):
     label: str = Field(description="Swing-structure label: 'HH', 'HL', 'LH', or 'LL'.")
     price: float = Field(description="Price of the swing high/low.")
     time: int = Field(description="Epoch seconds UTC of the swing bar.")
+
+
+class IndicatorReadingOut(BaseModel):
+    """A single confluence-check indicator value behind one of the bot's
+    entry votes (e.g. RSI, ADX, EMA, Volume) — chart/journal annotation
+    only, not used to gate the trade itself. `value` is the indicator's
+    raw reading at the entry bar; `comparison` + `threshold` together with
+    `value` explain why `passed` is true or false, e.g. `value=62.3`,
+    `comparison='>'`, `threshold=50.0`, `passed=True` reads as "RSI 62.3
+    is above 50, so this vote passed"."""
+
+    name: str = Field(
+        description="Indicator identifier, e.g. 'RSI', 'ADX', 'EMA_FAST_VS_SLOW', 'VOLUME'."
+    )
+    value: float = Field(
+        description="The indicator's raw value at the entry bar (0.0 if not enough warmup)."
+    )
+    threshold: float = Field(
+        description="The value `value` is compared against to decide pass/fail."
+    )
+    comparison: str = Field(
+        description="'>' or '<' — the direction that makes this reading count as a pass."
+    )
+    passed: bool = Field(
+        description="Whether `value` satisfied `comparison`/`threshold` at the entry bar."
+    )
 
 
 class TradeRecordOut(BaseModel):
@@ -81,6 +116,94 @@ class TradeRecordOut(BaseModel):
             "Labeled swing points (HH/HL/LH/LL) from the window the strategy used to validate "
             "this trade's entry, for chart annotation."
         ),
+    )
+    indicators: list[IndicatorReadingOut] = Field(
+        default_factory=list,
+        description=(
+            "The bot's confluence checklist at the entry bar — e.g. RSI vs 50, ADX vs its "
+            "strong-trend threshold, fast EMA vs slow EMA, or last bar's volume vs its "
+            "20-period average — one entry per indicator the bot voted on. Empty for trades "
+            "from bots that don't report confluence data."
+        ),
+    )
+
+
+class CandleOut(BaseModel):
+    """One OHLC candle from a trade's frozen entry-time market-context
+    snapshot (see `DecisionContextOut`) — plots directly as a
+    `lightweight-charts` candlestick series point."""
+
+    time: int = Field(description="Epoch seconds UTC — candle open time.")
+    open: float = Field(description="Open price.")
+    high: float = Field(description="High price.")
+    low: float = Field(description="Low price.")
+    close: float = Field(description="Close price.")
+    tick_volume: int = Field(description="Broker tick volume for this candle.")
+
+
+class DecisionContextOut(BaseModel):
+    """The chart snapshot and decision annotations behind one trade — backs
+    the "why did the bot take this trade" chart view
+    (`GET .../trades/{trade_id}/decision-context`). `entry_candles` and
+    `higher_tf_candles` are a **frozen snapshot captured once, at the moment
+    of entry** (via the `PositionOpened` event) — not live/refetched market
+    data — so this renders identically no matter how much later it's
+    viewed, even after the symbol's live candle history has aged the
+    original bars out. Never includes exit-time snapshots or any other
+    AI-review-only data."""
+
+    trade_id: str = Field(description="Broker position ticket, as a string.")
+    symbol: str = Field(description="Broker symbol, e.g. 'XAUUSD'.")
+    side: str = Field(description="'buy' or 'sell'.")
+    open_price: float = Field(description="Fill price at entry.")
+    open_time: int = Field(description="Epoch seconds UTC — when the trade was opened.")
+    entry_candles: list[CandleOut] = Field(
+        description=(
+            "The M5 candle snapshot (typically 50 candles) captured once, at the moment of "
+            "entry. A frozen snapshot, not live/refetched data — stays accurate even after the "
+            "symbol's live candle history has since aged these bars out. Empty only for very "
+            "early trades journaled before enough candle history existed."
+        )
+    )
+    higher_tf_candles: list[CandleOut] = Field(
+        description=(
+            "The H1 candle snapshot (typically 20 candles) captured once, at the moment of "
+            "entry, for higher-timeframe context alongside `entry_candles`. Same frozen-snapshot "
+            "caveat: not live/refetched data."
+        )
+    )
+    zone: ZoneOut | None = Field(
+        default=None,
+        description="Supply/demand zone this trade was taken from, if the strategy reports one.",
+    )
+    pattern: str | None = Field(
+        default=None,
+        description="Confirming candlestick pattern, e.g. 'bullish_engulfing', if reported.",
+    )
+    structure: list[StructurePointOut] = Field(
+        default_factory=list,
+        description=(
+            "Labeled swing points (HH/HL/LH/LL) from the window the strategy used to validate "
+            "this trade's entry, for chart annotation."
+        ),
+    )
+    indicators: list[IndicatorReadingOut] = Field(
+        default_factory=list,
+        description=(
+            "The bot's confluence checklist at the entry bar — one entry per indicator the bot "
+            "voted on. Empty for trades from bots that don't report confluence data."
+        ),
+    )
+    reason: str = Field(
+        default="",
+        description=(
+            "Why the strategy took this trade, in its own words (`Signal.reason`). Empty for "
+            "manually/API-placed trades."
+        ),
+    )
+    confidence: float | None = Field(
+        default=None,
+        description="Strategy's confidence in this signal, 0..1. Null for manual/API trades.",
     )
 
 

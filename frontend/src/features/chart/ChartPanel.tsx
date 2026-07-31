@@ -43,6 +43,8 @@ import { DrawingsList } from './DrawingsList';
 import { IndicatorsDock } from './IndicatorsDock';
 import { PositionEditPopover } from './PositionEditPopover';
 import { ReplayControls } from './ReplayControls';
+import { ZoneInfoPopover } from './ZoneInfoPopover';
+import type { ZoneTooltipState } from './types';
 import { SessionReplayPicker } from './SessionReplayPicker';
 import { SignalsDock } from './SignalsDock';
 import { useBacktestData } from './useBacktestData';
@@ -248,6 +250,10 @@ export function ChartPanel({
     updateOrderLineStyle,
     showOrderLineSettings,
     setShowOrderLineSettings,
+    zoneColorStyle,
+    updateZoneColorStyle,
+    showZoneColorSettings,
+    setShowZoneColorSettings,
     showDrawingToolbar,
     toggleDrawingToolbar,
   } = useChartUIToggles();
@@ -508,7 +514,12 @@ export function ChartPanel({
   const [showActivityLogDock, setShowActivityLogDock] = useState(false);
 
   // Drawing color selection state
-  const [activeColor, setActiveColor] = useState<string>('#2962ff');
+  const [activeColor, setActiveColor] = useState<string>(() => {
+    if (typeof window !== 'undefined') {
+      return localStorage.getItem('chart-active-drawing-color') || '#2962ff';
+    }
+    return '#2962ff';
+  });
 
   // Stored original styles for drawings that are highlighted when selected
   const originalStylesRef = useRef<Record<string, any>>({});
@@ -534,6 +545,11 @@ export function ChartPanel({
     containerWidth: number;
     containerHeight: number;
   } | null>(null);
+
+  // Read-only info popover for a clicked zone rectangle (Quasimodo/S&D v1/v2/
+  // trade zone) — see the zone-click effect below, which resolves the click
+  // against `chartController.getZoneMetaMap()`.
+  const [zoneTooltip, setZoneTooltip] = useState<ZoneTooltipState | null>(null);
 
   // Stable references for symbol and symbol-switching state to avoid stale
   // closures inside the chart-creation useEffect.
@@ -647,6 +663,7 @@ export function ChartPanel({
     orderLineStyle,
     showTradeLabels,
     showTradeMarkers,
+    zoneColorStyle,
   });
 
   // Multi-chart layout: mirror this window's replay session (active + picked
@@ -698,6 +715,7 @@ export function ChartPanel({
     accountId,
     liveBotSkill,
     setShowSignalsDock,
+    zoneColorStyle,
   });
 
   // Stable indirection so useCandleData (below, called before
@@ -1151,6 +1169,39 @@ export function ChartPanel({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Zone click-to-inspect: clicking a zone rectangle (Quasimodo/S&D v1/v2/
+  // trade zone) hit-tests the drawing manager the same way the right-click
+  // context menu already does (see useChartEngine's handleContextMenu), and
+  // shows a read-only details popover when the hit drawing has an entry in
+  // the zone-meta side map. User drawings (no meta entry) are left alone —
+  // their own select/drag/right-click-edit behavior is unaffected.
+  useEffect(() => {
+    const chart = chartRef.current;
+    const container = containerRef.current;
+    if (!chart || !container || !chartController) return;
+    const handler = (param: MouseEventParams) => {
+      if (!param.point) return;
+      const manager = chartController.getDrawingManager();
+      if (!manager) return;
+      const hit = manager.hitTest(param.point);
+      if (!hit) return;
+      const meta = chartController.getZoneMetaMap().get(hit.id);
+      if (!meta) return;
+      setZoneTooltip({
+        x: param.point.x,
+        y: param.point.y,
+        meta,
+        containerWidth: container.clientWidth,
+        containerHeight: container.clientHeight,
+      });
+    };
+    chart.subscribeClick(handler);
+    return () => chart.unsubscribeClick(handler);
+    // chartRef/containerRef are stable ref objects returned from
+    // useChartEngine; chartController only changes identity on mount/unmount.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [chartController]);
+
   // Draggable SL/TP/trigger-price lines: recompute pixel positions on
   // pan/zoom/resize (prices themselves come from `trading` polling, which
   // already triggers a re-render on its own).
@@ -1244,6 +1295,9 @@ export function ChartPanel({
           color: errColor,
           label: `SL ${p.sl}`,
           commit: (np) => trading.modifyPositionSlTp(p.ticket, np, p.tp),
+          pnlOpenPrice: p.open_price,
+          pnlSide: p.side,
+          pnlVolume: p.volume,
         });
       } else {
         specs.push({
@@ -1254,6 +1308,9 @@ export function ChartPanel({
           label: '+ SL',
           placeholder: true,
           commit: (np) => trading.modifyPositionSlTp(p.ticket, np, p.tp),
+          pnlOpenPrice: p.open_price,
+          pnlSide: p.side,
+          pnlVolume: p.volume,
         });
       }
       if (p.tp !== null) {
@@ -1264,6 +1321,9 @@ export function ChartPanel({
           color: okColor,
           label: `TP ${p.tp}`,
           commit: (np) => trading.modifyPositionSlTp(p.ticket, p.sl, np),
+          pnlOpenPrice: p.open_price,
+          pnlSide: p.side,
+          pnlVolume: p.volume,
         });
       } else {
         specs.push({
@@ -1274,6 +1334,9 @@ export function ChartPanel({
           label: '+ TP',
           placeholder: true,
           commit: (np) => trading.modifyPositionSlTp(p.ticket, p.sl, np),
+          pnlOpenPrice: p.open_price,
+          pnlSide: p.side,
+          pnlVolume: p.volume,
         });
       }
     }
@@ -1296,6 +1359,9 @@ export function ChartPanel({
           color: errColor,
           label: `SL ${o.sl}`,
           commit: (np) => trading.modifyPending(o.ticket, null, np, o.tp),
+          pnlOpenPrice: o.price,
+          pnlSide: o.side,
+          pnlVolume: o.volume,
         });
       } else {
         specs.push({
@@ -1306,6 +1372,9 @@ export function ChartPanel({
           label: '+ SL',
           placeholder: true,
           commit: (np) => trading.modifyPending(o.ticket, null, np, o.tp),
+          pnlOpenPrice: o.price,
+          pnlSide: o.side,
+          pnlVolume: o.volume,
         });
       }
       if (o.tp !== null) {
@@ -1316,6 +1385,9 @@ export function ChartPanel({
           color: okColor,
           label: `TP ${o.tp}`,
           commit: (np) => trading.modifyPending(o.ticket, null, o.sl, np),
+          pnlOpenPrice: o.price,
+          pnlSide: o.side,
+          pnlVolume: o.volume,
         });
       } else {
         specs.push({
@@ -1326,6 +1398,9 @@ export function ChartPanel({
           label: '+ TP',
           placeholder: true,
           commit: (np) => trading.modifyPending(o.ticket, null, o.sl, np),
+          pnlOpenPrice: o.price,
+          pnlSide: o.side,
+          pnlVolume: o.volume,
         });
       }
     }
@@ -1356,18 +1431,24 @@ export function ChartPanel({
   // closed backtest/live-bot trades, not orders that can still be modified.
   // Open/close lines are handled separately by `buildSelectedTradeOpenClose`
   // (styleable + bounded to the trade's own time span).
-  function buildSelectedTradeLines(): { key: string; price: number; color: string; label: string }[] {
+  function buildSelectedTradeLines(): { key: string; price: number; color: string; leftLabel?: string; rightLabel?: string }[] {
     if (selectedTradeIndex === null || !backtestTrades) return [];
     const t = backtestTrades[selectedTradeIndex];
     if (!t) return [];
     const okColor = cssVar('--color-ok');
     const errColor = cssVar('--color-err');
+    const contractSize = symbolInfo?.contract_size ?? 1;
+    const calcPnl = (targetPrice: number) => {
+      const rawPnl = (targetPrice - t.open_price) * (t.side === 'buy' ? 1 : -1) * contractSize * t.volume;
+      const pnl = Math.abs(rawPnl) < 0.005 ? 0 : rawPnl;
+      return `${pnl >= 0 ? '+' : ''}${pnl.toFixed(2)}$`;
+    };
     const specs = [];
     if (t.sl !== null) {
-      specs.push({ key: 'trade-sl', price: t.sl, color: errColor, label: `SL ${t.sl}` });
+      specs.push({ key: 'trade-sl', price: t.sl, color: errColor, leftLabel: calcPnl(t.sl), rightLabel: `SL ${t.sl}` });
     }
     if (t.tp !== null) {
-      specs.push({ key: 'trade-tp', price: t.tp, color: okColor, label: `TP ${t.tp}` });
+      specs.push({ key: 'trade-tp', price: t.tp, color: okColor, leftLabel: calcPnl(t.tp), rightLabel: `TP ${t.tp}` });
     }
     return specs;
   }
@@ -1447,7 +1528,7 @@ export function ChartPanel({
   // either timestamp isn't resolvable in whatever candle window happens to
   // be loaded — exactly the case for an old history row, and the entry price
   // is the one thing a click on this row must always show.
-  function buildHistoryTradeLines(): { key: string; price: number; color: string; label: string }[] {
+  function buildHistoryTradeLines(): { key: string; price: number; color: string; leftLabel?: string; rightLabel?: string }[] {
     const t = findHistoryTrade();
     if (!t) return [];
     const okColor = cssVar('--color-ok');
@@ -1455,26 +1536,32 @@ export function ChartPanel({
     const buyColor = cssVar('--color-buy');
     const sellColor = cssVar('--color-sell');
     const accentColor = cssVar('--color-accent');
+    const contractSize = symbolInfo?.contract_size ?? 1;
+    const calcPnl = (targetPrice: number) => {
+      const rawPnl = (targetPrice - t.open_price) * (t.side === 'buy' ? 1 : -1) * contractSize * t.volume;
+      const pnl = Math.abs(rawPnl) < 0.005 ? 0 : rawPnl;
+      return `${pnl >= 0 ? '+' : ''}${pnl.toFixed(2)}$`;
+    };
     const specs = [
       {
         key: 'history-open',
         price: t.open_price,
         color: t.side === 'buy' ? buyColor : sellColor,
-        label: `${t.side.toUpperCase()} ${t.volume} @ ${t.open_price}`,
+        leftLabel: `${t.side.toUpperCase()} ${t.volume} @ ${t.open_price}`,
       },
     ];
     if (t.sl !== null) {
-      specs.push({ key: 'history-sl', price: t.sl, color: errColor, label: `SL ${t.sl}` });
+      specs.push({ key: 'history-sl', price: t.sl, color: errColor, leftLabel: calcPnl(t.sl), rightLabel: `SL ${t.sl}` });
     }
     if (t.tp !== null) {
-      specs.push({ key: 'history-tp', price: t.tp, color: okColor, label: `TP ${t.tp}` });
+      specs.push({ key: 'history-tp', price: t.tp, color: okColor, leftLabel: calcPnl(t.tp), rightLabel: `TP ${t.tp}` });
     }
     if (t.close_price !== null) {
       specs.push({
         key: 'history-close',
         price: t.close_price,
         color: accentColor,
-        label: `${(t.profit ?? 0) >= 0 ? '+' : ''}${(t.profit ?? 0).toFixed(2)} @ ${t.close_price}`,
+        leftLabel: `${(t.profit ?? 0) >= 0 ? '+' : ''}${(t.profit ?? 0).toFixed(2)} @ ${t.close_price}`,
       });
     }
     return specs;
@@ -1592,6 +1679,8 @@ export function ChartPanel({
     onToggleOrderLinesVisible: () => updateOrderLineStyle({ visible: !orderLineStyle.visible }),
     showOrderLineSettings,
     onToggleOrderLineSettings: () => setShowOrderLineSettings((v) => !v),
+    showZoneColorSettings,
+    onToggleZoneColorSettings: () => setShowZoneColorSettings((v) => !v),
     backtestReportId,
     sessionReplayPeriod,
     showSessionReplayPicker,
@@ -1632,6 +1721,7 @@ export function ChartPanel({
     showTradeMarkers,
     orderLineStyle.visible,
     showOrderLineSettings,
+    showZoneColorSettings,
     backtestReportId,
     sessionReplayPeriod,
     showSessionReplayPicker,
@@ -2124,6 +2214,164 @@ export function ChartPanel({
           )}
         </div>
       )}
+      {/* Zone colors settings panel — shown when the toggle is active. One
+          "Custom zone colors" checkbox gates all the per-indicator pickers
+          below, same shape as the order-lines panel's `customColors` above;
+          off (the default) keeps today's hardcoded buy/sell/muted theme
+          colors — see `pickZoneColor` in chartFormat.ts. */}
+      {showZoneColorSettings && (
+        <div className='flex flex-wrap items-center gap-3 border-b border-line bg-panel px-3 py-1.5 text-xs'>
+          <span className='text-ink-muted'>Zone rectangle colors</span>
+          <label className='flex items-center gap-1.5 cursor-pointer font-medium text-ink'>
+            <input
+              type='checkbox'
+              checked={zoneColorStyle.customColors}
+              onChange={(e) => updateZoneColorStyle({ customColors: e.target.checked })}
+            />
+            <span>Custom zone colors</span>
+          </label>
+          {zoneColorStyle.customColors && (
+            <>
+              <div className='h-3.5 w-px bg-line/80 my-auto mx-1' />
+              <span className='text-ink-muted font-medium'>Quasimodo</span>
+              <label className='flex items-center gap-1.5'>
+                <span className='text-ink-muted'>Demand</span>
+                <input
+                  type='color'
+                  value={zoneColorStyle.qml.demandColor}
+                  onChange={(e) =>
+                    updateZoneColorStyle({ qml: { ...zoneColorStyle.qml, demandColor: e.target.value } })
+                  }
+                  className='h-4 w-6 cursor-pointer'
+                />
+              </label>
+              <label className='flex items-center gap-1.5'>
+                <span className='text-ink-muted'>Supply</span>
+                <input
+                  type='color'
+                  value={zoneColorStyle.qml.supplyColor}
+                  onChange={(e) =>
+                    updateZoneColorStyle({ qml: { ...zoneColorStyle.qml, supplyColor: e.target.value } })
+                  }
+                  className='h-4 w-6 cursor-pointer'
+                />
+              </label>
+              <label className='flex items-center gap-1.5'>
+                <span className='text-ink-muted'>Touched</span>
+                <input
+                  type='color'
+                  value={zoneColorStyle.qml.touchedColor}
+                  onChange={(e) =>
+                    updateZoneColorStyle({ qml: { ...zoneColorStyle.qml, touchedColor: e.target.value } })
+                  }
+                  className='h-4 w-6 cursor-pointer'
+                />
+              </label>
+
+              <div className='h-3.5 w-px bg-line/80 my-auto mx-1' />
+              <span className='text-ink-muted font-medium'>S&D v1</span>
+              <label className='flex items-center gap-1.5'>
+                <span className='text-ink-muted'>Demand</span>
+                <input
+                  type='color'
+                  value={zoneColorStyle.snd.demandColor}
+                  onChange={(e) =>
+                    updateZoneColorStyle({ snd: { ...zoneColorStyle.snd, demandColor: e.target.value } })
+                  }
+                  className='h-4 w-6 cursor-pointer'
+                />
+              </label>
+              <label className='flex items-center gap-1.5'>
+                <span className='text-ink-muted'>Supply</span>
+                <input
+                  type='color'
+                  value={zoneColorStyle.snd.supplyColor}
+                  onChange={(e) =>
+                    updateZoneColorStyle({ snd: { ...zoneColorStyle.snd, supplyColor: e.target.value } })
+                  }
+                  className='h-4 w-6 cursor-pointer'
+                />
+              </label>
+              <label className='flex items-center gap-1.5'>
+                <span className='text-ink-muted'>Touched</span>
+                <input
+                  type='color'
+                  value={zoneColorStyle.snd.touchedColor}
+                  onChange={(e) =>
+                    updateZoneColorStyle({ snd: { ...zoneColorStyle.snd, touchedColor: e.target.value } })
+                  }
+                  className='h-4 w-6 cursor-pointer'
+                />
+              </label>
+
+              <div className='h-3.5 w-px bg-line/80 my-auto mx-1' />
+              <span className='text-ink-muted font-medium'>S&D v2</span>
+              <label className='flex items-center gap-1.5'>
+                <span className='text-ink-muted'>Demand</span>
+                <input
+                  type='color'
+                  value={zoneColorStyle.sndV2.demandColor}
+                  onChange={(e) =>
+                    updateZoneColorStyle({ sndV2: { ...zoneColorStyle.sndV2, demandColor: e.target.value } })
+                  }
+                  className='h-4 w-6 cursor-pointer'
+                />
+              </label>
+              <label className='flex items-center gap-1.5'>
+                <span className='text-ink-muted'>Supply</span>
+                <input
+                  type='color'
+                  value={zoneColorStyle.sndV2.supplyColor}
+                  onChange={(e) =>
+                    updateZoneColorStyle({ sndV2: { ...zoneColorStyle.sndV2, supplyColor: e.target.value } })
+                  }
+                  className='h-4 w-6 cursor-pointer'
+                />
+              </label>
+              <label className='flex items-center gap-1.5'>
+                <span className='text-ink-muted'>Touched</span>
+                <input
+                  type='color'
+                  value={zoneColorStyle.sndV2.touchedColor}
+                  onChange={(e) =>
+                    updateZoneColorStyle({ sndV2: { ...zoneColorStyle.sndV2, touchedColor: e.target.value } })
+                  }
+                  className='h-4 w-6 cursor-pointer'
+                />
+              </label>
+
+              <div className='h-3.5 w-px bg-line/80 my-auto mx-1' />
+              <span className='text-ink-muted font-medium'>Trade zone</span>
+              <label className='flex items-center gap-1.5'>
+                <span className='text-ink-muted'>Demand</span>
+                <input
+                  type='color'
+                  value={zoneColorStyle.tradeZone.demandColor}
+                  onChange={(e) =>
+                    updateZoneColorStyle({
+                      tradeZone: { ...zoneColorStyle.tradeZone, demandColor: e.target.value },
+                    })
+                  }
+                  className='h-4 w-6 cursor-pointer'
+                />
+              </label>
+              <label className='flex items-center gap-1.5'>
+                <span className='text-ink-muted'>Supply</span>
+                <input
+                  type='color'
+                  value={zoneColorStyle.tradeZone.supplyColor}
+                  onChange={(e) =>
+                    updateZoneColorStyle({
+                      tradeZone: { ...zoneColorStyle.tradeZone, supplyColor: e.target.value },
+                    })
+                  }
+                  className='h-4 w-6 cursor-pointer'
+                />
+              </label>
+            </>
+          )}
+        </div>
+      )}
       {/* Drawings list panel — shown when the toggle is active */}
       {drawingTools.showDrawingsList && (
         <DrawingsList
@@ -2378,6 +2626,17 @@ export function ChartPanel({
             onClose={() => setDrawingEditPopover(null)}
             onSaveAndSync={saveAndSyncRef.current}
             onColorChange={drawingTools.handleModifyDrawingColor}
+            onWidthChange={drawingTools.handleModifyDrawingWidth}
+          />
+        )}
+        {zoneTooltip && (
+          <ZoneInfoPopover
+            x={zoneTooltip.x}
+            y={zoneTooltip.y}
+            meta={zoneTooltip.meta}
+            containerWidth={zoneTooltip.containerWidth}
+            containerHeight={zoneTooltip.containerHeight}
+            onClose={() => setZoneTooltip(null)}
           />
         )}
         {newsBands.map((b) => {
@@ -2519,6 +2778,28 @@ export function ChartPanel({
                     filter: selected ? `drop-shadow(0 0 6px ${spec.color})` : undefined,
                   }}
                 />
+                {spec.pnlOpenPrice !== undefined && spec.pnlSide !== undefined && spec.pnlVolume !== undefined && (() => {
+                  const contractSize = symbolInfo?.contract_size ?? 1;
+                  const rawPnl = (price - spec.pnlOpenPrice!) * (spec.pnlSide === 'buy' ? 1 : -1) * contractSize * spec.pnlVolume!;
+                  const pnl = Math.abs(rawPnl) < 0.005 ? 0 : rawPnl;
+                  const pnlLabel = `${pnl >= 0 ? '+' : ''}${pnl.toFixed(2)}$`;
+                  return (
+                    <div
+                      className={`absolute left-2 top-1/2 -translate-y-1/2 rounded px-1 text-[10px] font-bold ${
+                        selected ? 'px-2 py-0.5 text-xs ring-2 ring-white shadow-md' : ''
+                      }`}
+                      style={{
+                        backgroundColor: spec.color,
+                        color: '#ffffff',
+                        opacity: faint ? 0.7 : 1,
+                        boxShadow: selected ? `0 0 8px ${spec.color}` : undefined,
+                      }}
+                      title={`Estimated P/L for ${spec.pnlVolume} lot (${spec.pnlSide})`}
+                    >
+                      {pnlLabel}
+                    </div>
+                  );
+                })()}
                 <div
                   className={`absolute right-2 top-1/2 -translate-y-1/2 rounded px-1 text-[10px] font-bold ${
                     selected ? 'px-2 py-0.5 text-xs ring-2 ring-white shadow-md' : ''
@@ -2609,12 +2890,22 @@ export function ChartPanel({
                 className='w-full border-t-[3px] border-dashed'
                 style={{ borderColor: spec.color, filter: `drop-shadow(0 0 4px ${spec.color})` }}
               />
-              <div
-                className='absolute left-2 top-1/2 -translate-y-1/2 rounded px-1.5 py-0.5 text-[11px] font-bold ring-2 ring-ink'
-                style={{ backgroundColor: spec.color, color: '#ffffff', boxShadow: `0 0 6px ${spec.color}` }}
-              >
-                {spec.label}
-              </div>
+              {spec.leftLabel && (
+                <div
+                  className='absolute left-2 top-1/2 -translate-y-1/2 rounded px-1.5 py-0.5 text-[11px] font-bold ring-2 ring-ink'
+                  style={{ backgroundColor: spec.color, color: '#ffffff', boxShadow: `0 0 6px ${spec.color}` }}
+                >
+                  {spec.leftLabel}
+                </div>
+              )}
+              {spec.rightLabel && (
+                <div
+                  className='absolute right-2 top-1/2 -translate-y-1/2 rounded px-1.5 py-0.5 text-[11px] font-bold ring-2 ring-ink'
+                  style={{ backgroundColor: spec.color, color: '#ffffff', boxShadow: `0 0 6px ${spec.color}` }}
+                >
+                  {spec.rightLabel}
+                </div>
+              )}
             </div>
           );
         })}

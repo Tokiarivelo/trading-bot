@@ -9,26 +9,26 @@ Runs after every M5 `CandleClosed`, once per symbol, over that symbol's open
 positions (from `BrokerPort.get_positions`) rather than the journal, since a
 manually-opened position (via the broker API) must be managed too.
 
-Two independent SL-tightening rules apply to every position regardless of
+Three independent SL-tightening rules apply to every position regardless of
 which strategy opened it (bot-agnostic, applies even to manually-opened
 positions):
 
   - Breakeven at +1R: once unrealized progress reaches the initial risk
     distance, SL moves to the exact entry price.
-  - Secure-on-base-clear: once a fresh RBR/DBD/RBD/DBR base has formed on
-    `secure_timeframe` and price has since closed clear of it in the trade's
-    favor, SL moves to entry + a small real profit buffer
-    (`secure_buffer_r_mult` x R) — so a position that reverses after
-    confirming trend continuation locks in a scratch-plus rather than a full
-    round-trip back to a loss. Detected independently of the strategy that
-    opened the position (`engine.domain.zone_detection`, a trusted
-    engine-side counterpart to the same geometry duplicated across sandboxed
-    strategy files), so it also protects strategies with no zone concept of
-    their own (breakout_v1, mean_reversion_v1, ...).
+  - Secure-on-base-clear & Structural Continuation Trailing: once a fresh
+    RBR/DBD/RBD/DBR continuation base has formed on `secure_timeframe` and
+    price has since closed clear of it in the trade's favor, SL moves to
+    entry + a small real profit buffer (`secure_buffer_r_mult` x R). Furthermore,
+    if the cleared zone sits further along in profit, SL is ratcheted directly
+    underneath (for buys) or above (for sells) the zone boundary.
+  - "Zone Contraire" Defensive Breakeven: upon approaching or interacting with
+    an unbroken opposing base (Supply for buy, Demand for sell) within 0.5R,
+    instantly triggers a defensive breakeven lock-in (+ profit buffer) so an
+    upcoming liquidity rejection does not turn a running trade into a loss.
 
-Both rules only ever tighten SL (never loosen it) — see `_improves` — so
-whichever rule's candidate is currently more protective wins, and neither
-rule fights a tighter level already set by the other.
+All rules only ever tighten SL (never loosen it) — see `_improves` — so
+whichever rule's candidate is currently more protective wins, and no
+rule fights a tighter level already set by another.
 """
 
 from __future__ import annotations
@@ -204,6 +204,35 @@ class PositionManager:
             return base
         return None
 
+    def _select_nearest_opposing_base(
+        self, bases: list[Base], side: Side, mark: float
+    ) -> Base | None:
+        """Finds the closest unbroken opposing base ahead of or around current
+        market price (`mark`): for a BUY, unbroken Supply zones above or near
+        mark; for a SELL, unbroken Demand zones below or near mark."""
+        best_base: Base | None = None
+        if side is Side.BUY:
+            min_low = float("inf")
+            for base in bases:
+                if base.broken or base.kind != BaseKind.SUPPLY:
+                    continue
+                if mark > base.price_high:
+                    continue
+                if base.price_low < min_low:
+                    min_low = base.price_low
+                    best_base = base
+        else:
+            max_high = float("-inf")
+            for base in bases:
+                if base.broken or base.kind != BaseKind.DEMAND:
+                    continue
+                if mark < base.price_low:
+                    continue
+                if base.price_high > max_high:
+                    max_high = base.price_high
+                    best_base = base
+        return best_base
+
     @staticmethod
     def _improves(candidate: float | None, current_sl: float, direction: int) -> bool:
         """Whether moving SL to `candidate` tightens it in the position's
@@ -231,16 +260,41 @@ class PositionManager:
                 target_sl = candidate
 
         # Rule 2: secure a small real profit once a fresh base has been
-        # cleared, bot-agnostic (works even without a matching Rule 1 trigger,
-        # and independently of Rule 1's own candidate — whichever is more
-        # protective wins).
+        # cleared, and ratchet SL via structural continuation trailing if the
+        # cleared base sits further along in profit.
         if risk > 0:
             secure_base = self._select_secure_base(bases, position.side, mark)
             if secure_base is not None:
-                candidate = position.open_price + direction * risk * self._secure_buffer_r_mult
+                buffer_price = risk * self._secure_buffer_r_mult
+                candidate = position.open_price + direction * buffer_price
+                zone_trail_sl = (
+                    secure_base.price_low - buffer_price
+                    if position.side is Side.BUY
+                    else secure_base.price_high + buffer_price
+                )
+                if self._improves(zone_trail_sl, candidate, direction):
+                    candidate = zone_trail_sl
                 floor = target_sl if target_sl is not None else position.sl
                 if self._improves(candidate, floor, direction):
                     target_sl = candidate
+
+        # Rule 3: "Zone Contraire" defensive breakeven — if approaching or
+        # interacting with an unbroken opposing zone ahead of or around current
+        # market price, instantly lock in breakeven (+ buffer).
+        if risk > 0:
+            opposing_base = self._select_nearest_opposing_base(bases, position.side, mark)
+            if opposing_base is not None:
+                distance = (
+                    opposing_base.price_low - mark
+                    if position.side is Side.BUY
+                    else mark - opposing_base.price_high
+                )
+                if distance <= 0.5 * risk:
+                    candidate = position.open_price + direction * risk * self._secure_buffer_r_mult
+                    if (mark - candidate) * direction > 0:
+                        floor = target_sl if target_sl is not None else position.sl
+                        if self._improves(candidate, floor, direction):
+                            target_sl = candidate
 
         if target_sl is not None:
             await self._order_service.modify_position(position.ticket, sl=target_sl, tp=position.tp)

@@ -4,6 +4,7 @@ import { useState } from "react";
 import type { TradeHistoryItem } from "@/shared/api/client";
 import { StatusBadge } from "@/features/strategies/StatusBadge";
 import { useSortableRows } from "@/shared/hooks/useSortableRows";
+import { DecisionBadge } from "@/shared/ui/DecisionBadge";
 import { SortTh } from "@/shared/ui/SortTh";
 import { TradeDecisionModal } from "@/shared/ui/TradeDecisionModal";
 import { type GroupBy, type TradeGroup, groupTrades, outcomeOf } from "./groupTrades";
@@ -159,8 +160,6 @@ function TradesTable({
         {sorted.map((t) => {
           const ticket = isNaN(Number(t.id)) ? t.id : Number(t.id);
           const selected = selectedTicket === ticket;
-          const hasDecisionContext =
-            t.reason !== "" || t.confidence !== null || t.zone !== null || t.pattern !== null;
           return (
           <tr
             key={t.id}
@@ -186,18 +185,7 @@ function TradesTable({
               <StatusBadge status={outcomeOf(t)} />
             </Td>
             <Td align="right">
-              <button
-                type="button"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  setWhyTrade(t);
-                }}
-                disabled={!hasDecisionContext}
-                className="cursor-pointer text-ink-muted hover:text-accent disabled:cursor-default disabled:opacity-30"
-                title={hasDecisionContext ? "Why the bot took this trade" : "No decision context"}
-              >
-                ⓘ
-              </button>
+              <DecisionBadge trade={t} onClick={() => setWhyTrade(t)} />
             </Td>
           </tr>
           );

@@ -13,6 +13,7 @@ export interface DrawingEditPopoverProps {
   onClose: () => void;
   onSaveAndSync: () => void;
   onColorChange: (id: string, color: string) => void;
+  onWidthChange?: (width: number) => void;
   /** Forwarded to the root element so ChartPanel's outside-click detection
    * can scope to this specific instance instead of a shared global DOM id
    * (see ChartPanel.tsx's click-outside effect). */
@@ -31,6 +32,7 @@ export const DrawingEditPopover = memo(function DrawingEditPopover({
   onClose,
   onSaveAndSync,
   onColorChange,
+  onWidthChange,
   ref,
 }: DrawingEditPopoverProps) {
   const popoverWidth = 180;
@@ -80,6 +82,7 @@ export const DrawingEditPopover = memo(function DrawingEditPopover({
         drawing.updateStyle({ lineWidth: width });
       }
       onSaveAndSync();
+      onWidthChange?.(width);
     }
   };
 

@@ -1,9 +1,0 @@
-name: normal/btcusd/breakout_v1
-symbol: BTCUSD
-strategy: breakout_v1
-risk_multiplier: 1.0
-sessions:
-- start: 08:00
-  end: '22:00'
-param_overrides: {}
-htf_veto_override: null

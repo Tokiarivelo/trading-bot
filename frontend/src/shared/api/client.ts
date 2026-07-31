@@ -274,6 +274,16 @@ export const getTradeMarkers = (accountId: string, symbol: string, skill?: strin
 
 // ── Journal (trade history, filterable/paginated) ───────────────────────────
 
+/** One confluence-check reading behind a bot's entry vote, e.g.
+ * name: 'RSI', value: 28.4, threshold: 30, comparison: '<', passed: true. */
+export interface IndicatorReading {
+  name: string;
+  value: number;
+  threshold: number;
+  comparison: string;
+  passed: boolean;
+}
+
 export interface TradeHistoryItem {
   id: string;
   symbol: string;
@@ -297,6 +307,9 @@ export interface TradeHistoryItem {
   zone: Zone | null;
   pattern: string | null;
   structure: StructurePoint[];
+  /** Confluence-check readings behind the bot's entry vote — RSI/ADX/EMA/Volume
+   * for the bots that report it. Empty otherwise. */
+  indicators: IndicatorReading[];
 }
 
 export interface TradeHistoryPage {
@@ -335,6 +348,34 @@ export const getTradeHistory = (accountId: string, filters: TradeHistoryFilters 
   const qs = params.toString();
   return api.get<TradeHistoryPage>(acctPath(accountId, `/journal/history${qs ? `?${qs}` : ""}`));
 };
+
+/** Frozen candle snapshot (M5 entry timeframe + H1 higher timeframe) plus the
+ * same zone/pattern/structure/indicators/reason/confidence fields as
+ * `TradeHistoryItem`, captured at the moment of entry — backs the mini chart
+ * in `TradeDecisionModal`. */
+export interface DecisionContext {
+  trade_id: string;
+  symbol: string;
+  side: "buy" | "sell";
+  open_price: number;
+  open_time: number; // epoch seconds UTC
+  entry_candles: Candle[];
+  higher_tf_candles: Candle[];
+  zone: Zone | null;
+  pattern: string | null;
+  structure: StructurePoint[];
+  indicators: IndicatorReading[];
+  reason: string;
+  confidence: number | null;
+}
+
+/** Decision context for a single trade — used by `TradeDecisionModal` to
+ * render the frozen entry-candle snapshot behind the bot's "Why" answer. */
+export const getTradeDecisionContext = (
+  accountId: string,
+  tradeId: string | number,
+  signal?: AbortSignal,
+) => api.get<DecisionContext>(acctPath(accountId, `/journal/trades/${tradeId}/decision-context`), signal);
 
 // ── Journal analytics (per-symbol and per-bot performance) ─────────────────
 
@@ -469,6 +510,7 @@ export interface Zone {
   price_high: number;
   time_start: number; // epoch seconds UTC
   time_end: number; // epoch seconds UTC
+  pattern: string | null; // zone subtype, e.g. "RBR"/"DBD"/"RBD"/"DBR"; null if unreported
 }
 
 export interface StructurePoint {

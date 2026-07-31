@@ -33,6 +33,10 @@ class PriceZone:
     price_high: float
     time_start: datetime
     time_end: datetime
+    # The zone's own subtype, e.g. "RBR"/"DBD"/"RBD"/"DBR"/"DZ"/"SZ" — distinct
+    # from Signal.pattern (the confirming candlestick pattern). None for
+    # strategies that don't label their zone detector's setup type.
+    pattern: str | None = None
 
 
 class StructureLabel(StrEnum):
@@ -52,6 +56,18 @@ class StructurePoint:
 
 
 @dataclass(frozen=True)
+class IndicatorReading:
+    """A single confluence-check indicator value — chart/journal-annotation
+    data showing why a vote passed or failed, not used by the engine."""
+
+    name: str
+    value: float
+    threshold: float
+    comparison: str  # ">" or "<" — the direction that makes this reading "pass"
+    passed: bool
+
+
+@dataclass(frozen=True)
 class Signal:
     direction: Direction
     sl_points: float
@@ -64,6 +80,7 @@ class Signal:
     zone: PriceZone | None = None
     pattern: str | None = None
     structure: tuple[StructurePoint, ...] = field(default_factory=tuple)
+    indicators: tuple[IndicatorReading, ...] = field(default_factory=tuple)
 
 
 @dataclass(frozen=True)
@@ -105,4 +122,5 @@ class MarketContext:
 class Strategy(Protocol):
     spec: StrategySpec
 
-    def evaluate(self, ctx: MarketContext) -> Signal | None: ...
+    def evaluate(self, ctx: MarketContext) -> Signal | tuple[Signal, ...] | list[Signal] | None: ...
+

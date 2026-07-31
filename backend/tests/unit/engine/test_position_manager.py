@@ -5,6 +5,7 @@ from src.broker.domain.trading import ExecutionResult, OrderType, PendingOrder, 
 from src.engine.application.position_manager import PositionManager
 from src.engine.application.risk_manager import RiskManager
 from src.engine.domain.models import RiskCaps
+from src.engine.domain.zone_detection import Base, BaseKind
 from src.market_data.domain.models import Candle, SymbolInfo, Timeframe
 
 CAPS = RiskCaps(
@@ -260,9 +261,9 @@ async def test_get_symbol_info_fetched_once_per_symbol_with_multiple_positions()
 
 async def test_secures_profit_when_fresh_base_is_cleared():
     # RBR base at [103.6, 104.4]; bid 108.0 clears it. Also satisfies +1R
-    # breakeven (progress 8 >= risk 5), but the secure candidate
-    # (100 + 5*0.2 = 101.0) is more protective than plain breakeven (100.0)
-    # and must win.
+    # breakeven (progress 8 >= risk 5), but structural continuation trailing
+    # (Rule A) ratchets SL to base low minus buffer: 103.6 - (5 * 0.2) = 102.6,
+    # winning over both plain breakeven (100.0) and standard secure (+0.2R = 101.0).
     position = _position(open_price=100.0, sl=95.0)
     info = replace(INFO, bid=108.0, ask=108.2)
     order_service = FakeOrderService([position])
@@ -272,7 +273,7 @@ async def test_secures_profit_when_fresh_base_is_cleared():
 
     await manager.on_candle_closed("XAUUSD")
 
-    assert order_service.modified == [(1, 101.0, 2420.0)]
+    assert order_service.modified == [(1, 102.6, 2420.0)]
 
 
 async def test_secures_profit_independent_of_breakeven_rule():
@@ -347,6 +348,77 @@ async def test_secures_profit_for_sell_side():
     await manager.on_candle_closed("XAUUSD")
 
     assert order_service.modified == [(1, 98.0, 80.0)]
+
+
+async def test_structural_continuation_trailing_for_sell_side():
+    # DBD base at [95.6, 96.4]; ask 90.0 clears it below. risk = 5 (105 to 110);
+    # buffer = 5 * 0.2 = 1.0. Standard secure breakeven is 104.0, but the cleared
+    # base sits further in profit, so structural trailing sets SL to base high
+    # plus buffer: 96.4 + 1.0 = 97.4.
+    position = _position(side=Side.SELL, open_price=105.0, sl=110.0, tp=80.0)
+    info = replace(INFO, bid=89.8, ask=90.0)
+    order_service = FakeOrderService([position])
+    manager = PositionManager(
+        order_service, FakeMarketData(info=info, candles=_supply_base_candles())
+    )
+
+    await manager.on_candle_closed("XAUUSD")
+
+    assert order_service.modified == [(1, 97.4, 80.0)]
+
+
+def test_select_nearest_opposing_base():
+    manager = PositionManager(FakeOrderService([]), FakeMarketData())
+    bases = [
+        Base(BaseKind.SUPPLY, price_low=105.0, price_high=107.0, base_start=1, leg_out_end=3, broken=False),
+        Base(BaseKind.SUPPLY, price_low=110.0, price_high=112.0, base_start=5, leg_out_end=7, broken=False),
+        Base(BaseKind.DEMAND, price_low=95.0, price_high=97.0, base_start=9, leg_out_end=11, broken=False),
+    ]
+
+    res_buy = manager._select_nearest_opposing_base(bases, Side.BUY, 104.0)
+    assert res_buy is not None and res_buy.price_low == 105.0
+
+    res_sell = manager._select_nearest_opposing_base(bases, Side.SELL, 99.0)
+    assert res_sell is not None and res_sell.price_high == 97.0
+
+    broken_supply = Base(BaseKind.SUPPLY, price_low=103.0, price_high=104.0, base_start=1, leg_out_end=3, broken=True)
+    assert manager._select_nearest_opposing_base([broken_supply], Side.BUY, 102.0) is None
+
+
+async def test_zone_contraire_defensive_breakeven_for_buy():
+    # BUY position approaching opposing Supply zone at [95.6, 96.4].
+    # open=85.0, sl=75.0 -> risk=10.0. 0.5 * risk = 5.0.
+    # At bid=91.0, distance to proximal edge (95.6) is 4.6 <= 5.0.
+    # Progress (6.0) < risk (10.0), so plain +1R breakeven does not trigger.
+    # Zone Contraire rule triggers defensive breakeven lock-in: 85.0 + 10.0 * 0.2 = 87.0.
+    position = _position(open_price=85.0, sl=75.0, tp=120.0)
+    info = replace(INFO, bid=91.0, ask=91.2)
+    order_service = FakeOrderService([position])
+    manager = PositionManager(
+        order_service, FakeMarketData(info=info, candles=_supply_base_candles())
+    )
+
+    await manager.on_candle_closed("XAUUSD")
+
+    assert order_service.modified == [(1, 87.0, 120.0)]
+
+
+async def test_zone_contraire_defensive_breakeven_for_sell():
+    # SELL position approaching opposing Demand zone at [103.6, 104.4].
+    # open=112.0, sl=118.0 -> risk=6.0. 0.5 * risk = 3.0.
+    # At ask=106.5, distance to proximal edge (104.4) is 2.1 <= 3.0.
+    # Progress is 5.5 < risk 6.0, so plain +1R breakeven does not trigger.
+    # Zone Contraire rule triggers defensive breakeven lock-in: 112.0 - 6.0 * 0.2 = 110.8.
+    position = _position(side=Side.SELL, open_price=112.0, sl=118.0, tp=90.0)
+    info = replace(INFO, bid=106.3, ask=106.5)
+    order_service = FakeOrderService([position])
+    manager = PositionManager(
+        order_service, FakeMarketData(info=info, candles=_demand_base_candles())
+    )
+
+    await manager.on_candle_closed("XAUUSD")
+
+    assert order_service.modified == [(1, 110.8, 90.0)]
 
 
 async def test_no_sl_means_position_is_left_alone():

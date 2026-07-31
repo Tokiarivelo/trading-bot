@@ -181,7 +181,12 @@ async def test_get_report_returns_full_detail(api):
 async def test_get_report_includes_zone_pattern_structure(api):
     client, reports_dir = api
     zone = BacktestZone(
-        kind="demand", price_low=99.7, price_high=100.3, time_start=T0, time_end=T1
+        kind="demand",
+        price_low=99.7,
+        price_high=100.3,
+        time_start=T0,
+        time_end=T1,
+        pattern="RBR",
     )
     trade = dataclasses.replace(
         make_report().trades[0],
@@ -202,6 +207,7 @@ async def test_get_report_includes_zone_pattern_structure(api):
         "price_high": 100.3,
         "time_start": int(T0.timestamp()),
         "time_end": int(T1.timestamp()),
+        "pattern": "RBR",
     }
     assert out_trade["pattern"] == "bullish_engulfing"
     assert out_trade["structure"] == [

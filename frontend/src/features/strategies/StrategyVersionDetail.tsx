@@ -56,7 +56,7 @@ export function StrategyVersionDetail({ versionId }: { versionId: string }) {
   return (
     <div className="flex flex-col gap-4 p-4">
       <div>
-        <Link href="/bots" className="text-xs text-ink-muted hover:text-accent">
+        <Link href="/bots/library" className="text-xs text-ink-muted hover:text-accent">
           ← All bots
         </Link>
         <div className="mt-1 flex items-center gap-2">

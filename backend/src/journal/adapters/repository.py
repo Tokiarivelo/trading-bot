@@ -35,6 +35,16 @@ class JournalRepository:
             row = session.get(TradeRow, trade_id)
         return _to_domain(row) if row else None
 
+    def get_by_id(self, trade_id: str, account_id: str = "default") -> TradeRecord | None:
+        """Single trade scoped to `account_id` — unlike `get`, which looks up
+        by primary key alone. Backs `GET .../trades/{trade_id}/decision-context`."""
+        query = select(TradeRow).where(
+            TradeRow.id == trade_id, TradeRow.account_id == account_id
+        )
+        with self._session_factory() as session:
+            row = session.scalar(query)
+        return _to_domain(row) if row else None
+
     def get_last_n(
         self, symbol: str, count: int, account_id: str = "default"
     ) -> list[TradeRecord]:
@@ -283,6 +293,31 @@ def _structure_from_json(data: list[dict] | None) -> tuple[tuple[str, float, dat
     )
 
 
+def _indicators_to_json(
+    indicators: tuple[tuple[str, float, float, str, bool], ...],
+) -> list[dict]:
+    return [
+        {
+            "name": name,
+            "value": value,
+            "threshold": threshold,
+            "comparison": comparison,
+            "passed": passed,
+        }
+        for name, value, threshold, comparison, passed in indicators
+    ]
+
+
+def _indicators_from_json(
+    data: list[dict] | None,
+) -> tuple[tuple[str, float, float, str, bool], ...]:
+    if not data:
+        return ()
+    return tuple(
+        (d["name"], d["value"], d["threshold"], d["comparison"], d["passed"]) for d in data
+    )
+
+
 def _to_row(record: TradeRecord, account_id: str) -> TradeRow:
     return TradeRow(
         id=record.id,
@@ -314,8 +349,10 @@ def _to_row(record: TradeRecord, account_id: str) -> TradeRow:
         if record.zone_time_start
         else None,
         zone_time_end=int(record.zone_time_end.timestamp()) if record.zone_time_end else None,
+        zone_pattern=record.zone_pattern,
         pattern=record.pattern,
         structure=_structure_to_json(record.structure),
+        indicators=_indicators_to_json(record.indicators),
     )
 
 
@@ -351,6 +388,8 @@ def _to_domain(row: TradeRow) -> TradeRecord:
         zone_time_end=datetime.fromtimestamp(row.zone_time_end, tz=UTC)
         if row.zone_time_end
         else None,
+        zone_pattern=row.zone_pattern,
         pattern=row.pattern,
         structure=_structure_from_json(row.structure),
+        indicators=_indicators_from_json(row.indicators),
     )

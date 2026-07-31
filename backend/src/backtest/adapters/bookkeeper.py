@@ -69,6 +69,7 @@ class BacktestBookkeeper:
                 price_high=event.zone_price_high,
                 time_start=event.zone_time_start,
                 time_end=event.zone_time_end,
+                pattern=event.zone_pattern,
             )
         self._open[event.position_id] = _OpenLeg(
             side=event.side,

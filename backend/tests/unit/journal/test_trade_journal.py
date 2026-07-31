@@ -244,6 +244,20 @@ async def test_get_markers_and_get_last_n_proxy_repository(service):
     assert len(last) == 1
 
 
+async def test_get_trade_returns_journaled_record(service, repository):
+    await service.on_position_opened(opened_event())
+
+    record = service.get_trade("1")
+
+    assert record is not None
+    assert record.id == "1"
+    assert record.symbol == "XAUUSD"
+
+
+def test_get_trade_returns_none_for_unknown_id(service):
+    assert service.get_trade("missing") is None
+
+
 async def test_get_markers_skill_filter_proxies_through(service):
     await service.on_position_opened(opened_event(position_id="a", skill="normal/xauusd/a"))
     await service.on_position_opened(opened_event(position_id="b", skill="normal/xauusd/b"))

@@ -66,8 +66,10 @@ class TradeJournalService:
             zone_price_high=event.zone_price_high,
             zone_time_start=event.zone_time_start,
             zone_time_end=event.zone_time_end,
+            zone_pattern=event.zone_pattern,
             pattern=event.pattern,
             structure=event.structure,
+            indicators=event.indicators,
         )
         await asyncio.to_thread(self._repository.save, record, self._account_id)
         logger.info(
@@ -151,6 +153,14 @@ class TradeJournalService:
 
     async def get_open_trades(self, symbol: str | None = None) -> list[TradeRecord]:
         return await asyncio.to_thread(self._repository.get_open, symbol, self._account_id)
+
+    def get_trade(self, trade_id: str) -> TradeRecord | None:
+        """Single trade by id, scoped to this account — backs the "why did
+        the bot take this trade" decision-context endpoint. Sync (unlike the
+        rest of this class's repository-backed methods): the route layer
+        wraps this call in `asyncio.to_thread` itself rather than this
+        method doing it internally."""
+        return self._repository.get_by_id(trade_id, self._account_id)
 
     async def get_symbol_analytics(self) -> list[SymbolAnalytics]:
         trades = await asyncio.to_thread(self._repository.get_all_for_analytics, self._account_id)

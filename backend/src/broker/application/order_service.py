@@ -61,8 +61,10 @@ class OrderService:
         zone_price_high: float | None = None,
         zone_time_start: datetime | None = None,
         zone_time_end: datetime | None = None,
+        zone_pattern: str | None = None,
         pattern: str | None = None,
         structure: tuple[tuple[str, float, datetime], ...] = (),
+        indicators: tuple[tuple[str, float, float, str, bool], ...] = (),
     ) -> ExecutionResult:
         """`max_spread_points`, when set, overrides the symbol's configured
         cap for this order only — used by news skills to widen (or, in
@@ -71,12 +73,14 @@ class OrderService:
         MT5 magic number identifying which bot placed the order — lets
         several bots trading the same symbol be told apart on open
         positions (`SkillDecision.magic`, §6.6); 0 for manual/API orders.
-        `reason`/`confidence`/`zone_*`/`pattern`/`structure` are optional
-        decision-context passthrough from the strategy's Signal (see
+        `reason`/`confidence`/`zone_*`/`pattern`/`structure`/`indicators` are
+        optional decision-context passthrough from the strategy's Signal (see
         strategies/domain/models.py) — kept as flat primitives here rather
         than importing that module's domain types, so the broker layer stays
         independent of the strategies module; they flow straight into the
-        published `PositionOpened` event unused by order placement itself."""
+        published `PositionOpened` event unused by order placement itself.
+        `indicators` is `(name, value, threshold, comparison, passed)` tuples,
+        flattened from `Signal.indicators` (`IndicatorReading`)."""
         info = await self._market_data.get_symbol_info(symbol)
         reference_price = info.ask if side is Side.BUY else info.bid
         sl_distance = abs(reference_price - sl) if sl is not None else None
@@ -164,8 +168,10 @@ class OrderService:
                 zone_price_high=zone_price_high,
                 zone_time_start=zone_time_start,
                 zone_time_end=zone_time_end,
+                zone_pattern=zone_pattern,
                 pattern=pattern,
                 structure=structure,
+                indicators=indicators,
             )
         )
         return result

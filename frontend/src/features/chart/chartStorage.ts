@@ -15,7 +15,7 @@ import {
   TextAnnotation,
 } from 'lightweight-charts-drawing';
 import type { Candle } from '@/shared/api/client';
-import type { ManualIndicator, OrderLineStyle } from './types';
+import type { ManualIndicator, OrderLineStyle, ZoneColorStyle } from './types';
 import { isTimeframe } from './chartFormat';
 
 // Prefix for drawings this component adds itself (from the active strategy's
@@ -187,6 +187,42 @@ export function loadOrderLineStyle(): OrderLineStyle {
 export function saveOrderLineStyle(style: OrderLineStyle): void {
   try {
     localStorage.setItem(ORDER_LINE_STYLE_KEY, JSON.stringify(style));
+  } catch {
+    // localStorage quota or serialisation errors are non-fatal.
+  }
+}
+
+const ZONE_COLOR_STYLE_KEY = 'chart-zone-color-style';
+
+const DEFAULT_ZONE_COLOR_STYLE: ZoneColorStyle = {
+  customColors: false,
+  qml: { demandColor: '#42a5f5', supplyColor: '#ff9800', touchedColor: '#787b86' },
+  snd: { demandColor: '#42a5f5', supplyColor: '#ff9800', touchedColor: '#787b86' },
+  sndV2: { demandColor: '#42a5f5', supplyColor: '#ff9800', touchedColor: '#787b86' },
+  tradeZone: { demandColor: '#42a5f5', supplyColor: '#ff9800' },
+};
+
+export function loadZoneColorStyle(): ZoneColorStyle {
+  try {
+    const raw = localStorage.getItem(ZONE_COLOR_STYLE_KEY);
+    if (!raw) return DEFAULT_ZONE_COLOR_STYLE;
+    const parsed = JSON.parse(raw) as Partial<ZoneColorStyle>;
+    return {
+      ...DEFAULT_ZONE_COLOR_STYLE,
+      ...parsed,
+      qml: { ...DEFAULT_ZONE_COLOR_STYLE.qml, ...parsed.qml },
+      snd: { ...DEFAULT_ZONE_COLOR_STYLE.snd, ...parsed.snd },
+      sndV2: { ...DEFAULT_ZONE_COLOR_STYLE.sndV2, ...parsed.sndV2 },
+      tradeZone: { ...DEFAULT_ZONE_COLOR_STYLE.tradeZone, ...parsed.tradeZone },
+    };
+  } catch {
+    return DEFAULT_ZONE_COLOR_STYLE;
+  }
+}
+
+export function saveZoneColorStyle(style: ZoneColorStyle): void {
+  try {
+    localStorage.setItem(ZONE_COLOR_STYLE_KEY, JSON.stringify(style));
   } catch {
     // localStorage quota or serialisation errors are non-fatal.
   }

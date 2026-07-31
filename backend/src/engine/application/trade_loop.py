@@ -296,21 +296,29 @@ class TradeEngine:
         # Evaluated ahead of the pretrade gate (unlike previously) so a
         # `close_on_opposite_signal` strategy can free up its own slot below
         # before the max-open-positions cap is checked against the count.
-        signal = strategy.evaluate(ctx)
-        if signal is None:
+        signal_res = strategy.evaluate(ctx)
+        if signal_res is None:
             return balance
+        signals: tuple[Signal, ...] = (
+            tuple(signal_res) if isinstance(signal_res, (list, tuple)) else (signal_res,)
+        )
+        if not signals:
+            return balance
+
+        first_signal = signals[0]
         logger.info(
-            "SIGNAL: %s %s via strategy=%s skill=%s — %s",
+            "SIGNAL: %s %s (%d target position(s)) via strategy=%s skill=%s — %s",
             symbol,
-            signal.direction.value,
+            first_signal.direction.value,
+            len(signals),
             strategy.spec.name,
             decision.skill_name,
-            signal.reason,
+            first_signal.reason,
         )
 
         if strategy.spec.close_on_opposite_signal:
             open_positions, closed = await self._close_opposite_position(
-                symbol, decision, strategy, signal, open_positions
+                symbol, decision, strategy, first_signal, open_positions
             )
             if closed:
                 # The only thing in this loop that changes account balance
@@ -332,85 +340,102 @@ class TradeEngine:
 
         veto_tf = _veto_timeframe(strategy)
         veto_timeframes = (veto_tf,) if veto_tf is not None else ()
-        confirmed, veto_reason = confirm(signal.direction, ctx, veto_timeframes)
+        confirmed, veto_reason = confirm(first_signal.direction, ctx, veto_timeframes)
         if not confirmed:
             logger.info(
                 "ENTRY BLOCKED (HTF veto): %s %s [%s] — %s",
                 symbol,
-                signal.direction.value,
+                first_signal.direction.value,
                 decision.skill_name,
                 veto_reason,
             )
             return balance
 
-        side = Side(signal.direction.value)
-        reference_price = info.ask if side is Side.BUY else info.bid
-        sign = 1 if side is Side.BUY else -1
-        sl_price = reference_price - sign * signal.sl_points
-        tp_price = reference_price + sign * signal.tp_points
-
         if balance is None:
             logger.info("ENTRY SKIPPED (no account connected): %s", symbol)
             return balance
 
-        sizing = self._risk_manager.size_position(
-            balance=balance,
-            sl_distance_price=abs(reference_price - sl_price),
-            contract_size=info.contract_size,
-            volume_min=info.volume_min,
-            volume_max=info.volume_max,
-            volume_step=info.volume_step,
-            risk_multiplier=decision.risk_multiplier,
-        )
-        if not sizing.approved:
+        # Split risk across multiple targets so total risk per trade setup remains aligned with user config
+        pos_risk_multiplier = decision.risk_multiplier / len(signals)
+
+        for idx, signal in enumerate(signals):
+            if len(open_positions) + idx >= self._risk_manager._caps.max_open_positions:
+                logger.info("ENTRY BLOCKED (max open positions cap reached): %s on TP%d", symbol, idx + 1)
+                break
+
+            side = Side(signal.direction.value)
+            reference_price = info.ask if side is Side.BUY else info.bid
+            sign = 1 if side is Side.BUY else -1
+            sl_price = reference_price - sign * signal.sl_points
+            tp_price = reference_price + sign * signal.tp_points
+
+            sizing = self._risk_manager.size_position(
+                balance=balance,
+                sl_distance_price=abs(reference_price - sl_price),
+                contract_size=info.contract_size,
+                volume_min=info.volume_min,
+                volume_max=info.volume_max,
+                volume_step=info.volume_step,
+                risk_multiplier=pos_risk_multiplier,
+            )
+            if not sizing.approved:
+                logger.info(
+                    "ENTRY REJECTED (risk sizing for TP%d): %s %s [%s] — %s (balance=%.2f, sl_distance=%.5f, "
+                    "risk_multiplier=%.2f)",
+                    idx + 1,
+                    symbol,
+                    side.value,
+                    decision.skill_name,
+                    sizing.reason,
+                    balance,
+                    abs(reference_price - sl_price),
+                    pos_risk_multiplier,
+                )
+                continue
             logger.info(
-                "ENTRY REJECTED (risk sizing): %s %s [%s] — %s (balance=%.2f, sl_distance=%.5f, "
-                "risk_multiplier=%.2f)",
+                "SIZING OK (TP%d/%d): %s %s %.2f lots [%s] (balance=%.2f, risk_multiplier=%.2f)",
+                idx + 1,
+                len(signals),
                 symbol,
                 side.value,
-                decision.skill_name,
-                sizing.reason,
-                balance,
-                abs(reference_price - sl_price),
-                decision.risk_multiplier,
-            )
-            return balance
-        logger.info(
-            "SIZING OK: %s %s %.2f lots [%s] (balance=%.2f, risk_multiplier=%.2f)",
-            symbol,
-            side.value,
-            sizing.volume,
-            decision.skill_name,
-            balance,
-            decision.risk_multiplier,
-        )
-
-        zone = signal.zone
-        try:
-            await self._order_service.open_position(
-                symbol,
-                side,
                 sizing.volume,
-                sl=sl_price,
-                tp=tp_price,
-                comment=signal.reason[:29],
-                strategy_version=f"{strategy.spec.name}:v{strategy.spec.version}",
-                skill=decision.skill_name,
-                magic=decision.magic,
-                max_spread_points=decision.max_spread_points,
-                reason=signal.reason,
-                confidence=signal.confidence,
-                zone_kind=zone.kind.value if zone is not None else None,
-                zone_price_low=zone.price_low if zone is not None else None,
-                zone_price_high=zone.price_high if zone is not None else None,
-                zone_time_start=zone.time_start if zone is not None else None,
-                zone_time_end=zone.time_end if zone is not None else None,
-                pattern=signal.pattern,
-                structure=tuple((p.label.value, p.price, p.time) for p in signal.structure),
+                decision.skill_name,
+                balance,
+                pos_risk_multiplier,
             )
-        except OrderRejected:
-            return balance  # spread/RR gate already logged the veto inside order_service
-        self._risk_manager.record_trade_opened(now)
+
+            zone = signal.zone
+            comment_text = f"TP{idx+1}:{signal.reason}"[:29] if len(signals) > 1 else signal.reason[:29]
+            try:
+                await self._order_service.open_position(
+                    symbol,
+                    side,
+                    sizing.volume,
+                    sl=sl_price,
+                    tp=tp_price,
+                    comment=comment_text,
+                    strategy_version=f"{strategy.spec.name}:v{strategy.spec.version}",
+                    skill=decision.skill_name,
+                    magic=decision.magic,
+                    max_spread_points=decision.max_spread_points,
+                    reason=signal.reason,
+                    confidence=signal.confidence,
+                    zone_kind=zone.kind.value if zone is not None else None,
+                    zone_price_low=zone.price_low if zone is not None else None,
+                    zone_price_high=zone.price_high if zone is not None else None,
+                    zone_time_start=zone.time_start if zone is not None else None,
+                    zone_time_end=zone.time_end if zone is not None else None,
+                    zone_pattern=zone.pattern if zone is not None else None,
+                    pattern=signal.pattern,
+                    structure=tuple((p.label.value, p.price, p.time) for p in signal.structure),
+                    indicators=tuple(
+                        (r.name, r.value, r.threshold, r.comparison, r.passed)
+                        for r in signal.indicators
+                    ),
+                )
+            except OrderRejected:
+                continue  # spread/RR gate already logged the veto inside order_service
+            self._risk_manager.record_trade_opened(now)
         return balance
 
     async def _close_opposite_position(

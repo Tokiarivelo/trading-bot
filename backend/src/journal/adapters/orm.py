@@ -46,5 +46,7 @@ class TradeRow(Base):
     zone_price_high: Mapped[float | None] = mapped_column(Float, nullable=True)
     zone_time_start: Mapped[int | None] = mapped_column(Integer, nullable=True)
     zone_time_end: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    zone_pattern: Mapped[str | None] = mapped_column(String(16), nullable=True)
     pattern: Mapped[str | None] = mapped_column(String(64), nullable=True)
     structure: Mapped[list] = mapped_column(JSON, default=list)
+    indicators: Mapped[list] = mapped_column(JSON, default=list)

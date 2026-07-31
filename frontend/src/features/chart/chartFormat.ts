@@ -76,6 +76,28 @@ export function hexToRgba(hex: string, alpha: number): string {
   return `rgba(${r}, ${g}, ${b}, ${alpha})`;
 }
 
+/** Resolves a zone rectangle's fill/border color for one indicator's
+ * `ZoneIndicatorColors` (see types.ts) — falls back to the original hardcoded
+ * theme tokens (buy/sell/muted) when `customColors` is off, so nothing
+ * changes visually until a user opts into the "Zone colors" settings panel.
+ * `colors.touchedColor` is optional because the per-trade backend zone type
+ * has no fresh/touched state of its own (a trade was, by definition, taken
+ * from it) — `touched` is always false for that caller. */
+export function pickZoneColor(
+  colors: { demandColor: string; supplyColor: string; touchedColor?: string },
+  demand: boolean,
+  touched: boolean,
+  customColors: boolean,
+): string {
+  if (!customColors) {
+    return touched
+      ? cssVar('--color-ink-muted')
+      : cssVar(demand ? '--color-buy' : '--color-sell');
+  }
+  if (touched && colors.touchedColor) return colors.touchedColor;
+  return demand ? colors.demandColor : colors.supplyColor;
+}
+
 /** Strategy families whose entries are S&D (RBR/DBD/RBD/DBR) zone retests —
  * matched by name rather than an explicit allowlist so newly generated
  * zone-based bots (the `new-strategy` skill scaffolds `pob_snd_zones_*`/

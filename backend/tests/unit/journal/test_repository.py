@@ -66,10 +66,16 @@ def test_roundtrip_preserves_decision_context(repository):
         zone_price_high=2398.5,
         zone_time_start=utc(2026, 7, 10, 10, 0),
         zone_time_end=utc(2026, 7, 10, 13, 45),
+        zone_pattern="RBR",
         pattern="bullish_engulfing",
         structure=(
             ("HL", 2397.2, utc(2026, 7, 10, 13, 30)),
             ("HH", 2401.0, utc(2026, 7, 10, 13, 45)),
+        ),
+        indicators=(
+            ("RSI", 62.3, 50.0, ">", True),
+            ("EMA_FAST_VS_SLOW", 2401.1, 2398.4, ">", True),
+            ("VOLUME", 120.0, 95.5, ">", True),
         ),
     )
     repository.save(record)
@@ -78,6 +84,23 @@ def test_roundtrip_preserves_decision_context(repository):
 
 def test_get_returns_none_for_unknown_id(repository):
     assert repository.get("missing") is None
+
+
+def test_get_by_id_returns_matching_record(repository):
+    repository.save(make_record("1"))
+    assert repository.get_by_id("1") == make_record("1")
+
+
+def test_get_by_id_returns_none_for_unknown_id(repository):
+    assert repository.get_by_id("missing") is None
+
+
+def test_get_by_id_scopes_to_account(repository):
+    repository.save(make_record("1"), account_id="ftmo-1")
+
+    assert repository.get_by_id("1", account_id="ftmo-1") is not None
+    assert repository.get_by_id("1", account_id="ftmo-2") is None
+    assert repository.get_by_id("1") is None  # default account
 
 
 def test_save_upserts_same_id(repository):

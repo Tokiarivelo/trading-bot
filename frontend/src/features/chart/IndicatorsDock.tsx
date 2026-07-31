@@ -143,9 +143,38 @@ interface Props {
 export function IndicatorsDock({ indicators, onAdd, onRemove, onUpdate, onCustomIndicatorCodeSaved }: Props) {
   const [type, setType] = useState<ManualIndicatorType>("ema");
   const [period, setPeriod] = useState<number>(TYPE_DEFAULTS.ema.period);
-  const [color, setColor] = useState<string>(PRESET_COLORS[0]);
-  const [lineStyle, setLineStyle] = useState<IndicatorLineStyle>("solid");
-  const [lineWidth, setLineWidth] = useState<IndicatorLineWidth>(1);
+  const [color, setColor] = useState<string>(() => {
+    if (typeof window !== 'undefined') {
+      return localStorage.getItem('chart-default-indicator-color') || PRESET_COLORS[0];
+    }
+    return PRESET_COLORS[0];
+  });
+  const [lineStyle, setLineStyle] = useState<IndicatorLineStyle>(() => {
+    if (typeof window !== 'undefined') {
+      return (localStorage.getItem('chart-default-indicator-style') as IndicatorLineStyle) || "solid";
+    }
+    return "solid";
+  });
+  const [lineWidth, setLineWidth] = useState<IndicatorLineWidth>(() => {
+    if (typeof window !== 'undefined') {
+      const val = Number(localStorage.getItem('chart-default-indicator-width'));
+      return ([1, 2, 3, 4].includes(val) ? val : 1) as IndicatorLineWidth;
+    }
+    return 1;
+  });
+
+  useEffect(() => {
+    localStorage.setItem('chart-default-indicator-color', color);
+  }, [color]);
+
+  useEffect(() => {
+    localStorage.setItem('chart-default-indicator-style', lineStyle);
+  }, [lineStyle]);
+
+  useEffect(() => {
+    localStorage.setItem('chart-default-indicator-width', String(lineWidth));
+  }, [lineWidth]);
+
   const [customIndicators, setCustomIndicators] = useState<IndicatorSummary[]>([]);
   const [selectedCustomId, setSelectedCustomId] = useState<string | null>(null);
   const [peekIndicator, setPeekIndicator] = useState<{ id: string; name: string } | null>(null);

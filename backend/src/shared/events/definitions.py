@@ -50,9 +50,12 @@ class PositionOpened(Event):
     zone_price_high: float | None = None
     zone_time_start: datetime | None = None
     zone_time_end: datetime | None = None
+    zone_pattern: str | None = None  # the zone's own subtype, e.g. "RBR"/"DBD"/"QML"
     pattern: str | None = None
     structure: tuple[tuple[str, float, datetime], ...] = ()
     """Swing points as (label, price, time), label one of HH/HL/LH/LL."""
+    indicators: tuple[tuple[str, float, float, str, bool], ...] = ()
+    """Confluence-check readings as (name, value, threshold, comparison, passed)."""
 
 
 @dataclass(frozen=True, kw_only=True)

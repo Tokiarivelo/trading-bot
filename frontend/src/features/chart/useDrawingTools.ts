@@ -126,6 +126,22 @@ export function useDrawingTools(params: UseDrawingToolsParams) {
   const [showDrawingsList, setShowDrawingsList] = useState(false);
   const [pendingAnchorCount, setPendingAnchorCount] = useState(0);
 
+  const [activeWidth, setActiveWidth] = useState<number>(() => {
+    if (typeof window !== 'undefined') {
+      const val = Number(localStorage.getItem('chart-active-drawing-width'));
+      return [1, 2, 3, 4].includes(val) ? val : 2;
+    }
+    return 2;
+  });
+
+  useEffect(() => {
+    localStorage.setItem('chart-active-drawing-width', String(activeWidth));
+  }, [activeWidth]);
+
+  useEffect(() => {
+    localStorage.setItem('chart-active-drawing-color', activeColor);
+  }, [activeColor]);
+
   // Root-element refs for this hook's two popover/menu components, scoped
   // per instance rather than a fixed global DOM id — the outside-click
   // effect below checks these instead of `document.getElementById(...)`, so
@@ -141,6 +157,9 @@ export function useDrawingTools(params: UseDrawingToolsParams) {
   // received from ChartPanel.tsx.
   const activeColorRef = useRef(activeColor);
   activeColorRef.current = activeColor;
+
+  const activeWidthRef = useRef(activeWidth);
+  activeWidthRef.current = activeWidth;
 
   // When the symbol changes, save the current symbol's drawings and load the
   // new symbol's drawings. The chart-creation effect (useChartEngine) only
@@ -241,7 +260,7 @@ export function useDrawingTools(params: UseDrawingToolsParams) {
       const chosenColor = activeColorRef.current;
       const style = {
         lineColor: chosenColor,
-        lineWidth: 2,
+        lineWidth: activeWidthRef.current,
         showLabels: true,
         labelColor: chosenColor,
         fillColor: hexToRgba(chosenColor, 0.15),
@@ -290,7 +309,7 @@ export function useDrawingTools(params: UseDrawingToolsParams) {
       const chosenColor = activeColorRef.current;
       const previewStyle = {
         lineColor: chosenColor,
-        lineWidth: 2,
+        lineWidth: activeWidthRef.current,
         lineDash: [4, 4], // dotted line for preview
         showLabels: false, // hide labels for cleaner preview
         labelColor: chosenColor,
@@ -457,6 +476,10 @@ export function useDrawingTools(params: UseDrawingToolsParams) {
     if (manager) clearUserDrawings(manager);
   }
 
+  function handleModifyDrawingWidth(newWidth: number) {
+    setActiveWidth(newWidth);
+  }
+
   return {
     // Passed through from ChartPanel.tsx (see module doc for why these are
     // received rather than created here) — re-exported so JSX has a single
@@ -478,10 +501,12 @@ export function useDrawingTools(params: UseDrawingToolsParams) {
     pendingAnchorCount,
     drawingContextMenuRef,
     drawingEditPopoverRef,
+    activeWidth,
 
     // Handlers.
     handleColorChange,
     handleModifyDrawingColor,
+    handleModifyDrawingWidth,
     removeDrawing,
     toggleDrawingVisible,
     clearAllDrawings,

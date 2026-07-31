@@ -3,8 +3,8 @@
 /**
  * Chart display-toggle UI state: the timeframe/overlays dropdowns (with the
  * outside-click effect that closes them) and the separators/spread-line/
- * trade-labels/order-line-style toggles from the toolbar's "Overlays" menu
- * and settings panel. Pure UI state — no chart-engine coupling.
+ * trade-labels/order-line-style/zone-color toggles from the toolbar's
+ * "Overlays" menu and settings panels. Pure UI state — no chart-engine coupling.
  *
  * Known follow-up (not fixed here): the localStorage keys used below
  * (`chart-show-separators`, `chart-show-spread-line`, `chart-show-trade-labels`,
@@ -14,8 +14,13 @@
  */
 
 import { useEffect, useRef, useState } from "react";
-import type { OrderLineStyle } from "./types";
-import { loadOrderLineStyle, saveOrderLineStyle } from "./chartStorage";
+import type { OrderLineStyle, ZoneColorStyle } from "./types";
+import {
+  loadOrderLineStyle,
+  loadZoneColorStyle,
+  saveOrderLineStyle,
+  saveZoneColorStyle,
+} from "./chartStorage";
 
 export function useChartUIToggles() {
   const [showTfDropdown, setShowTfDropdown] = useState(false);
@@ -150,6 +155,12 @@ export function useChartUIToggles() {
   const [orderLineStyle, setOrderLineStyle] = useState<OrderLineStyle>(loadOrderLineStyle);
   const [showOrderLineSettings, setShowOrderLineSettings] = useState(false);
 
+  // Per-indicator zone-rectangle colors (Quasimodo, S&D v1/v2, the per-trade
+  // backend zone) — same "loaded once, persisted on every change" shape as
+  // orderLineStyle above.
+  const [zoneColorStyle, setZoneColorStyle] = useState<ZoneColorStyle>(loadZoneColorStyle);
+  const [showZoneColorSettings, setShowZoneColorSettings] = useState(false);
+
   // The floating drawing-tool palette (DrawingToolbar, left edge of the
   // chart canvas) — on by default, but it can be toggled off to reclaim the
   // space when only reading the chart, without touching any drawings already
@@ -181,6 +192,14 @@ export function useChartUIToggles() {
     });
   }
 
+  function updateZoneColorStyle(patch: Partial<ZoneColorStyle>): void {
+    setZoneColorStyle((prev) => {
+      const next = { ...prev, ...patch };
+      saveZoneColorStyle(next);
+      return next;
+    });
+  }
+
   return {
     showTfDropdown,
     setShowTfDropdown,
@@ -203,6 +222,10 @@ export function useChartUIToggles() {
     updateOrderLineStyle,
     showOrderLineSettings,
     setShowOrderLineSettings,
+    zoneColorStyle,
+    updateZoneColorStyle,
+    showZoneColorSettings,
+    setShowZoneColorSettings,
     showDrawingToolbar,
     toggleDrawingToolbar,
   };

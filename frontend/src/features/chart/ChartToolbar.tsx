@@ -75,6 +75,8 @@ export interface ChartToolbarProps {
   onToggleOrderLinesVisible: () => void;
   showOrderLineSettings: boolean;
   onToggleOrderLineSettings: () => void;
+  showZoneColorSettings: boolean;
+  onToggleZoneColorSettings: () => void;
 
   // Session replay
   backtestReportId?: string | null;
@@ -136,6 +138,8 @@ export const ChartToolbar = memo(function ChartToolbar({
   onToggleOrderLinesVisible,
   showOrderLineSettings,
   onToggleOrderLineSettings,
+  showZoneColorSettings,
+  onToggleZoneColorSettings,
   backtestReportId,
   sessionReplayPeriod,
   showSessionReplayPicker,
@@ -488,6 +492,21 @@ export const ChartToolbar = memo(function ChartToolbar({
                   </button>
                 </div>
               </div>
+
+              {/* Zone Colors Gear — no separate visibility toggle (zone
+                  rectangles are shown/hidden per-indicator from
+                  IndicatorsDock), just opens the color settings panel. */}
+              <button
+                type='button'
+                className='flex w-full cursor-pointer items-center justify-between rounded px-2.5 py-1.5 text-xs text-ink-muted hover:bg-line/50 hover:text-ink transition-colors'
+                onClick={onToggleZoneColorSettings}
+                title='Customize demand/supply/touched colors per zone indicator'
+              >
+                <span className='flex items-center gap-2'>
+                  <Settings size={13} className={showZoneColorSettings ? 'text-accent' : ''} />
+                  <span>Zone colors</span>
+                </span>
+              </button>
             </div>
           )}
         </div>

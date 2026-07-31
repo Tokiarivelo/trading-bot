@@ -99,6 +99,13 @@ def test_buy_signal_when_aligned_and_above_amplitude_floor():
     # tp_rr is tiered by confluence but never drops below v2's own base
     assert signal.tp_points >= signal.sl_points * TP_RR_BASE
     assert 0.6 <= signal.confidence <= 0.9
+    # Structured confluence readings mirror the boolean votes baked into
+    # the reason string -- additive-only, doesn't affect the vote itself.
+    assert len(signal.indicators) == 3
+    names = {r.name for r in signal.indicators}
+    assert names == {"RSI", "ADX", "EMA_FAST_VS_SLOW"}
+    for reading in signal.indicators:
+        assert reading.passed == (f"{reading.name.split('_')[0].lower()}=True" in signal.reason)
 
 
 def test_no_signal_when_prior_low_is_not_higher():
@@ -153,11 +160,13 @@ def test_confluence_votes_all_true_on_strong_uptrend():
     lows = closes - 1.0
     tr = pd.Series(_true_range_values(highs.to_numpy(), lows.to_numpy(), closes.to_numpy()))
 
-    rsi_ok, adx_ok, ema_ok = _confluence_votes(closes, highs, lows, tr, Direction.BUY)
+    rsi_ok, adx_ok, ema_ok, readings = _confluence_votes(closes, highs, lows, tr, Direction.BUY)
 
     assert rsi_ok is True
     assert ema_ok is True
     assert adx_ok is True
+    assert len(readings) == 3
+    assert all(r.passed for r in readings)
 
 
 def test_confluence_votes_default_false_on_flat_series():
@@ -167,11 +176,13 @@ def test_confluence_votes_default_false_on_flat_series():
     lows = closes - 1.0
     tr = pd.Series(_true_range_values(highs.to_numpy(), lows.to_numpy(), closes.to_numpy()))
 
-    rsi_ok, adx_ok, ema_ok = _confluence_votes(closes, highs, lows, tr, Direction.BUY)
+    rsi_ok, adx_ok, ema_ok, readings = _confluence_votes(closes, highs, lows, tr, Direction.BUY)
 
     assert rsi_ok is False
     assert adx_ok is False
     assert ema_ok is False
+    assert len(readings) == 3
+    assert all(not r.passed for r in readings)
 
 
 def test_rsi_and_adx_return_nan_before_warmup():

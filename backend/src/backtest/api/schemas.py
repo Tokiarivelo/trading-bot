@@ -19,6 +19,15 @@ class ZoneOut(BaseModel):
     time_end: int = Field(
         description="Epoch seconds UTC — right edge of the zone rectangle (the entry candle)."
     )
+    pattern: str | None = Field(
+        default=None,
+        description=(
+            "The zone's own subtype, e.g. 'RBR', 'DBD', 'RBD', 'DBR' — distinct from the "
+            "trade's own `pattern` (confirming candlestick pattern). Null for strategies "
+            "that don't label their zone detector's setup type, or reports predating "
+            "this field."
+        ),
+    )
 
 
 class StructurePointOut(BaseModel):

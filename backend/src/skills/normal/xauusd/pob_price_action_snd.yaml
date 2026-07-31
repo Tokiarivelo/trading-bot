@@ -1,9 +1,0 @@
-name: normal/xauusd/pob_price_action_snd
-symbol: XAUUSD
-strategy: pob_price_action_snd
-risk_multiplier: 1.0
-sessions:
-- start: 09:00
-  end: '12:00'
-- start: '14:30'
-  end: '18:00'

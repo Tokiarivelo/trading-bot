@@ -131,8 +131,10 @@ class FakeOrderService:
         zone_price_high=None,
         zone_time_start=None,
         zone_time_end=None,
+        zone_pattern=None,
         pattern=None,
         structure=(),
+        indicators=(),
     ):
         if self._raise_on_open:
             raise self._raise_on_open
@@ -156,8 +158,10 @@ class FakeOrderService:
                 zone_price_high=zone_price_high,
                 zone_time_start=zone_time_start,
                 zone_time_end=zone_time_end,
+                zone_pattern=zone_pattern,
                 pattern=pattern,
                 structure=structure,
+                indicators=indicators,
             )
         )
         # Reflected in the next get_positions() call, same as a real broker
@@ -965,3 +969,26 @@ async def test_account_status_not_refetched_when_no_close_on_opposite_signal_hap
 
     assert len(order_service.opened) == 2
     assert account.calls == 1
+
+
+async def test_multi_position_scaling_opens_tiered_tp_orders():
+    # When strategy.evaluate returns a sequence of 3 signals (TP1, TP2, TP3),
+    # trade loop should open 3 distinct positions with corresponding tiered TPs and shared SL.
+    sig1 = Signal(direction=Direction.BUY, sl_points=10.0, tp_points=10.0, reason="TP1 scalp")
+    sig2 = Signal(direction=Direction.BUY, sl_points=10.0, tp_points=25.0, reason="TP2 zone")
+    sig3 = Signal(direction=Direction.BUY, sl_points=10.0, tp_points=40.0, reason="TP3 runner")
+    strategy = FakeStrategy((sig1, sig2, sig3))
+    engine, order_service, *_ = make_engine(strategy=strategy)
+
+    await engine.on_candle_closed(CandleClosed(symbol="XAUUSD", timeframe="M5"))
+
+    assert len(order_service.opened) == 3
+    # Verify tiered TPs on Ask (2400.3)
+    assert order_service.opened[0]["tp"] == 2400.3 + 10.0
+    assert order_service.opened[1]["tp"] == 2400.3 + 25.0
+    assert order_service.opened[2]["tp"] == 2400.3 + 40.0
+    # Verify shared SL
+    assert order_service.opened[0]["sl"] == 2400.3 - 10.0
+    assert order_service.opened[1]["sl"] == 2400.3 - 10.0
+    assert order_service.opened[2]["sl"] == 2400.3 - 10.0
+

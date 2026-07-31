@@ -56,7 +56,7 @@ import type { Candle } from '@/shared/api/client';
 import { cssVar, hexToRgba } from './chartFormat';
 import { isProgrammaticDrawingId, loadDrawingsFromStorage } from './chartStorage';
 import { FUTURE_RIGHT_OFFSET } from './useCandleData';
-import type { ChartEngineController, DrawingToolType } from './types';
+import type { ChartEngineController, DrawingToolType, ZoneMeta } from './types';
 import type { ContextMenuState, OrderPopoverState } from './useOrderPopovers';
 import type { DrawingMenuState } from './useDrawingTools';
 
@@ -111,6 +111,10 @@ export function useChartEngine(params: UseChartEngineParams) {
   );
   // Drawing tools: one manager instance, alive for the lifetime of the chart.
   const drawingManagerRef = useRef<DrawingManager | null>(null);
+  // Zone-rectangle metadata side map (see `ZoneMeta`) — one instance for the
+  // component's lifetime, mutated in place by useIndicators/useBacktestData
+  // rather than recreated, so a stable reference survives their rebuilds.
+  const zoneMetaMapRef = useRef<Map<string, ZoneMeta>>(new Map());
   const [isReady, setIsReady] = useState(false);
 
   // Create the chart once; destroy on unmount.
@@ -212,6 +216,7 @@ export function useChartEngine(params: UseChartEngineParams) {
     // Attach the drawing manager to the chart and its primary series so the
     // drawing tools can convert pixel ↔ price/time coordinates and register
     // their mouse-event handlers on the container element.
+    const zoneMetaMap = zoneMetaMapRef.current;
     const manager = new DrawingManager();
     manager.attach(chart, candleSeries, container);
     drawingManagerRef.current = manager;
@@ -568,6 +573,7 @@ export function useChartEngine(params: UseChartEngineParams) {
       structureMarkersRef.current?.detach();
       manager.detach();
       drawingManagerRef.current = null;
+      zoneMetaMap.clear();
       chart.remove();
       chartRef.current = null;
       candleSeriesRef.current = null;
@@ -598,6 +604,7 @@ export function useChartEngine(params: UseChartEngineParams) {
       getVolumeSeries: () => volumeSeriesRef.current,
       getWhitespaceSeries: () => whitespaceSeriesRef.current,
       getDrawingManager: () => drawingManagerRef.current,
+      getZoneMetaMap: () => zoneMetaMapRef.current,
       getSeriesMarkersPrimitive: () => seriesMarkersRef.current,
       getStructureMarkersPrimitive: () => structureMarkersRef.current,
       isReady,

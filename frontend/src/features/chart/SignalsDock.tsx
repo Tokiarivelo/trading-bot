@@ -48,6 +48,9 @@ function toTradeHistoryItem(
     zone: trade.zone,
     pattern: trade.pattern,
     structure: trade.structure,
+    // BacktestTrade doesn't report indicator readings; only live/journaled
+    // trades (TradeHistoryItem from the backend) carry that field.
+    indicators: [],
   };
 }
 

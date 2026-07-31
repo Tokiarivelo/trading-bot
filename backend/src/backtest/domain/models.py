@@ -23,6 +23,9 @@ class BacktestZone:
     price_high: float
     time_start: datetime
     time_end: datetime
+    # The zone's own subtype, e.g. "RBR"/"DBD"/"RBD"/"DBR"/"QML" — distinct
+    # from BacktestTrade.pattern (the confirming candlestick pattern).
+    pattern: str | None = None
 
 
 @dataclass(frozen=True, kw_only=True)

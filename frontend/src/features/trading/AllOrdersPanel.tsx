@@ -24,6 +24,7 @@ import {
 import { TradeHistoryList } from "@/features/history/TradeHistoryList";
 import { useActiveAccount } from "@/shared/api/account-context";
 import { useSortableRows } from "@/shared/hooks/useSortableRows";
+import { DecisionBadge } from "@/shared/ui/DecisionBadge";
 import { SortTh } from "@/shared/ui/SortTh";
 import { TradeDecisionModal } from "@/shared/ui/TradeDecisionModal";
 import type { AllPositions } from "./useAllPositions";
@@ -315,22 +316,10 @@ function ActiveOrdersTables({
                         {formatIsoTime(p.open_time)}
                       </td>
                       <td className="px-2 py-1 text-center">
-                        <button
-                          type="button"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            if (openTrade) setWhyTrade(openTrade);
-                          }}
-                          disabled={!openTrade}
-                          className="cursor-pointer text-ink-muted hover:text-accent disabled:cursor-default disabled:opacity-30"
-                          title={
-                            openTrade
-                              ? "Why the bot took this trade"
-                              : "Decision context not available"
-                          }
-                        >
-                          ⓘ
-                        </button>
+                        <DecisionBadge
+                          trade={openTrade ?? { indicators: [], zone: null, pattern: null, structure: [] }}
+                          onClick={openTrade ? () => setWhyTrade(openTrade) : undefined}
+                        />
                       </td>
                       <td className="px-2 py-1 text-right">
                         <button

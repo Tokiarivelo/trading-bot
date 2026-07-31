@@ -369,7 +369,7 @@ export default function Home() {
           />
         </nav>
         <Link
-          href={symbol ? `/bots?symbol=${encodeURIComponent(symbol)}` : "/bots"}
+          href={symbol ? `/bots/deployments?symbol=${encodeURIComponent(symbol)}` : "/bots/deployments"}
           className="ml-auto text-sm text-ink-muted hover:text-accent"
         >
           Bots
@@ -467,7 +467,7 @@ export default function Home() {
                     signalsDisabled={!!backtestReportId}
                   />
                 ) : (
-                  <Link href="/bots" className="text-accent hover:underline">
+                  <Link href="/bots/deployments" className="text-accent hover:underline">
                     Bots →
                   </Link>
                 )}

@@ -349,7 +349,7 @@ export function BotSelector({
       )}
       {error && <p className="text-xs text-err">{error}</p>}
       <Link
-        href={`/bots?symbol=${encodeURIComponent(symbol)}`}
+        href={`/bots/factory?symbol=${encodeURIComponent(symbol)}`}
         className="text-accent hover:underline"
       >
         + Generate a new bot for {symbol}

@@ -44,7 +44,7 @@ import {
   type EvaluateCustomCodeResponse,
   type TradeMarker,
 } from "@/shared/api/client";
-import { cssVar } from "./chartFormat";
+import { cssVar, pickZoneColor } from "./chartFormat";
 import {
   BACKTEST_DRAWING_PREFIX,
   LIVE_TRADE_DRAWING_PREFIX,
@@ -57,7 +57,7 @@ import {
   toSignalSeriesMarkers,
 } from "./chartMarkers";
 import { subscribeSharedPoll } from "./sharedPoll";
-import type { ChartEngineController, OrderLineStyle } from "./types";
+import type { ChartEngineController, OrderLineStyle, ZoneColorStyle } from "./types";
 
 // Matches ChartPanel's own MARKERS_POLL_MS — the live-bot eye view's
 // signals/trades poll runs on the same cadence as the journal marker poll.
@@ -85,6 +85,9 @@ export interface UseBacktestDataParams {
   /** Independent of `showTradeLabels` (which only blanks the marker text):
    * when false, no trade/signal arrow markers are painted at all. */
   showTradeMarkers: boolean;
+  /** User-configurable zone-rectangle colors (Zone colors settings panel) —
+   * see `pickZoneColor` in chartFormat.ts. */
+  zoneColorStyle: ZoneColorStyle;
 }
 
 export function useBacktestData({
@@ -99,6 +102,7 @@ export function useBacktestData({
   orderLineStyle,
   showTradeLabels,
   showTradeMarkers,
+  zoneColorStyle,
 }: UseBacktestDataParams) {
   const accountId = useActiveAccount();
 
@@ -237,6 +241,7 @@ export function useBacktestData({
   // every live candle tick.
   useEffect(() => {
     const manager = chartController.getDrawingManager();
+    const zoneMeta = chartController.getZoneMetaMap();
     function clearBacktestDrawings() {
       if (!manager) return;
       for (const drawing of manager.getAllDrawings()) {
@@ -247,6 +252,7 @@ export function useBacktestData({
           drawing.id.startsWith(LIVE_TRADE_DRAWING_PREFIX)
         ) {
           manager.removeDrawing(drawing.id);
+          zoneMeta.delete(drawing.id);
         }
       }
     }
@@ -309,13 +315,13 @@ export function useBacktestData({
         (n, t) => (t.close_time <= cursorTime ? n + 1 : n),
         0,
       );
-      const signature = `${openCount}:${closeCount}:${orderLineStyle.showExitLine}:${orderLineStyle.exitLineDash}:${orderLineStyle.exitLineWidth}:${orderLineStyle.exitLineCustomColor}:${orderLineStyle.exitLineWinColor}:${orderLineStyle.exitLineLossColor}`;
+      const signature = `${openCount}:${closeCount}:${orderLineStyle.showExitLine}:${orderLineStyle.exitLineDash}:${orderLineStyle.exitLineWidth}:${orderLineStyle.exitLineCustomColor}:${orderLineStyle.exitLineWinColor}:${orderLineStyle.exitLineLossColor}:${zoneColorStyle.customColors}:${zoneColorStyle.tradeZone.demandColor}:${zoneColorStyle.tradeZone.supplyColor}`;
       if (signature !== lastRevealedSignatureRef.current) {
         lastRevealedSignatureRef.current = signature;
         clearBacktestDrawings();
         const zoneColors = {
-          demand: cssVar('--color-buy'),
-          supply: cssVar('--color-sell'),
+          demand: pickZoneColor(zoneColorStyle.tradeZone, true, false, zoneColorStyle.customColors),
+          supply: pickZoneColor(zoneColorStyle.tradeZone, false, false, zoneColorStyle.customColors),
           sl: cssVar('--color-err'),
           tp: cssVar('--color-ok'),
         };
@@ -323,6 +329,23 @@ export function useBacktestData({
           if (t.open_time > cursorTime) return;
           for (const drawing of buildTradeSetupDrawings(t, i, zoneColors)) {
             manager.addDrawing(drawing);
+          }
+          if (t.zone) {
+            zoneMeta.set(`${BACKTEST_DRAWING_PREFIX}zone:${i}`, {
+              indicator: 'trade_zone',
+              indicatorLabel: 'Trade signal zone',
+              pattern: t.zone.pattern,
+              kind: t.zone.kind,
+              priceLow: t.zone.price_low,
+              priceHigh: t.zone.price_high,
+              timeStart: t.zone.time_start,
+              timeEnd: t.zone.time_end,
+              state: 'triggered',
+              extra: {
+                ...(t.pattern ? { 'Confirming pattern': t.pattern } : {}),
+                ...(t.reason ? { Reason: t.reason } : {}),
+              },
+            });
           }
           if (t.close_time <= cursorTime) {
             const exitDrawing = buildExitLineDrawing(
@@ -356,6 +379,7 @@ export function useBacktestData({
     orderLineStyle,
     showTradeLabels,
     showTradeMarkers,
+    zoneColorStyle,
   ]);
 
   // The report's own time bounds — earliest trade open, latest trade close

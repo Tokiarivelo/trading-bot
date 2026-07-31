@@ -205,6 +205,13 @@ def test_evaluate_reason_records_confluence_and_tp_mult():
     assert signal is not None
     assert "confluence rsi=" in signal.reason
     assert "tp_mult=" in signal.reason
+    # Structured confluence readings mirror the boolean votes in the reason
+    # string -- additive-only, doesn't affect the vote or reason itself.
+    assert len(signal.indicators) == 3
+    assert {r.name for r in signal.indicators} == {"RSI", "EMA_FAST_VS_SLOW", "VOLUME"}
+    for reading in signal.indicators:
+        short = "vol" if reading.name == "VOLUME" else reading.name.split("_")[0].lower()
+        assert (f"{short}=True" in signal.reason) == reading.passed
 
 
 def test_confluence_votes_all_true_on_strong_uptrend_with_rising_volume():
@@ -212,11 +219,13 @@ def test_confluence_votes_all_true_on_strong_uptrend_with_rising_volume():
     closes = pd.Series(np.linspace(100.0, 200.0, n))
     volume = pd.Series(np.linspace(100.0, 500.0, n))
 
-    rsi_ok, ema_ok, vol_ok = mod._confluence_votes(closes, volume, Direction.BUY)
+    rsi_ok, ema_ok, vol_ok, readings = mod._confluence_votes(closes, volume, Direction.BUY)
 
     assert rsi_ok is True
     assert ema_ok is True
     assert vol_ok is True
+    assert len(readings) == 3
+    assert all(r.passed for r in readings)
 
 
 def test_confluence_votes_default_false_on_flat_series():
@@ -224,11 +233,13 @@ def test_confluence_votes_default_false_on_flat_series():
     closes = pd.Series([100.0] * n)
     volume = pd.Series([100.0] * n)
 
-    rsi_ok, ema_ok, vol_ok = mod._confluence_votes(closes, volume, Direction.BUY)
+    rsi_ok, ema_ok, vol_ok, readings = mod._confluence_votes(closes, volume, Direction.BUY)
 
     assert rsi_ok is False
     assert ema_ok is False
     assert vol_ok is False
+    assert len(readings) == 3
+    assert all(not r.passed for r in readings)
 
 
 def test_spec_version_symbol_and_timeframes():

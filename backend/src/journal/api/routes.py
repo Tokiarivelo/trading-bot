@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Literal
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, HTTPException, Path, Query
 
 from src.journal.api.schemas import (
     BotAnalyticsOut,
+    CandleOut,
+    DecisionContextOut,
     EquityPointOut,
+    IndicatorReadingOut,
     StructurePointOut,
     SymbolAnalyticsOut,
     TradeHistoryPage,
@@ -17,7 +21,7 @@ from src.journal.api.schemas import (
 )
 from src.journal.application.trade_journal import TradeJournalService
 from src.journal.domain.analytics import BotAnalytics, SymbolAnalytics
-from src.journal.domain.models import TradeRecord
+from src.journal.domain.models import CandleSnapshot, TradeRecord
 from src.shared.api.dependencies import AccountRuntimeDep
 
 router = APIRouter(prefix="/accounts/{account_id}/journal", tags=["journal"])
@@ -27,22 +31,41 @@ def _service(account: AccountRuntimeDep) -> TradeJournalService:
     return account.trade_journal
 
 
-def _trade_out(record: TradeRecord) -> TradeRecordOut:
-    zone = (
-        ZoneOut(
-            kind=record.zone_kind,
-            price_low=record.zone_price_low,
-            price_high=record.zone_price_high,
-            time_start=int(record.zone_time_start.timestamp()),
-            time_end=int(record.zone_time_end.timestamp()),
-        )
-        if record.zone_kind is not None
-        and record.zone_price_low is not None
-        and record.zone_price_high is not None
-        and record.zone_time_start is not None
-        and record.zone_time_end is not None
-        else None
+def _zone_out(record: TradeRecord) -> ZoneOut | None:
+    if (
+        record.zone_kind is None
+        or record.zone_price_low is None
+        or record.zone_price_high is None
+        or record.zone_time_start is None
+        or record.zone_time_end is None
+    ):
+        return None
+    return ZoneOut(
+        kind=record.zone_kind,
+        price_low=record.zone_price_low,
+        price_high=record.zone_price_high,
+        time_start=int(record.zone_time_start.timestamp()),
+        time_end=int(record.zone_time_end.timestamp()),
+        pattern=record.zone_pattern,
     )
+
+
+def _candles_out(snapshot: tuple[CandleSnapshot, ...]) -> list[CandleOut]:
+    return [
+        CandleOut(
+            time=int(c.time.timestamp()),
+            open=c.open,
+            high=c.high,
+            low=c.low,
+            close=c.close,
+            tick_volume=c.tick_volume,
+        )
+        for c in snapshot
+    ]
+
+
+def _trade_out(record: TradeRecord) -> TradeRecordOut:
+    zone = _zone_out(record)
     return TradeRecordOut(
         id=record.id,
         symbol=record.symbol,
@@ -65,6 +88,10 @@ def _trade_out(record: TradeRecord) -> TradeRecordOut:
         structure=[
             StructurePointOut(label=label, price=price, time=int(time.timestamp()))
             for label, price, time in record.structure
+        ],
+        indicators=[
+            IndicatorReadingOut(name=n, value=v, threshold=t, comparison=c, passed=p)
+            for n, v, t, c, p in record.indicators
         ],
     )
 
@@ -115,6 +142,51 @@ async def get_trades(
 ) -> list[TradeRecordOut]:
     records = await _service(account).get_last_n(symbol, limit)
     return [_trade_out(r) for r in records]
+
+
+@router.get(
+    "/trades/{trade_id}/decision-context",
+    response_model=DecisionContextOut,
+    summary="Get the entry chart snapshot and decision annotations for one trade",
+    description=(
+        "Returns the M5 and H1 candle snapshot captured once, at the moment this trade's "
+        "`PositionOpened` event fired, plus the zone/pattern/structure/confluence-indicator "
+        "annotations the strategy reported for it. This is a **frozen snapshot from the moment "
+        "of entry** — not live/refetched market data — so it renders identically no matter how "
+        "much later you look at it, even after the symbol's live candle history has since aged "
+        "the original bars out. Powers the 'why did the bot take this trade' chart view. Never "
+        "includes exit-time snapshots or any other AI-review-only data."
+    ),
+    responses={404: {"description": "No trade with this `trade_id` exists for this account."}},
+)
+async def get_decision_context(
+    account: AccountRuntimeDep,
+    trade_id: str = Path(description="Broker position ticket, as a string."),
+) -> DecisionContextOut:
+    record = await asyncio.to_thread(_service(account).get_trade, trade_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail=f"Trade '{trade_id}' not found")
+    return DecisionContextOut(
+        trade_id=record.id,
+        symbol=record.symbol,
+        side=record.side,
+        open_price=record.open_price,
+        open_time=int(record.open_time.timestamp()),
+        entry_candles=_candles_out(record.m5_entry_snapshot),
+        higher_tf_candles=_candles_out(record.h1_entry_snapshot),
+        zone=_zone_out(record),
+        pattern=record.pattern,
+        structure=[
+            StructurePointOut(label=label, price=price, time=int(time.timestamp()))
+            for label, price, time in record.structure
+        ],
+        indicators=[
+            IndicatorReadingOut(name=n, value=v, threshold=t, comparison=c, passed=p)
+            for n, v, t, c, p in record.indicators
+        ],
+        reason=record.reason,
+        confidence=record.confidence,
+    )
 
 
 @router.get(

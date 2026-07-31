@@ -63,6 +63,49 @@ export type DrawingToolType =
   | 'price-label'
   | 'text-annotation';
 
+/** Chart-annotation detail for one zone rectangle drawing, keyed by that
+ * drawing's id in the `DrawingManager` (see `ChartEngineController.getZoneMetaMap`)
+ * — the `Rectangle` primitive itself has no free-form metadata field, so
+ * this side map is how a click handler resolves "what indicator drew this
+ * and what does it mean" back from a hit-tested drawing id. Populated
+ * alongside `manager.addDrawing(...)` by whichever hook owns that zone type
+ * (`useIndicators.ts` for qml/snd/snd_v2, `useBacktestData.ts` for the
+ * per-trade backend zone) and cleared on the same rebuild cycle as the
+ * drawings themselves, so it never outlives the rectangle it describes. */
+export interface ZoneMeta {
+  indicator: 'qml' | 'snd' | 'snd_v2' | 'trade_zone';
+  indicatorLabel: string;
+  /** Zone subtype, e.g. "RBR"/"DBD"/"RBD"/"DBR"/"QML"/"QML_INV"/"DZ"/"SZ" —
+   * null when the source (an older backend report/trade) didn't report one. */
+  pattern: string | null;
+  kind: 'demand' | 'supply';
+  priceLow: number;
+  priceHigh: number;
+  timeStart: number; // epoch seconds UTC
+  /** Null while the zone is still open/fresh (right edge follows the latest candle). */
+  timeEnd: number | null;
+  /** 'fresh' = still valid/untouched, 'touched' = consumed by a retest/fill,
+   * 'triggered' = the per-trade backend zone, which has no fresh/touched
+   * concept of its own since a trade was, by definition, taken from it. */
+  state: 'fresh' | 'touched' | 'triggered';
+  /** Free-form extra facts worth surfacing in the tooltip but not worth a
+   * dedicated field — e.g. QML's neckline/head price, or a trade zone's
+   * originating trade reason. */
+  extra?: Record<string, string | number>;
+}
+
+/** Floating read-only popover state for a clicked zone rectangle — opened by
+ * ChartPanel's zone-click effect (`chart.subscribeClick`, same API the
+ * click-to-trade handler already uses) once `manager.hitTest(point)` resolves
+ * to a drawing id present in `ChartEngineController.getZoneMetaMap()`. */
+export interface ZoneTooltipState {
+  x: number;
+  y: number;
+  meta: ZoneMeta;
+  containerWidth: number;
+  containerHeight: number;
+}
+
 /** Multi-chart layout (split-window §): the primary ChartPanel's replay
  * session/cursor, mirrored into secondary MiniChartPanel windows so they
  * follow the same replayed period at their own timeframe. `sessionPeriod` is
@@ -147,6 +190,27 @@ export interface OrderLineStyle {
   exitLineLossColor: string;
 }
 
+// User-configurable colors for zone rectangles (Quasimodo, S&D v1/v2, the
+// per-trade backend zone), persisted globally like `OrderLineStyle` — see
+// `pickZoneColor` in chartFormat.ts, which falls back to the existing
+// hardcoded buy/sell/muted theme tokens when `customColors` is false, so
+// behavior is unchanged until a user opts in.
+export interface ZoneIndicatorColors {
+  demandColor: string;
+  supplyColor: string;
+  touchedColor: string;
+}
+
+export interface ZoneColorStyle {
+  customColors: boolean;
+  qml: ZoneIndicatorColors;
+  snd: ZoneIndicatorColors;
+  sndV2: ZoneIndicatorColors;
+  // The per-trade backend zone has no fresh/touched state of its own — a
+  // trade was, by definition, taken from it — so no `touchedColor`.
+  tradeZone: Omit<ZoneIndicatorColors, 'touchedColor'>;
+}
+
 export interface PriceLineSpec {
   key: string;
   ticket: number;
@@ -155,6 +219,9 @@ export interface PriceLineSpec {
   label: string;
   commit: (newPrice: number) => void;
   placeholder?: boolean; // no sl/tp set yet — drag (or click) this to add one
+  pnlOpenPrice?: number;
+  pnlSide?: 'buy' | 'sell';
+  pnlVolume?: number;
 }
 
 export interface EntryLineSpec {
@@ -185,6 +252,10 @@ export interface ChartEngineController {
    * main candle series and breaking out-of-order checks on live updates. */
   getWhitespaceSeries(): ISeriesApi<'Line'> | null;
   getDrawingManager(): DrawingManager | null;
+  /** Zone-rectangle metadata side map — see `ZoneMeta`'s doc comment. Same
+   * `Map` instance for the life of the chart (not recreated per render),
+   * mutated in place by whichever hook owns a given zone type. */
+  getZoneMetaMap(): Map<string, ZoneMeta>;
   /** Trade entry/exit markers (backtest/live/custom-code) — see chartMarkers.ts. */
   getSeriesMarkersPrimitive(): ISeriesMarkersPluginApi<Time> | null;
   /** Independent marker layer for the 'structure'/'qml'/'snd'/'patterns'

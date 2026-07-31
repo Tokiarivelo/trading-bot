@@ -10,10 +10,64 @@
  * `features/news/UpcomingEventsPanel.tsx`.
  */
 
-import type { TradeHistoryItem } from "@/shared/api/client";
+import { useEffect, useState } from "react";
+
+import { useActiveAccount } from "@/shared/api/account-context";
+import { getStrategyVersions, type TradeHistoryItem } from "@/shared/api/client";
+import { DecisionChartSnippet } from "@/shared/ui/DecisionChartSnippet";
 
 function formatFullTime(epochSeconds: number): string {
   return new Date(epochSeconds * 1000).toISOString().replace("T", " ").slice(0, 19) + " UTC";
+}
+
+// `strategy_version` is always written as `"{name}:v{version}"` (see
+// `trade_loop.py`'s `open_position` call) — parsed back out here to look
+// up that exact version's spec snapshot for its timeframes.
+function parseStrategyVersion(value: string | null): { name: string; version: number } | null {
+  if (value === null) return null;
+  const match = /^(.+):v(\d+)$/.exec(value);
+  if (!match) return null;
+  return { name: match[1], version: Number(match[2]) };
+}
+
+/** The entry/confirmation timeframes a trade was decided on — looked up
+ * live from the strategy version's spec snapshot rather than stored on the
+ * trade itself, since no such field exists on `TradeHistoryItem` (see
+ * `backend/src/journal/domain/models.py`). Not available for manual/API
+ * trades (no `strategy_version`) or if the lookup fails. */
+function useDecisionTimeframes(strategyVersion: string | null): {
+  entryTimeframe: string | null;
+  confirmationTimeframes: string[];
+} {
+  const accountId = useActiveAccount();
+  const [entryTimeframe, setEntryTimeframe] = useState<string | null>(null);
+  const [confirmationTimeframes, setConfirmationTimeframes] = useState<string[]>([]);
+
+  useEffect(() => {
+    setEntryTimeframe(null);
+    setConfirmationTimeframes([]);
+    const parsed = parseStrategyVersion(strategyVersion);
+    if (!accountId || !parsed) return;
+    let cancelled = false;
+    getStrategyVersions(accountId, parsed.name)
+      .then((versions) => {
+        if (cancelled) return;
+        const match = versions.find((v) => v.version === parsed.version);
+        if (match?.spec) {
+          setEntryTimeframe(match.spec.entry_timeframe);
+          setConfirmationTimeframes(match.spec.confirmation_timeframes);
+        }
+      })
+      .catch(() => {
+        // Best-effort enrichment — the rest of the "Why" modal still works
+        // without it.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [accountId, strategyVersion]);
+
+  return { entryTimeframe, confirmationTimeframes };
 }
 
 export function TradeDecisionModal({
@@ -23,6 +77,7 @@ export function TradeDecisionModal({
   trade: TradeHistoryItem;
   onClose: () => void;
 }) {
+  const { entryTimeframe, confirmationTimeframes } = useDecisionTimeframes(trade.strategy_version);
   const hasDecisionContext =
     trade.reason !== "" ||
     trade.confidence !== null ||
@@ -36,7 +91,7 @@ export function TradeDecisionModal({
       onClick={onClose}
     >
       <div
-        className="w-full max-w-md rounded-md border border-line bg-panel p-4 shadow-lg"
+        className="w-full max-w-2xl rounded-md border border-line bg-panel p-4 shadow-lg"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="mb-3 flex items-start justify-between gap-4">
@@ -54,6 +109,10 @@ export function TradeDecisionModal({
           </button>
         </div>
 
+        <div className="mb-3">
+          <DecisionChartSnippet tradeId={trade.id} />
+        </div>
+
         {!hasDecisionContext ? (
           <p className="text-sm text-ink-muted">
             Placed manually or via the API — no bot decision to explain.
@@ -68,8 +127,24 @@ export function TradeDecisionModal({
             {trade.confidence !== null && (
               <Row label="Confidence">{(trade.confidence * 100).toFixed(0)}%</Row>
             )}
+            {trade.indicators.length > 0 && (
+              <Row label="Confluence checklist">
+                <ul className="flex flex-col gap-0.5">
+                  {trade.indicators.map((ind, i) => (
+                    <li key={i} className={`text-xs ${ind.passed ? "text-ok" : "text-err"}`}>
+                      {ind.passed ? "✓" : "✗"} {ind.name}: {ind.value.toFixed(2)} {ind.comparison}{" "}
+                      {ind.threshold.toFixed(2)}
+                    </li>
+                  ))}
+                </ul>
+              </Row>
+            )}
             <Row label="Strategy">{trade.strategy_version ?? "—"}</Row>
             <Row label="Bot / skill">{trade.skill ?? "Manual"}</Row>
+            {entryTimeframe !== null && <Row label="Position taken on">{entryTimeframe}</Row>}
+            {confirmationTimeframes.length > 0 && (
+              <Row label="Decision confirmed on">{confirmationTimeframes.join(", ")}</Row>
+            )}
             {trade.pattern !== null && (
               <Row label="Confirming pattern">{trade.pattern.replace(/_/g, " ")}</Row>
             )}
