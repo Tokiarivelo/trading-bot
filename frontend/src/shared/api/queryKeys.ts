@@ -62,9 +62,28 @@ export const queryKeys = {
   analytics: {
     /** `GET /accounts/{id}/analytics/symbols` — per-symbol win-rate/profit
      * breakdown. */
-    symbols: (accountId: string | null) => ["analytics", "symbols", accountId] as const,
+    symbols: (accountId: string | null, openFrom?: number, openTo?: number) =>
+      ["analytics", "symbols", accountId, openFrom, openTo] as const,
     /** `GET /accounts/{id}/analytics/bots` — per-bot win-rate/profit
      * breakdown. */
-    bots: (accountId: string | null) => ["analytics", "bots", accountId] as const,
+    bots: (accountId: string | null, openFrom?: number, openTo?: number) =>
+      ["analytics", "bots", accountId, openFrom, openTo] as const,
+  },
+  history: {
+    /** Root key for all trade-history queries for an account — pass to
+     * invalidateQueries to invalidate all filter and page combinations at once. */
+    all: (accountId: string | null) => ["history", "trades", accountId] as const,
+    /** `GET /accounts/{id}/journal/history` — paginated, filtered trade history. */
+    trades: (accountId: string | null, filtersKey: string, page: number) =>
+      ["history", "trades", accountId, filtersKey, page] as const,
+  },
+  engine: {
+    /** `GET /accounts/{id}/engine/volatility-config` — the ATR-percentile
+     * volatility guard's on/off switch and thresholds/multipliers. Shared by
+     * `features/settings/VolatilityGuardPanel.tsx` and the chart toolbar
+     * toggle so both stay in sync via the same cache entry. */
+    volatilityConfig: (accountId: string | null) =>
+      ["engine", "volatilityConfig", accountId] as const,
   },
 } as const;
+

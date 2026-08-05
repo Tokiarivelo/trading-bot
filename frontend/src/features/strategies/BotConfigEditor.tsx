@@ -1,18 +1,21 @@
 "use client";
 
 /**
- * Full per-bot configuration editor (§6.6): risk multiplier, session
- * windows, the engine's HTF veto, and every one of this bot's strategy's
- * own tunable params (e.g. `counter_trend_penalty`) — each overridable for
- * this one bot without forking its strategy's generated code. Every field
- * is a full replacement on save (PUT .../bots/{bot_name}/config), matching
- * this repo's other bot-assignment endpoints. Rendered inline inside a bot
- * card in `SymbolAssignmentPanel` when that bot's "Configure" toggle is open.
+ * Full per-bot configuration editor (§6.6): bot name, risk multiplier,
+ * session windows, the engine's HTF veto, and every one of this bot's
+ * strategy's own tunable params (e.g. `counter_trend_penalty`) — each
+ * overridable for this one bot without forking its strategy's generated
+ * code. The name field is its own save action (PUT .../bots/{bot_name}/name)
+ * since renaming changes the bot's MT5 magic number; every other field is a
+ * full replacement on save (PUT .../bots/{bot_name}/config), matching this
+ * repo's other bot-assignment endpoints. Rendered inline inside a bot card
+ * in `SymbolAssignmentPanel` when that bot's "Configure" toggle is open.
  */
 
 import { useState } from "react";
 import {
   ApiError,
+  renameBot,
   updateBotConfig,
   type NormalSkillAssignment,
   type ParamValue,
@@ -55,8 +58,26 @@ export function BotConfigEditor({
   );
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [botNameDraft, setBotNameDraft] = useState(bot.bot_name);
+  const [renaming, setRenaming] = useState(false);
+  const [renameError, setRenameError] = useState<string | null>(null);
 
   const paramKeys = Object.keys(bot.strategy_default_params).sort();
+  const botNameDirty = botNameDraft.trim() !== "" && botNameDraft.trim() !== bot.bot_name;
+
+  async function saveRename() {
+    if (!botNameDirty) return;
+    setRenaming(true);
+    setRenameError(null);
+    try {
+      await renameBot(symbol, bot.bot_name, botNameDraft.trim());
+      onSaved();
+    } catch (e) {
+      setRenameError(e instanceof ApiError ? e.message : "failed to rename bot");
+    } finally {
+      setRenaming(false);
+    }
+  }
   const riskValid = Number.isFinite(Number(riskMultiplier)) && Number(riskMultiplier) > 0;
   const numericDraftsValid = paramKeys.every((key) => {
     const defaultValue = bot.strategy_default_params[key];
@@ -115,6 +136,28 @@ export function BotConfigEditor({
 
   return (
     <div className="mt-2 flex flex-col gap-2 rounded-lg border border-line bg-bg/50 p-2">
+      <div className="flex items-center gap-2">
+        <label className="w-20 shrink-0 text-3xs font-semibold text-ink-muted uppercase tracking-wider">
+          Bot name
+        </label>
+        <input
+          type="text"
+          value={botNameDraft}
+          onChange={(e) => setBotNameDraft(e.target.value)}
+          className="w-32 rounded border border-line bg-bg/80 px-1.5 py-0.5 text-xs text-ink focus:border-accent focus:outline-none"
+        />
+        <button
+          type="button"
+          disabled={!botNameDirty || renaming}
+          onClick={saveRename}
+          title="Renaming changes this bot's MT5 magic number — avoid renaming while it holds an open position"
+          className="rounded border border-accent px-1.5 py-0.5 text-[10px] text-accent disabled:opacity-40"
+        >
+          {renaming ? "…" : "Rename"}
+        </button>
+      </div>
+      {renameError && <p className="text-[10px] text-err">{renameError}</p>}
+
       <div className="flex items-center gap-2">
         <label className="w-20 shrink-0 text-3xs font-semibold text-ink-muted uppercase tracking-wider">
           Risk mult.

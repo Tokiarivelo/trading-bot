@@ -94,6 +94,7 @@ export function useAllPositions(options?: {
     if (needsTradeHistory) {
       queryClient.invalidateQueries({ queryKey: queryKeys.trading.openTrades(accountId) });
     }
+    queryClient.invalidateQueries({ queryKey: queryKeys.history.all(accountId) });
   }, [accountId, needsTradeHistory, queryClient]);
 
   const totalProfit = positions.reduce((sum, p) => sum + p.profit, 0);

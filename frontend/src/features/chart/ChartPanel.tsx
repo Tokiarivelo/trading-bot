@@ -52,6 +52,7 @@ import { FINER_TIMEFRAME, fetchCandlesForPeriod, TIMEFRAME_SECONDS, useCandleDat
 import { fetchShared } from './sharedFetchCache';
 import { useChartEngine } from './useChartEngine';
 import { useChartUIToggles } from './useChartUIToggles';
+import { useVolatilityGuard } from '@/features/settings/useVolatilityGuard';
 import { useDrawingTools } from './useDrawingTools';
 import { useIndicators } from './useIndicators';
 import { useOrderPopovers } from './useOrderPopovers';
@@ -257,6 +258,10 @@ export function ChartPanel({
     showDrawingToolbar,
     toggleDrawingToolbar,
   } = useChartUIToggles();
+  // Shared with `features/settings/VolatilityGuardPanel.tsx` via the same
+  // TanStack Query cache entry — toggling here or there stays in sync with
+  // no prop drilling beyond this panel.
+  const volatilityGuard = useVolatilityGuard();
   // Replay ("live session player", §F): progressively reveals the backtest
   // report's candles/indicators/trades/log up to a moving cursor instead of
   // drawing everything at once — see `visibleCandles()` below. `replayActive`
@@ -1542,7 +1547,7 @@ export function ChartPanel({
       const pnl = Math.abs(rawPnl) < 0.005 ? 0 : rawPnl;
       return `${pnl >= 0 ? '+' : ''}${pnl.toFixed(2)}$`;
     };
-    const specs = [
+    const specs: { key: string; price: number; color: string; leftLabel?: string; rightLabel?: string }[] = [
       {
         key: 'history-open',
         price: t.open_price,
@@ -1694,6 +1699,11 @@ export function ChartPanel({
     drawingTool: drawingTools.drawingTool,
     pendingAnchorCount: drawingTools.pendingAnchorCount,
     spreadPoints: chartRenderController.spreadPoints,
+    volatilityGuardEnabled: volatilityGuard.config?.enabled ?? null,
+    volatilityGuardSaving: volatilityGuard.isSaving,
+    onToggleVolatilityGuard: () => {
+      if (volatilityGuard.config) volatilityGuard.setEnabled(!volatilityGuard.config.enabled);
+    },
   };
 
   const onToolbarStateChangeRef = useRef(onToolbarStateChange);
@@ -1728,6 +1738,8 @@ export function ChartPanel({
     drawingTools.drawingTool,
     drawingTools.pendingAnchorCount,
     chartRenderController.spreadPoints,
+    volatilityGuard.config?.enabled,
+    volatilityGuard.isSaving,
   ]);
 
   const onReplayUIChangeRef = useRef(onReplayUIChange);

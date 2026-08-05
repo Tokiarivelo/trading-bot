@@ -21,7 +21,6 @@ _TIGHTEN_LOWER_IS_STRICTER = (
     "risk_per_trade_pct",
     "daily_loss_limit_pct",
     "max_open_positions",
-    "max_trades_per_day",
     "consecutive_loss_pause",
 )
 
@@ -55,6 +54,17 @@ def apply_risk_override(base: RiskCaps, override: dict) -> RiskCaps:
                 "risk override cannot loosen min_lot_fallback_enabled: global caps have it disabled"
             )
         updates["min_lot_fallback_enabled"] = value
+
+    if "max_trades_per_day_enabled" in override:
+        value = bool(override["max_trades_per_day_enabled"])
+        # Here true is the *stricter* state (blocks all new trades), so an
+        # override may only turn it on, never turn off a global true.
+        if not value and base.max_trades_per_day_enabled:
+            raise ValueError(
+                "risk override cannot loosen max_trades_per_day_enabled: "
+                "global caps have it enabled"
+            )
+        updates["max_trades_per_day_enabled"] = value
 
     if "max_risk_per_trade_pct" in override:
         value = override["max_risk_per_trade_pct"]
@@ -107,7 +117,8 @@ class RiskManager:
     def check_pretrade(
         self, open_positions_count: int, now: datetime | None = None
     ) -> RiskDecision:
-        """Caps that don't depend on lot sizing: pause state, position/trade counts."""
+        """Caps that don't depend on lot sizing: pause state, open-position
+        count, and the manual max_trades_per_day_enabled kill switch."""
         now = now or datetime.now(self._tz)
         self._roll_day_if_needed(now)
         if self._paused:
@@ -117,10 +128,10 @@ class RiskManager:
                 approved=False,
                 reason=f"max open positions reached ({self._caps.max_open_positions})",
             )
-        if self._trades_today >= self._caps.max_trades_per_day:
+        if self._caps.max_trades_per_day_enabled:
             return RiskDecision(
                 approved=False,
-                reason=f"max trades per day reached ({self._caps.max_trades_per_day})",
+                reason="daily trading disabled (max_trades_per_day_enabled)",
             )
         return RiskDecision(approved=True)
 
@@ -270,3 +281,42 @@ class RiskManager:
             enabled,
             max_risk_per_trade_pct,
         )
+
+    def set_max_trades_per_day_enabled(self, enabled: bool) -> None:
+        """Live-updates the manual daily kill switch (see `check_pretrade`)
+        on the running engine — takes effect on the very next pretrade
+        check. Not persisted to disk: a restart reverts to
+        `configs/risk.yaml`, which the human edits directly to change the
+        default (see CLAUDE.md)."""
+        self._caps = dataclasses.replace(self._caps, max_trades_per_day_enabled=enabled)
+        logger.info("risk manager: max_trades_per_day_enabled updated live — enabled=%s", enabled)
+
+    def set_core_caps(
+        self,
+        *,
+        risk_per_trade_pct: float | None = None,
+        daily_loss_limit_pct: float | None = None,
+        max_open_positions: int | None = None,
+        consecutive_loss_pause: int | None = None,
+    ) -> None:
+        """Live-updates the core sizing/circuit-breaker caps on the running
+        engine — this is the account owner adjusting their own caps through
+        the Settings UI, so unlike `apply_risk_override` (which only ever
+        *tightens* a per-account override) this can loosen or tighten
+        freely. Only a field passed here (not None) changes; every other
+        cap — including the two toggles above — stays untouched. Not
+        persisted to disk: a restart reverts to `configs/risk.yaml`, which
+        the human edits directly to change the default (see CLAUDE.md)."""
+        updates: dict = {}
+        if risk_per_trade_pct is not None:
+            updates["risk_per_trade_pct"] = risk_per_trade_pct
+        if daily_loss_limit_pct is not None:
+            updates["daily_loss_limit_pct"] = daily_loss_limit_pct
+        if max_open_positions is not None:
+            updates["max_open_positions"] = max_open_positions
+        if consecutive_loss_pause is not None:
+            updates["consecutive_loss_pause"] = consecutive_loss_pause
+        if not updates:
+            return
+        self._caps = dataclasses.replace(self._caps, **updates)
+        logger.info("risk manager: core caps updated live — %s", updates)

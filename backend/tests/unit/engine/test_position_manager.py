@@ -1,10 +1,17 @@
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
+import numpy as np
+
 from src.broker.domain.trading import ExecutionResult, OrderType, PendingOrder, Position, Side
 from src.engine.application.position_manager import PositionManager
 from src.engine.application.risk_manager import RiskManager
 from src.engine.domain.models import RiskCaps
+from src.engine.domain.volatility import (
+    VolatilityConfig,
+    VolatilityRegime,
+    latest_volatility_regime,
+)
 from src.engine.domain.zone_detection import Base, BaseKind
 from src.market_data.domain.models import Candle, SymbolInfo, Timeframe
 
@@ -12,7 +19,7 @@ CAPS = RiskCaps(
     risk_per_trade_pct=0.5,
     daily_loss_limit_pct=2.0,
     max_open_positions=5,
-    max_trades_per_day=8,
+    max_trades_per_day_enabled=False,
     consecutive_loss_pause=3,
 )
 
@@ -200,6 +207,54 @@ def _supply_base_candles() -> list[Candle]:
     bars.append(_candle(i + 1, 96.0, 96.4, 95.6, 95.9))  # base
     bars.append(_candle(i + 2, 95.9, 95.9, 91.7, 92.0))  # drop out
     return bars
+
+
+# ---- volatility guard (bot-agnostic, engine-level) --------------------------
+
+# Small atr_period/regime_lookback_bars so a short, hand-built candle series
+# (rather than hundreds of bars of real market data) is enough to exercise a
+# specific regime deterministically.
+VOLATILITY_CFG = VolatilityConfig(atr_period=3, regime_lookback_bars=10)
+
+
+def _volatility_ramp_candles(count: int, *, last_frac: float | None = None) -> list[Candle]:
+    """Widening-true-range, zero-body candles (open == close == 100.0 on
+    every bar, so `detect_bases` never finds a base here — see
+    `test_no_secure_without_any_base`'s flat-candle precedent): bar `i`'s
+    range is `0.1 + i*0.1`, so `latest_volatility_regime` ranks the most
+    recent bar's ATR against its own trailing history. `last_frac=None`
+    keeps the ramp increasing through the final bar (drives its ATR to the
+    very top of its history -> EXTREME); `last_frac=0.85` caps the final
+    bar's range at 85% of the ramp's peak, landing it in HIGH territory
+    instead (elevated, but not the outlier)."""
+    candles = []
+    for i in range(count):
+        rng = 0.1 + i * 0.1
+        if last_frac is not None and i == count - 1:
+            max_rng = 0.1 + (count - 2) * 0.1
+            rng = max_rng * last_frac
+        candles.append(_candle(i, 100.0, 100.0 + rng / 2, 100.0 - rng / 2, 100.0))
+    return candles
+
+
+def _regime_and_atr(candles: list[Candle], cfg: VolatilityConfig = VOLATILITY_CFG):
+    """Computes `latest_volatility_regime` off `candles` the same way
+    `PositionManager._detect_bases` does, so tests can assert against the
+    exact regime/ATR the production code will see for a given fixture
+    instead of hand-deriving (and risking a mismatched) expected float."""
+    highs = np.array([c.high for c in candles])
+    lows = np.array([c.low for c in candles])
+    closes = np.array([c.close for c in candles])
+    return latest_volatility_regime(
+        highs,
+        lows,
+        closes,
+        atr_period=cfg.atr_period,
+        regime_lookback_bars=cfg.regime_lookback_bars,
+        low_percentile=cfg.low_percentile,
+        high_percentile=cfg.high_percentile,
+        extreme_percentile=cfg.extreme_percentile,
+    )
 
 
 async def test_moves_sl_to_breakeven_once_risk_is_covered():
@@ -462,7 +517,7 @@ async def test_paper_pending_order_left_pending_when_risk_cap_blocks():
         risk_per_trade_pct=0.5,
         daily_loss_limit_pct=2.0,
         max_open_positions=0,
-        max_trades_per_day=8,
+        max_trades_per_day_enabled=False,
         consecutive_loss_pause=3,
     )
     order_service = FakeOrderService([], pending=[_pending_order(price=2415.0)])
@@ -518,3 +573,142 @@ async def test_risk_manager_none_skips_pending_order_handling():
 
     assert order_service.opened == []
     assert order_service.pending_cancelled == []
+
+
+# ---- volatility guard (bot-agnostic, engine-level) --------------------------
+
+
+async def test_extreme_regime_while_losing_closes_position_outright():
+    candles = _volatility_ramp_candles(45)
+    regime, _pct, _atr = _regime_and_atr(candles)
+    assert regime is VolatilityRegime.EXTREME  # sanity on the fixture
+
+    # risk = 10; bid(2395) - open(2400) = -5 <= 0 -> losing.
+    position = _position(open_price=2400.0, sl=2390.0)
+    info = replace(INFO, bid=2395.0, ask=2395.2)
+    order_service = FakeOrderService([position])
+    manager = PositionManager(
+        order_service,
+        FakeMarketData(info=info, candles=candles),
+        volatility_config=VOLATILITY_CFG,
+    )
+
+    await manager.on_candle_closed("XAUUSD")
+
+    assert order_service.closed == [1]
+    assert order_service.modified == []
+
+
+async def test_extreme_regime_while_winning_locks_in_profit_fraction():
+    candles = _volatility_ramp_candles(45)
+    regime, _pct, _atr = _regime_and_atr(candles)
+    assert regime is VolatilityRegime.EXTREME  # sanity on the fixture
+
+    # risk = 10; progress = bid(2408) - open(2400) = 8 < risk -> plain +1R
+    # breakeven does not trigger, so the profit-lock candidate wins outright:
+    # 2400 + 8 * extreme_profit_lock_r_mult(0.5) = 2404.0.
+    position = _position(open_price=2400.0, sl=2390.0)
+    info = replace(INFO, bid=2408.0, ask=2408.2)
+    order_service = FakeOrderService([position])
+    manager = PositionManager(
+        order_service,
+        FakeMarketData(info=info, candles=candles),
+        volatility_config=VOLATILITY_CFG,
+    )
+
+    await manager.on_candle_closed("XAUUSD")
+
+    assert order_service.modified == [(1, 2404.0, 2420.0)]
+    assert order_service.closed == []
+
+
+async def test_high_regime_running_profit_applies_chandelier_trailing_stop():
+    candles = _volatility_ramp_candles(45, last_frac=0.85)
+    regime, _pct, atr_value = _regime_and_atr(candles)
+    assert regime is VolatilityRegime.HIGH  # sanity on the fixture
+
+    # risk = 10; progress = bid(2415) - open(2400) = 15 >=
+    # chandelier_min_profit_r(1.0) * risk -> chandelier rule is eligible, and
+    # (favorable=2415) - chandelier_atr_mult(2.0)*atr_value beats the plain
+    # +1R breakeven candidate (2400.0).
+    position = _position(open_price=2400.0, sl=2390.0)
+    info = replace(INFO, bid=2415.0, ask=2415.2)
+    order_service = FakeOrderService([position])
+    market_data = FakeMarketData(info=info, candles=candles)
+    manager = PositionManager(order_service, market_data, volatility_config=VOLATILITY_CFG)
+
+    await manager.on_candle_closed("XAUUSD")
+
+    expected_sl = 2415.0 - VOLATILITY_CFG.chandelier_atr_mult * atr_value
+    assert order_service.modified == [(1, expected_sl, 2420.0)]
+
+    # Simulate the SL having actually been tightened to expected_sl, then
+    # price pulls back but stays above the trailed level -- the chandelier
+    # rule must not loosen it back, and no further modify_position call
+    # should happen at all.
+    order_service._positions = [replace(position, sl=expected_sl)]
+    market_data.info = replace(INFO, bid=2410.0, ask=2410.2)
+
+    await manager.on_candle_closed("XAUUSD")
+
+    assert order_service.modified == [(1, expected_sl, 2420.0)]
+
+
+async def test_disabled_volatility_guard_skips_extreme_and_high_rules():
+    # Same EXTREME-losing fixture as
+    # test_extreme_regime_while_losing_closes_position_outright, but with the
+    # live guard switched off -- volatility_config is still supplied, yet
+    # _detect_bases must no longer classify a regime at all, so _manage sees
+    # regime=None and reproduces pre-Phase-B behavior (no outright close).
+    candles = _volatility_ramp_candles(45)
+    position = _position(open_price=2400.0, sl=2390.0)
+    info = replace(INFO, bid=2395.0, ask=2395.2)
+    order_service = FakeOrderService([position])
+    manager = PositionManager(
+        order_service,
+        FakeMarketData(info=info, candles=candles),
+        volatility_config=VOLATILITY_CFG,
+    )
+    manager.set_volatility_guard_enabled(False)
+
+    await manager.on_candle_closed("XAUUSD")
+
+    assert order_service.closed == []
+    assert order_service.modified == []
+
+
+async def test_disabled_volatility_guard_skips_high_regime_chandelier_rule():
+    # Same HIGH-regime chandelier fixture as
+    # test_high_regime_running_profit_applies_chandelier_trailing_stop, but
+    # with the live guard switched off -- no chandelier trailing, and since
+    # progress(15) >= risk(10), only the plain +1R breakeven candidate
+    # (2400.0) is available among the ordinary SL-tightening rules.
+    candles = _volatility_ramp_candles(45, last_frac=0.85)
+    position = _position(open_price=2400.0, sl=2390.0)
+    info = replace(INFO, bid=2415.0, ask=2415.2)
+    order_service = FakeOrderService([position])
+    market_data = FakeMarketData(info=info, candles=candles)
+    manager = PositionManager(order_service, market_data, volatility_config=VOLATILITY_CFG)
+    manager.set_volatility_guard_enabled(False)
+
+    await manager.on_candle_closed("XAUUSD")
+
+    assert order_service.modified == [(1, 2400.0, 2420.0)]
+
+
+async def test_volatility_config_none_disables_all_volatility_rules():
+    # Regression guard: the exact EXTREME-losing fixture from
+    # test_extreme_regime_while_losing_closes_position_outright, but with no
+    # volatility_config -- must reproduce pre-Phase-B behavior exactly (no
+    # outright close; ordinary SL-tightening rules decide, and none of them
+    # fire here since progress < risk and there are no bases).
+    candles = _volatility_ramp_candles(45)
+    position = _position(open_price=2400.0, sl=2390.0)
+    info = replace(INFO, bid=2395.0, ask=2395.2)
+    order_service = FakeOrderService([position])
+    manager = PositionManager(order_service, FakeMarketData(info=info, candles=candles))
+
+    await manager.on_candle_closed("XAUUSD")
+
+    assert order_service.closed == []
+    assert order_service.modified == []

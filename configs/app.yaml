@@ -9,3 +9,8 @@ engine:
   # immediately above its own strategy's entry_timeframe (see
   # src/engine/application/trade_loop.py:_veto_timeframe) — no engine-wide
   # list to configure here anymore.
+  # How often (seconds) ReconciliationPoller diffs the broker's open
+  # positions against the journal, independent of candle closes — this is
+  # what detects a server-side SL/TP fill promptly instead of waiting up to
+  # one entry_timeframe candle (see src/broker/application/reconciliation_poller.py).
+  reconciliation_poll_interval_s: 5

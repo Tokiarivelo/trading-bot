@@ -242,6 +242,7 @@ async def lifespan(app: FastAPI):
         runtime.candle_stream.start()
         runtime.live_candle.start()
         runtime.health_monitor.start()
+        runtime.reconciliation_poller.start()
     container.news_window_service.start()
     container.activity_log_retention_service.start()
     container.wal_checkpoint_service.start()

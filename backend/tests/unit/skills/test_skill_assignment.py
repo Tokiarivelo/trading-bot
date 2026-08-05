@@ -244,6 +244,65 @@ async def test_add_bot_invalid_name_rejected(setup):
         await service.add_bot("XAUUSD", "gold_ema_pullback", bot_name="***")
 
 
+async def test_rename_bot_persists_and_hot_swaps(setup):
+    service, repository, selector, *_ = setup
+
+    skill, strategy = await service.rename_bot("XAUUSD", "breakout_v1", "my_breakout")
+
+    assert skill.name == "normal/xauusd/my_breakout"
+    assert strategy is service._strategy_registry.get("breakout_v1")
+    # Strategy/risk/sessions are preserved, not reset.
+    assert skill.strategy == "breakout_v1"
+    assert skill.risk_multiplier == 0.8
+    assert skill.sessions == (SessionWindow.parse("09:00", "12:00"),)
+
+    # Old slug is gone, new slug is on disk.
+    assert repository.get("XAUUSD", "breakout_v1") is None
+    on_disk = repository.get("XAUUSD", "my_breakout")
+    assert on_disk.name == "normal/xauusd/my_breakout"
+
+    # Live selector reflects the rename without any restart.
+    (decision,) = selector.select_all("XAUUSD")
+    assert decision.skill_name == "normal/xauusd/my_breakout"
+
+
+async def test_rename_bot_slugifies_the_new_name(setup):
+    service, repository, *_ = setup
+
+    skill, _strategy = await service.rename_bot("XAUUSD", "breakout_v1", "My Breakout Bot!")
+
+    assert skill.name == "normal/xauusd/my_breakout_bot"
+    assert repository.get("XAUUSD", "my_breakout_bot") is not None
+
+
+async def test_rename_bot_to_same_slug_is_a_no_op(setup):
+    service, repository, *_ = setup
+
+    skill, _strategy = await service.rename_bot("XAUUSD", "breakout_v1", "breakout_v1")
+
+    assert skill.name == "normal/xauusd/breakout_v1"
+    assert repository.get("XAUUSD", "breakout_v1") is not None
+
+
+async def test_rename_bot_unknown_bot_rejected(setup):
+    service, *_ = setup
+    with pytest.raises(UnknownBotError):
+        await service.rename_bot("XAUUSD", "does_not_exist", "new_name")
+
+
+async def test_rename_bot_invalid_name_rejected(setup):
+    service, *_ = setup
+    with pytest.raises(InvalidBotNameError):
+        await service.rename_bot("XAUUSD", "breakout_v1", "***")
+
+
+async def test_rename_bot_duplicate_name_rejected(setup):
+    service, *_ = setup
+    await service.add_bot("XAUUSD", "mean_reversion_v1")
+    with pytest.raises(DuplicateBotError):
+        await service.rename_bot("XAUUSD", "breakout_v1", "mean_reversion_v1")
+
+
 async def test_remove_bot_stops_it_without_touching_others(setup):
     service, repository, selector, *_ = setup
     await service.add_bot("XAUUSD", "mean_reversion_v1")

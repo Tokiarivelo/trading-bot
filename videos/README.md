@@ -6,9 +6,12 @@ This folder contains high-definition recorded video walkthroughs of the **AI Tra
 
 ## 📁 Repository Quick Links
 
-* 📄 **Marketing Ad Copy & Video Storyboard (English & Français):** [`MARKETING_AD_SCENARIOS.md`](../MARKETING_AD_SCENARIOS.md)
-* 🛠️ **Automated Playwright Recording Script:** [`scripts/record_demo_tour.py`](../scripts/record_demo_tour.py)
-* 🎥 **Generated MP4 Advertisement Video (~15.5 MB):** [`demo_tour/AI_Trading_Bot_Platform_Walkthrough_90s.mp4`](./demo_tour/AI_Trading_Bot_Platform_Walkthrough_90s.mp4)
+* 📄 **Marketing Ad Copy & All-Pages Storyboard (English & Français):** [`MARKETING_AD_SCENARIOS.md`](../MARKETING_AD_SCENARIOS.md)
+* 📄 **Chart Features Guide & French Subtitle Scenario (Français):** [`CHART_WORKFLOW_SCENARIO_FR.md`](../CHART_WORKFLOW_SCENARIO_FR.md)
+* 🛠️ **All-Pages Platform Walkthrough Recording Script:** [`scripts/record_demo_tour.py`](../scripts/record_demo_tour.py)
+* 🛠️ **Chart Features & French Subtitles Recording Script:** [`scripts/record_chart_features.py`](../scripts/record_chart_features.py)
+* 🎥 **Generated All-Pages MP4 Advertisement Video (~15.5 MB):** [`demo_tour/AI_Trading_Bot_Platform_Walkthrough_90s.mp4`](./demo_tour/AI_Trading_Bot_Platform_Walkthrough_90s.mp4)
+* 🎥 **Generated Chart Features French MP4 Video:** [`demo_tour/AI_Trading_Bot_Chart_Features_FR.mp4`](./demo_tour/AI_Trading_Bot_Chart_Features_FR.mp4)
 
 ---
 

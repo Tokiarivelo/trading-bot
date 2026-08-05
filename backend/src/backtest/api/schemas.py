@@ -166,8 +166,12 @@ class BacktestReportSummaryOut(BaseModel):
     max_open_positions: int = Field(
         default=100, description="Circuit breaker: cap on simultaneous positions for this run."
     )
-    max_trades_per_day: int = Field(
-        default=8, description="Circuit breaker: cap on entries per trading day for this run."
+    max_trades_per_day_enabled: bool = Field(
+        default=False,
+        description="Manual daily kill switch active for this run — not a count. True means "
+        "every new trade was rejected for the rest of the trading day once flipped on; false "
+        "means entries were unlimited. Older report files predating this field default to "
+        "false.",
     )
     consecutive_loss_pause: int = Field(
         default=10,

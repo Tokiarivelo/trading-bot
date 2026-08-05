@@ -28,6 +28,7 @@ from src.engine.application.position_manager import PositionManager
 from src.engine.application.risk_manager import RiskManager
 from src.engine.application.trade_loop import TradeEngine
 from src.engine.domain.models import RiskCaps
+from src.engine.domain.volatility import VolatilityConfig
 from src.journal.adapters.market_context import CandleRepositoryMarketContext
 from src.journal.adapters.repository import JournalRepository
 from src.journal.api.routes import router as journal_router
@@ -65,7 +66,7 @@ RISK_CAPS = RiskCaps(
     risk_per_trade_pct=0.5,
     daily_loss_limit_pct=2.0,
     max_open_positions=2,
-    max_trades_per_day=8,
+    max_trades_per_day_enabled=False,
     consecutive_loss_pause=5,
 )
 
@@ -222,7 +223,10 @@ class ContainerForTest:
 
         risk_manager = RiskManager(caps=RISK_CAPS, timezone="UTC")
         self.risk_manager = risk_manager
-        position_manager = PositionManager(self.order_service, self.market_data)
+        position_manager = PositionManager(
+            self.order_service, self.market_data, volatility_config=VolatilityConfig(atr_period=30)
+        )
+        self.position_manager = position_manager
         strategy_registry = StrategyRegistry()
         strategy_registry.register("breakout_v1", BreakoutV1())
         strategy_registry.register("m1_probe", M1ScalpProbe())
@@ -254,6 +258,15 @@ class ContainerForTest:
             skill_selector=skill_selector,
             strategy_source=strategy_registry,
             entry_timeframe="M5",
+            # atr_period=30 exceeds the M5 fixture's 21 bars (see
+            # make_fake_gateway's docstring) so `latest_volatility_regime`
+            # takes its "insufficient history" NORMAL fallback here, the same
+            # way `mtf_confirm` already no-ops on the other, shorter
+            # timeframes — this suite isn't exercising the volatility guard
+            # (see tests/unit/engine/test_trade_loop.py for that), and a
+            # 21-bar flat-range-then-breakout fixture is naturally read as an
+            # EXTREME volatility spike, which would block every entry here.
+            volatility_config=VolatilityConfig(atr_period=30),
             context_bars=30,
         )
         self.event_bus.subscribe(CandleClosed, self.trade_engine.on_candle_closed)
@@ -390,6 +403,96 @@ async def test_update_min_lot_fallback_takes_effect_live(api):
 
     again = (await api.get("/accounts/default/engine/risk-caps")).json()
     assert again["min_lot_fallback_enabled"] is True
+
+
+async def test_update_max_trades_per_day_enabled_takes_effect_live(api):
+    assert RISK_CAPS.max_trades_per_day_enabled is False
+
+    updated = await api.put(
+        "/accounts/default/engine/risk-caps/max-trades-per-day-enabled",
+        json={"enabled": True},
+    )
+    assert updated.status_code == 200
+    body = updated.json()
+    assert body["max_trades_per_day_enabled"] is True
+    # Every other cap is untouched by the live update.
+    assert body["risk_per_trade_pct"] == RISK_CAPS.risk_per_trade_pct
+    assert body["max_open_positions"] == RISK_CAPS.max_open_positions
+
+    # The running RiskManager (not just the API's echo) actually changed,
+    # and it now rejects the very next pretrade check.
+    risk_manager = api.container.risk_manager
+    assert risk_manager.caps.max_trades_per_day_enabled is True
+    decision = risk_manager.check_pretrade(open_positions_count=0)
+    assert not decision.approved
+    assert "max_trades_per_day_enabled" in decision.reason
+
+    disabled = await api.put(
+        "/accounts/default/engine/risk-caps/max-trades-per-day-enabled",
+        json={"enabled": False},
+    )
+    assert disabled.json()["max_trades_per_day_enabled"] is False
+
+
+async def test_update_core_risk_caps_partial_update_takes_effect_live(api):
+    updated = await api.put(
+        "/accounts/default/engine/risk-caps/core",
+        json={"risk_per_trade_pct": 1.5, "max_open_positions": 3},
+    )
+    assert updated.status_code == 200
+    body = updated.json()
+    assert body["risk_per_trade_pct"] == 1.5
+    assert body["max_open_positions"] == 3
+    # Fields not sent are untouched.
+    assert body["daily_loss_limit_pct"] == RISK_CAPS.daily_loss_limit_pct
+    assert body["consecutive_loss_pause"] == RISK_CAPS.consecutive_loss_pause
+
+    # The running RiskManager (not just the API's echo) actually changed.
+    risk_manager = api.container.risk_manager
+    assert risk_manager.caps.risk_per_trade_pct == 1.5
+    assert risk_manager.caps.max_open_positions == 3
+
+    # Free to loosen too — not restricted to tighten-only like apply_risk_override.
+    loosened = await api.put(
+        "/accounts/default/engine/risk-caps/core",
+        json={"risk_per_trade_pct": 5.0, "max_open_positions": 50},
+    )
+    assert loosened.json()["risk_per_trade_pct"] == 5.0
+    assert loosened.json()["max_open_positions"] == 50
+
+
+async def test_get_volatility_config_reflects_configured_values(api):
+    body = (await api.get("/accounts/default/engine/volatility-config")).json()
+    assert body["atr_period"] == 30
+    assert body["enabled"] is True
+
+
+async def test_update_volatility_guard_enabled_takes_effect_live_on_both_components(api):
+    updated = await api.put(
+        "/accounts/default/engine/volatility-config/enabled",
+        json={"enabled": False},
+    )
+    assert updated.status_code == 200
+    body = updated.json()
+    assert body["enabled"] is False
+    # Every other field is untouched by the live update.
+    assert body["atr_period"] == 30
+
+    # The running TradeEngine and PositionManager (not just the API's echo)
+    # both actually changed.
+    assert api.container.trade_engine.volatility_guard_enabled is False
+    assert api.container.position_manager._volatility_guard_enabled is False
+
+    again = (await api.get("/accounts/default/engine/volatility-config")).json()
+    assert again["enabled"] is False
+
+    re_enabled = await api.put(
+        "/accounts/default/engine/volatility-config/enabled",
+        json={"enabled": True},
+    )
+    assert re_enabled.json()["enabled"] is True
+    assert api.container.trade_engine.volatility_guard_enabled is True
+    assert api.container.position_manager._volatility_guard_enabled is True
 
 
 async def test_engine_does_not_reenter_once_max_open_positions_reached(api):

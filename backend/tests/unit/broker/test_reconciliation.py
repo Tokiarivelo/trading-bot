@@ -193,6 +193,83 @@ async def test_reconcile_pending_fill_falls_back_to_side_and_volume_match(journa
     assert published[0].position_id == "9"
 
 
+async def test_reconcile_all_does_not_republish_a_trade_already_closed_in_the_journal(journal):
+    # Simulates the real wiring (container.py: event_bus.subscribe(PositionClosed,
+    # trade_journal.on_position_closed)) so the journal row actually gets a
+    # close_time after the first reconciliation pass.
+    await journal.on_position_opened(
+        PositionOpened(
+            symbol="XAUUSD",
+            position_id="1",
+            side="buy",
+            volume=0.1,
+            price=2400.0,
+            sl=2390.0,
+            tp=2420.0,
+            spread_points=25,
+        )
+    )
+    close_info = ClosedPositionInfo(
+        symbol="XAUUSD", price=2390.0, time=datetime.now(UTC), profit=-10.0
+    )
+    broker = FakeBroker(open_positions=[], close_info={1: close_info})
+    event_bus = EventBus()
+    published: list[PositionClosed] = []
+
+    async def on_closed(event: PositionClosed) -> None:
+        published.append(event)
+        await journal.on_position_closed(event)
+
+    event_bus.subscribe(PositionClosed, on_closed)
+    reconciliation = ReconciliationService(broker=broker, journal=journal, event_bus=event_bus)
+
+    # Two poll ticks in a row (as ReconciliationPoller would run), same
+    # vanished ticket still absent from the broker's open-position list.
+    await reconciliation.reconcile_all()
+    await reconciliation.reconcile_all()
+
+    assert len(published) == 1
+
+
+async def test_reconcile_vanished_does_not_republish_after_reconcile_all_already_closed_it(
+    journal,
+):
+    # Cross-trigger race: the fast poller's reconcile_all() and
+    # PositionManager's M5-gated reconcile_vanished() both observing the
+    # same vanished ticket must not double-publish PositionClosed (that
+    # would double-count P&L in the risk manager's circuit breakers).
+    await journal.on_position_opened(
+        PositionOpened(
+            symbol="XAUUSD",
+            position_id="1",
+            side="buy",
+            volume=0.1,
+            price=2400.0,
+            sl=2390.0,
+            tp=2420.0,
+            spread_points=25,
+        )
+    )
+    close_info = ClosedPositionInfo(
+        symbol="XAUUSD", price=2390.0, time=datetime.now(UTC), profit=-10.0
+    )
+    broker = FakeBroker(open_positions=[], close_info={1: close_info})
+    event_bus = EventBus()
+    published: list[PositionClosed] = []
+
+    async def on_closed(event: PositionClosed) -> None:
+        published.append(event)
+        await journal.on_position_closed(event)
+
+    event_bus.subscribe(PositionClosed, on_closed)
+    reconciliation = ReconciliationService(broker=broker, journal=journal, event_bus=event_bus)
+
+    await reconciliation.reconcile_all()
+    await reconciliation.reconcile_vanished("XAUUSD", {1})
+
+    assert len(published) == 1
+
+
 async def test_reconcile_pending_fill_returns_false_when_no_match(journal):
     broker = FakeBroker(open_positions=[], close_info={})
     event_bus = EventBus()

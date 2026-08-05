@@ -15,6 +15,10 @@ export function useAnalyticsExport(
   filteredBots: BotAnalytics[],
   activeSymbolFilter: string[],
   activeBotFilter: string[],
+  dateFrom: string = "",
+  dateTo: string = "",
+  openFrom?: number,
+  openTo?: number,
 ) {
   const accountId = useActiveAccount();
   const [exporting, setExporting] = useState(false);
@@ -32,6 +36,10 @@ export function useAnalyticsExport(
           filteredBots,
           activeSymbolFilter,
           activeBotFilter,
+          dateFrom,
+          dateTo,
+          openFrom,
+          openTo,
         );
         const stamp = new Date().toISOString().slice(0, 10);
         if (format === "json") {
@@ -45,7 +53,7 @@ export function useAnalyticsExport(
         setExporting(false);
       }
     },
-    [accountId, filteredSymbols, filteredBots, activeSymbolFilter, activeBotFilter],
+    [accountId, filteredSymbols, filteredBots, activeSymbolFilter, activeBotFilter, dateFrom, dateTo, openFrom, openTo],
   );
 
   return {

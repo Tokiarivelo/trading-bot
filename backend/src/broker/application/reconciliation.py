@@ -4,19 +4,26 @@ that happened while the backend was down — and republishes `PositionClosed`
 so the journal, risk-manager circuit breakers, and 10-trade review trigger
 all see it exactly as if `OrderService.close_position` had been called.
 
-Two entry points:
-  - `reconcile_all()`: startup/reconnect — diffs the journal's persisted
-    open trades against the broker's current open positions, across all
-    symbols. Catches closes that happened while the backend was completely
-    down.
+Three entry points:
+  - `reconcile_all()`: startup/reconnect, and now also `ReconciliationPoller`'s
+    fast steady-state poll (every few seconds, independent of candle
+    cadence — see `reconciliation_poller.py`) — diffs the journal's
+    persisted open trades against the broker's current open positions,
+    across all symbols. Catches closes that happened while the backend was
+    completely down, and is what makes a live SL/TP fill show up in trade
+    history within seconds instead of waiting on the next M5 candle.
   - `reconcile_vanished()`: mid-session — `PositionManager.on_candle_closed`
     already knows exactly which tickets disappeared between two M5 closes;
-    this just resolves and republishes them. Catches a live SL/TP fill
-    during normal operation, which nothing else in the system detects.
+    this just resolves and republishes them. Kept as a belt-and-suspenders
+    fallback alongside the poller above (e.g. if the poller task ever dies).
+  - Both funnel through `_close_from_history`, which re-checks the journal
+    immediately before publishing so the two triggers racing each other
+    never double-publish `PositionClosed` for the same ticket.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from src.broker.domain.account import BrokerUnavailable
@@ -120,6 +127,23 @@ class ReconciliationService:
         return True
 
     async def _close_from_history(self, symbol: str, ticket_id: str) -> None:
+        # Idempotency guard: `reconcile_vanished` (M5-candle-gated, per
+        # symbol) and `reconcile_all` (fast periodic poll, all symbols —
+        # see `ReconciliationPoller`) can both observe the same vanished
+        # ticket before either one's `PositionClosed` publish lands in the
+        # journal. Re-publishing for an already-closed trade would double
+        # `risk_manager.record_trade_closed` (double-counts P&L into the
+        # daily-loss/consecutive-loss breakers) and could double-trigger the
+        # 10-trade AI review, so re-check the journal immediately before
+        # publishing rather than trusting the caller's vanished-ticket diff.
+        existing = await asyncio.to_thread(self._journal.get_trade, ticket_id)
+        if existing is not None and not existing.is_open:
+            logger.debug(
+                "reconciliation: ticket=%s symbol=%s already closed in journal, skipping",
+                ticket_id,
+                symbol,
+            )
+            return
         info = await self._broker.get_close_info(int(ticket_id))
         if info is None:
             logger.warning(

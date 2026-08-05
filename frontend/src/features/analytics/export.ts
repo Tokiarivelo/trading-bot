@@ -9,12 +9,19 @@ import {
 // page through it so a bot with a long trade history still exports in full.
 const EXPORT_PAGE_SIZE = 500;
 
-async function fetchAllTradesForSkill(accountId: string, skill: string): Promise<TradeHistoryItem[]> {
+async function fetchAllTradesForSkill(
+  accountId: string,
+  skill: string,
+  openFrom?: number,
+  openTo?: number,
+): Promise<TradeHistoryItem[]> {
   const items: TradeHistoryItem[] = [];
   let offset = 0;
   for (;;) {
     const page = await getTradeHistory(accountId, {
       skill,
+      open_from: openFrom,
+      open_to: openTo,
       order_by: "open_time",
       order_dir: "asc",
       limit: EXPORT_PAGE_SIZE,
@@ -38,7 +45,7 @@ export interface AnalyticsExportBot extends BotAnalytics {
 export interface AnalyticsExportPayload {
   generated_at: string;
   account_id: string;
-  filters: { symbols: string[]; bots: string[] };
+  filters: { symbols: string[]; bots: string[]; date_from?: string; date_to?: string };
   symbols: SymbolAnalytics[];
   bots: AnalyticsExportBot[];
 }
@@ -53,17 +60,28 @@ export async function buildAnalyticsExport(
   filteredBots: BotAnalytics[],
   activeSymbolFilter: string[],
   activeBotFilter: string[],
+  dateFrom: string = "",
+  dateTo: string = "",
+  openFrom?: number,
+  openTo?: number,
 ): Promise<AnalyticsExportPayload> {
   const bots = await Promise.all(
     filteredBots.map(async (bot) => ({
       ...bot,
-      trades: await fetchAllTradesForSkill(accountId, bot.skill),
+      trades: await fetchAllTradesForSkill(accountId, bot.skill, openFrom, openTo),
     })),
   );
+  const filters: AnalyticsExportPayload["filters"] = {
+    symbols: activeSymbolFilter,
+    bots: activeBotFilter,
+  };
+  if (dateFrom) filters.date_from = dateFrom;
+  if (dateTo) filters.date_to = dateTo;
+
   return {
     generated_at: new Date().toISOString(),
     account_id: accountId,
-    filters: { symbols: activeSymbolFilter, bots: activeBotFilter },
+    filters,
     symbols: filteredSymbols,
     bots,
   };

@@ -14,6 +14,8 @@ import {
   PenTool,
   RotateCcw,
   Settings,
+  Shield,
+  ShieldOff,
   Sliders,
   Square,
 } from 'lucide-react';
@@ -92,6 +94,13 @@ export interface ChartToolbarProps {
   // Split-window controls (when rendered as master toolbar in MultiChartLayout)
   windowCount?: number;
   onSelectWindowCount?: (count: number) => void;
+
+  /** Live on/off switch for the ATR-percentile volatility guard, shared
+   * state with `features/settings/VolatilityGuardPanel.tsx` via TanStack
+   * Query — `null` while the config is still loading. */
+  volatilityGuardEnabled: boolean | null;
+  volatilityGuardSaving: boolean;
+  onToggleVolatilityGuard: () => void;
 }
 
 /** Top toolbar row of the chart panel: symbol tag, timeframe pills/dropdown,
@@ -149,6 +158,9 @@ export const ChartToolbar = memo(function ChartToolbar({
   spreadPoints,
   windowCount,
   onSelectWindowCount,
+  volatilityGuardEnabled,
+  volatilityGuardSaving,
+  onToggleVolatilityGuard,
 }: ChartToolbarProps) {
   return (
     <header className='flex items-center justify-between flex-wrap gap-2 border-b border-line bg-panel/90 px-3 py-1.5 backdrop-blur-sm z-20'>
@@ -510,6 +522,24 @@ export const ChartToolbar = memo(function ChartToolbar({
             </div>
           )}
         </div>
+
+        {/* Volatility Guard Toggle */}
+        {volatilityGuardEnabled !== null && (
+          <button
+            type='button'
+            disabled={volatilityGuardSaving}
+            className={`flex cursor-pointer items-center gap-1.5 rounded-md border px-2.5 py-1.5 text-xs font-medium transition-all disabled:opacity-60 ${
+              volatilityGuardEnabled
+                ? 'border-accent/40 bg-accent/10 text-accent'
+                : 'border-line bg-bg/70 text-ink-muted hover:border-line/80 hover:text-ink'
+            }`}
+            onClick={onToggleVolatilityGuard}
+            title='Live on/off switch for the ATR-percentile volatility guard (scales bot SL/TP and can force-close/trail positions in high volatility)'
+          >
+            {volatilityGuardEnabled ? <Shield size={13} /> : <ShieldOff size={13} />}
+            <span>Volatility guard: {volatilityGuardSaving ? '…' : volatilityGuardEnabled ? 'ON' : 'OFF'}</span>
+          </button>
+        )}
 
         {/* Session Replay Button */}
         {!backtestReportId && (

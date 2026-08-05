@@ -438,15 +438,32 @@ export interface BotAnalytics {
   equity_curve: BotEquityPoint[];
 }
 
+export interface AnalyticsDateFilters {
+  open_from?: number; // epoch seconds UTC
+  open_to?: number; // epoch seconds UTC
+}
+
+function toAnalyticsQs(filters: AnalyticsDateFilters = {}): string {
+  const params = new URLSearchParams();
+  if (filters.open_from !== undefined && !isNaN(filters.open_from)) {
+    params.set("open_from", String(filters.open_from));
+  }
+  if (filters.open_to !== undefined && !isNaN(filters.open_to)) {
+    params.set("open_to", String(filters.open_to));
+  }
+  const qs = params.toString();
+  return qs ? `?${qs}` : "";
+}
+
 /** Per-symbol aggregate stats (any bot, or manual) — sorted by total_profit
  * descending. Powers the analytics page's symbol comparison table. */
-export const getSymbolAnalytics = (accountId: string) =>
-  api.get<SymbolAnalytics[]>(acctPath(accountId, "/journal/analytics/symbols"));
+export const getSymbolAnalytics = (accountId: string, filters?: AnalyticsDateFilters) =>
+  api.get<SymbolAnalytics[]>(acctPath(accountId, `/journal/analytics/symbols${toAnalyticsQs(filters)}`));
 
 /** Per-bot aggregate stats plus equity curves — sorted by total_profit
  * descending. Trades with no `skill` (manual/API) are excluded. */
-export const getBotAnalytics = (accountId: string) =>
-  api.get<BotAnalytics[]>(acctPath(accountId, "/journal/analytics/bots"));
+export const getBotAnalytics = (accountId: string, filters?: AnalyticsDateFilters) =>
+  api.get<BotAnalytics[]>(acctPath(accountId, `/journal/analytics/bots${toAnalyticsQs(filters)}`));
 
 // ── Activity log (persisted "what is the bot doing and why") ───────────────
 
@@ -609,7 +626,9 @@ export interface BacktestReportSummary {
   risk_per_trade_pct: number;
   daily_loss_limit_pct: number;
   max_open_positions: number;
-  max_trades_per_day: number;
+  /** Manual daily kill switch for this run, not a count: true blocked every
+   * new trade for the rest of the trading day once flipped on. */
+  max_trades_per_day_enabled: boolean;
   consecutive_loss_pause: number;
   min_lot_fallback_enabled: boolean;
   max_risk_per_trade_pct: number | null;
@@ -1137,6 +1156,18 @@ export const updateBotAssignment = (symbol: string, botName: string, strategyNam
     { strategy_name: strategyName },
   );
 
+/** Renames `botName` on `symbol` in place, keeping its strategy, risk_multiplier,
+ * sessions, and param/htf_veto overrides — hot-swaps the live SkillSelector, no
+ * restart needed. Changes this bot's MT5 magic number (derived from the full skill
+ * name), so any position the broker already has open under the old name will no
+ * longer be recognized as this bot's — avoid renaming a bot that holds an open
+ * position. 409 if `newBotName` (slugified) is already taken on this symbol. */
+export const renameBot = (symbol: string, botName: string, newBotName: string) =>
+  api.put<NormalSkillAssignment>(
+    `/skills/normal/${encodeURIComponent(symbol)}/bots/${encodeURIComponent(botName)}/name`,
+    { new_bot_name: newBotName },
+  );
+
 /** Replaces `botName`'s risk_multiplier, sessions, and per-bot strategy
  * param/htf_veto overrides in one call — every field is a full replacement,
  * not a partial patch. Doesn't change which strategy family the bot trades
@@ -1274,7 +1305,9 @@ export interface RiskCaps {
   risk_per_trade_pct: number;
   daily_loss_limit_pct: number;
   max_open_positions: number;
-  max_trades_per_day: number;
+  /** Manual daily kill switch, not a count: true blocks every new trade for
+   * the rest of the trading day; false leaves trade count today unlimited. */
+  max_trades_per_day_enabled: boolean;
   consecutive_loss_pause: number;
   /** When true, a balance too small for risk_per_trade_pct to reach the broker's
    * minimum lot trades that minimum lot anyway, capped by max_risk_per_trade_pct. */
@@ -1294,6 +1327,58 @@ export const putMinLotFallback = (
   api.put<RiskCaps>(acctPath(accountId, "/engine/risk-caps/min-lot-fallback"), {
     enabled,
     max_risk_per_trade_pct: maxRiskPerTradePct,
+  });
+/** Live-updates the daily trading kill switch on the running engine. Not
+ * persisted — a backend restart reverts to configs/risk.yaml. */
+export const putMaxTradesPerDayEnabled = (accountId: string, enabled: boolean) =>
+  api.put<RiskCaps>(acctPath(accountId, "/engine/risk-caps/max-trades-per-day-enabled"), {
+    enabled,
+  });
+
+export interface CoreRiskCapsUpdate {
+  risk_per_trade_pct?: number;
+  daily_loss_limit_pct?: number;
+  max_open_positions?: number;
+  consecutive_loss_pause?: number;
+}
+
+/** Live-updates any of the core sizing/circuit-breaker caps on the running
+ * engine — omitted fields keep their current value. Not persisted — a
+ * backend restart reverts to configs/risk.yaml. Free to loosen or tighten,
+ * unlike a per-account risk_override_file. */
+export const putCoreRiskCaps = (accountId: string, update: CoreRiskCapsUpdate) =>
+  api.put<RiskCaps>(acctPath(accountId, "/engine/risk-caps/core"), update);
+
+/** ATR-percentile-based volatility regime classifier that scales bots' SL/TP
+ * and can force-close/trail positions in high volatility. */
+export interface VolatilityConfig {
+  atr_period: number;
+  regime_lookback_bars: number;
+  low_percentile: number;
+  high_percentile: number;
+  extreme_percentile: number;
+  sl_multiplier_low: number;
+  sl_multiplier_normal: number;
+  sl_multiplier_high: number;
+  tp_multiplier_low: number;
+  tp_multiplier_normal: number;
+  tp_multiplier_high: number;
+  extreme_close_if_losing: boolean;
+  extreme_profit_lock_r_mult: number;
+  chandelier_atr_mult: number;
+  chandelier_min_profit_r: number;
+  /** Live on/off switch for the whole volatility guard. */
+  enabled: boolean;
+}
+
+export const getVolatilityConfig = (accountId: string) =>
+  api.get<VolatilityConfig>(acctPath(accountId, "/engine/volatility-config"));
+/** Live-updates the volatility guard on/off switch on the running engine.
+ * Not persisted — a backend restart reverts to configs/volatility.yaml
+ * (default: enabled). */
+export const putVolatilityGuardEnabled = (accountId: string, enabled: boolean) =>
+  api.put<VolatilityConfig>(acctPath(accountId, "/engine/volatility-config/enabled"), {
+    enabled,
   });
 
 // ── Broker: manual trading (chart buttons, click-to-trade, draggable SL/TP) ─

@@ -32,6 +32,11 @@ from src.engine.application.mtf_confirm import confirm
 from src.engine.application.position_manager import PositionManager
 from src.engine.application.risk_manager import RiskManager
 from src.engine.domain.models import EngineStatus
+from src.engine.domain.volatility import (
+    VolatilityConfig,
+    VolatilityRegime,
+    latest_volatility_regime,
+)
 from src.engine.ports.strategy_source import StrategySourcePort
 from src.market_data.domain.models import Candle, MarketDataUnavailable, SymbolInfo, Timeframe
 from src.market_data.ports.market_data import MarketDataPort
@@ -93,6 +98,7 @@ class TradeEngine:
         skill_selector: SkillSelectorPort,
         strategy_source: StrategySourcePort,
         entry_timeframe: str,
+        volatility_config: VolatilityConfig,
         event_bus: EventBus | None = None,
         enabled: bool = True,
         context_bars: int = DEFAULT_CONTEXT_BARS,
@@ -109,6 +115,8 @@ class TradeEngine:
         self._skill_selector = skill_selector
         self._strategy_source = strategy_source
         self._entry_timeframe = entry_timeframe
+        self._volatility_config = volatility_config
+        self._volatility_guard_enabled = True
         self._event_bus = event_bus
         self._enabled = enabled
         self._context_bars = context_bars
@@ -122,6 +130,26 @@ class TradeEngine:
     @property
     def status(self) -> EngineStatus:
         return replace(self._risk_manager.status, enabled=self._enabled)
+
+    @property
+    def volatility_config(self) -> VolatilityConfig:
+        return self._volatility_config
+
+    @property
+    def volatility_guard_enabled(self) -> bool:
+        return self._volatility_guard_enabled
+
+    def set_volatility_guard_enabled(self, enabled: bool) -> None:
+        """Live-updates whether the volatility guard (EXTREME-regime entry
+        block + SL/TP regime scaling here in `_enter_for_bot`, plus the
+        mirrored EXTREME/HIGH position-management rules in
+        `PositionManager`) is active — takes effect on the very next entry
+        decision. When `False`, entries behave exactly as if
+        `volatility_config` didn't exist (`sl_mult`/`tp_mult` both 1.0, no
+        EXTREME check). Not persisted: a backend restart reverts to
+        `configs/volatility.yaml` (enabled by default)."""
+        self._volatility_guard_enabled = enabled
+        logger.info("trade engine: volatility guard enabled=%s", enabled)
 
     async def on_candle_closed(self, event: CandleClosed) -> None:
         if event.timeframe == self._entry_timeframe:
@@ -355,6 +383,57 @@ class TradeEngine:
             logger.info("ENTRY SKIPPED (no account connected): %s", symbol)
             return balance
 
+        # Volatility guard (bot-agnostic, engine-level): classified off this
+        # bot's own entry timeframe so an M1 scalp bot and an M15 swing bot
+        # on the same symbol each react to their own candle's regime, not a
+        # shared engine-wide one. Computed once for the whole `signals`
+        # tuple (not per-signal) since an EXTREME regime blocks the entire
+        # entry, not individual tiered TPs. Skipped entirely when the live
+        # on/off switch (`set_volatility_guard_enabled`) is off — entries
+        # then behave exactly as if `volatility_config` didn't exist.
+        if self._volatility_guard_enabled:
+            entry_frame = ctx.candles.get(strategy.spec.entry_timeframe)
+            if entry_frame is not None and not entry_frame.empty:
+                regime, percentile, _atr_value = latest_volatility_regime(
+                    entry_frame["high"].to_numpy(),
+                    entry_frame["low"].to_numpy(),
+                    entry_frame["close"].to_numpy(),
+                    atr_period=self._volatility_config.atr_period,
+                    regime_lookback_bars=self._volatility_config.regime_lookback_bars,
+                    low_percentile=self._volatility_config.low_percentile,
+                    high_percentile=self._volatility_config.high_percentile,
+                    extreme_percentile=self._volatility_config.extreme_percentile,
+                )
+            else:
+                regime, percentile = VolatilityRegime.NORMAL, float("nan")
+
+            if regime is VolatilityRegime.EXTREME:
+                logger.info(
+                    "ENTRY BLOCKED (volatility guard): %s %s [%s] — regime=EXTREME percentile=%.1f",
+                    symbol,
+                    first_signal.direction.value,
+                    decision.skill_name,
+                    percentile,
+                )
+                return balance
+
+            sl_mult, tp_mult = {
+                VolatilityRegime.LOW: (
+                    self._volatility_config.sl_multiplier_low,
+                    self._volatility_config.tp_multiplier_low,
+                ),
+                VolatilityRegime.NORMAL: (
+                    self._volatility_config.sl_multiplier_normal,
+                    self._volatility_config.tp_multiplier_normal,
+                ),
+                VolatilityRegime.HIGH: (
+                    self._volatility_config.sl_multiplier_high,
+                    self._volatility_config.tp_multiplier_high,
+                ),
+            }[regime]
+        else:
+            sl_mult, tp_mult = 1.0, 1.0
+
         # Split risk across multiple targets so total risk per trade setup remains aligned with user config
         pos_risk_multiplier = decision.risk_multiplier / len(signals)
 
@@ -366,8 +445,8 @@ class TradeEngine:
             side = Side(signal.direction.value)
             reference_price = info.ask if side is Side.BUY else info.bid
             sign = 1 if side is Side.BUY else -1
-            sl_price = reference_price - sign * signal.sl_points
-            tp_price = reference_price + sign * signal.tp_points
+            sl_price = reference_price - sign * signal.sl_points * sl_mult
+            tp_price = reference_price + sign * signal.tp_points * tp_mult
 
             sizing = self._risk_manager.size_position(
                 balance=balance,

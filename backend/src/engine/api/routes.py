@@ -6,7 +6,16 @@ from dataclasses import asdict
 
 from fastapi import APIRouter
 
-from src.engine.api.schemas import EngineStatusOut, RiskCapsOut, UpdateMinLotFallbackIn
+from src.engine.api.schemas import (
+    EngineStatusOut,
+    RiskCapsOut,
+    UpdateCoreRiskCapsIn,
+    UpdateMaxTradesPerDayEnabledIn,
+    UpdateMinLotFallbackIn,
+    UpdateVolatilityGuardEnabledIn,
+    VolatilityConfigOut,
+)
+from src.engine.application.position_manager import PositionManager
 from src.engine.application.risk_manager import RiskManager
 from src.engine.application.trade_loop import TradeEngine
 from src.shared.api.dependencies import AccountRuntimeDep
@@ -20,6 +29,16 @@ def _engine(account: AccountRuntimeDep) -> TradeEngine:
 
 def _risk_manager(account: AccountRuntimeDep) -> RiskManager:
     return account.risk_manager
+
+
+def _position_manager(account: AccountRuntimeDep) -> PositionManager:
+    return account.position_manager
+
+
+def _volatility_config_out(engine: TradeEngine) -> VolatilityConfigOut:
+    return VolatilityConfigOut(
+        **asdict(engine.volatility_config), enabled=engine.volatility_guard_enabled
+    )
 
 
 @router.get(
@@ -72,10 +91,11 @@ async def resume(account: AccountRuntimeDep) -> EngineStatusOut:
     response_model=RiskCapsOut,
     summary="Get the live engine's current risk caps",
     description=(
-        "Returns every risk cap the running `RiskManager` is enforcing right now. "
-        "Matches `configs/risk.yaml` on disk unless `PUT /engine/risk-caps/min-lot-fallback` "
-        "has been called since the last backend restart, in which case those two fields "
-        "reflect the live override instead."
+        "Returns every risk cap the running `RiskManager` is enforcing right now. Matches "
+        "`configs/risk.yaml` on disk unless `PUT /engine/risk-caps/min-lot-fallback`, "
+        "`PUT /engine/risk-caps/max-trades-per-day-enabled`, or `PUT /engine/risk-caps/core` "
+        "has been called since the last backend restart, in which case those fields reflect "
+        "the live override instead."
     ),
 )
 async def get_risk_caps(account: AccountRuntimeDep) -> RiskCapsOut:
@@ -103,3 +123,95 @@ async def update_min_lot_fallback(
         enabled=body.enabled, max_risk_per_trade_pct=body.max_risk_per_trade_pct
     )
     return RiskCapsOut(**asdict(_risk_manager(account).caps))
+
+
+@router.put(
+    "/risk-caps/max-trades-per-day-enabled",
+    response_model=RiskCapsOut,
+    summary="Enable/disable the daily trading kill switch, live",
+    description=(
+        "Updates, on the running engine, the manual max_trades_per_day_enabled kill "
+        "switch — see `RiskManager.check_pretrade`. When true, every new trade (automated "
+        "or manual) is rejected for the rest of the trading day; when false, entries are "
+        "unlimited. Takes effect on the very next pretrade check. Only this field changes; "
+        "every other risk cap is untouched. **Not persisted** — a backend restart reverts "
+        "to `configs/risk.yaml`, which the human edits directly to change the default "
+        "(see CLAUDE.md: risk caps are user-owned)."
+    ),
+)
+async def update_max_trades_per_day_enabled(
+    body: UpdateMaxTradesPerDayEnabledIn, account: AccountRuntimeDep
+) -> RiskCapsOut:
+    _risk_manager(account).set_max_trades_per_day_enabled(body.enabled)
+    return RiskCapsOut(**asdict(_risk_manager(account).caps))
+
+
+@router.put(
+    "/risk-caps/core",
+    response_model=RiskCapsOut,
+    summary="Adjust the core sizing/circuit-breaker caps, live",
+    description=(
+        "Updates, on the running engine, any of risk_per_trade_pct, "
+        "daily_loss_limit_pct, max_open_positions, and consecutive_loss_pause — see "
+        "`RiskManager.size_position`/`check_pretrade`/`record_trade_closed`. Every field "
+        "is optional and independent; omitted fields keep their current value. This is "
+        "the account owner adjusting their own caps, so — unlike a per-account "
+        "`risk_override_file`, which may only tighten — it can loosen or tighten freely. "
+        "Takes effect on the very next decision. **Not persisted** — a backend restart "
+        "reverts to `configs/risk.yaml`, which the human edits directly to change the "
+        "default (see CLAUDE.md: risk caps are user-owned)."
+    ),
+)
+async def update_core_risk_caps(
+    body: UpdateCoreRiskCapsIn, account: AccountRuntimeDep
+) -> RiskCapsOut:
+    _risk_manager(account).set_core_caps(
+        risk_per_trade_pct=body.risk_per_trade_pct,
+        daily_loss_limit_pct=body.daily_loss_limit_pct,
+        max_open_positions=body.max_open_positions,
+        consecutive_loss_pause=body.consecutive_loss_pause,
+    )
+    return RiskCapsOut(**asdict(_risk_manager(account).caps))
+
+
+@router.get(
+    "/volatility-config",
+    response_model=VolatilityConfigOut,
+    summary="Get the live engine's current volatility-guard config",
+    description=(
+        "Returns every field the running volatility guard is classifying regimes and scaling "
+        "SL/TP/exits with right now — see `engine/domain/volatility.py`. Matches "
+        "`configs/volatility.yaml` on disk except for `enabled`, which reflects whether "
+        "`PUT /engine/volatility-config/enabled` has turned the guard off since the last "
+        "backend restart (on by default). `enabled` is read from `TradeEngine` as the single "
+        "source of truth — the PUT route below sets it on both `TradeEngine` and "
+        "`PositionManager` together."
+    ),
+)
+async def get_volatility_config(account: AccountRuntimeDep) -> VolatilityConfigOut:
+    return _volatility_config_out(_engine(account))
+
+
+@router.put(
+    "/volatility-config/enabled",
+    response_model=VolatilityConfigOut,
+    summary="Enable/disable the volatility guard, live",
+    description=(
+        "Updates, on the running engine, whether the volatility guard is active at all: the "
+        "EXTREME-regime entry block and LOW/NORMAL/HIGH SL/TP scaling in `TradeEngine."
+        "_enter_for_bot`, and the EXTREME-forced-close, EXTREME-profit-lock, and HIGH-chandelier-"
+        "trailing rules in `PositionManager._manage`. Both move together as one feature — this "
+        "call sets the flag on both `TradeEngine` and `PositionManager`. When false, entries and "
+        "position management behave exactly as if `volatility_config` didn't exist. Takes "
+        "effect on the very next entry/candle-close decision. **Not persisted** — a backend "
+        "restart reverts to enabled, matching `configs/volatility.yaml` (see CLAUDE.md: this is "
+        "trading-behavior config, not a secret, but generated/AI refinement code must not touch "
+        "it outside its documented workflow)."
+    ),
+)
+async def update_volatility_guard_enabled(
+    body: UpdateVolatilityGuardEnabledIn, account: AccountRuntimeDep
+) -> VolatilityConfigOut:
+    _engine(account).set_volatility_guard_enabled(body.enabled)
+    _position_manager(account).set_volatility_guard_enabled(body.enabled)
+    return _volatility_config_out(_engine(account))

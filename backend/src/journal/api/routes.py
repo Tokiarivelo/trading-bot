@@ -330,8 +330,18 @@ def _bot_analytics_out(a: BotAnalytics) -> BotAnalyticsOut:
         "instead to compare individual bots rather than symbols."
     ),
 )
-async def get_symbol_analytics(account: AccountRuntimeDep) -> list[SymbolAnalyticsOut]:
-    analytics = await _service(account).get_symbol_analytics()
+async def get_symbol_analytics(
+    account: AccountRuntimeDep,
+    open_from: int | None = Query(
+        default=None, description="Only trades opened at/after this epoch-seconds UTC."
+    ),
+    open_to: int | None = Query(
+        default=None, description="Only trades opened at/before this epoch-seconds UTC."
+    ),
+) -> list[SymbolAnalyticsOut]:
+    analytics = await _service(account).get_symbol_analytics(
+        open_from=open_from, open_to=open_to
+    )
     return [_symbol_analytics_out(a) for a in analytics]
 
 
@@ -348,6 +358,16 @@ async def get_symbol_analytics(account: AccountRuntimeDep) -> list[SymbolAnalyti
         "dashboard's bot comparison and equity-curve charts."
     ),
 )
-async def get_bot_analytics(account: AccountRuntimeDep) -> list[BotAnalyticsOut]:
-    analytics = await _service(account).get_bot_analytics()
+async def get_bot_analytics(
+    account: AccountRuntimeDep,
+    open_from: int | None = Query(
+        default=None, description="Only trades opened at/after this epoch-seconds UTC."
+    ),
+    open_to: int | None = Query(
+        default=None, description="Only trades opened at/before this epoch-seconds UTC."
+    ),
+) -> list[BotAnalyticsOut]:
+    analytics = await _service(account).get_bot_analytics(
+        open_from=open_from, open_to=open_to
+    )
     return [_bot_analytics_out(a) for a in analytics]

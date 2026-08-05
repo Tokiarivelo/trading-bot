@@ -101,7 +101,12 @@ class JournalRepository:
             rows = session.scalars(query).all()
         return [_to_domain(row) for row in rows]
 
-    def get_all_for_analytics(self, account_id: str = "default") -> list[TradeAnalyticsRecord]:
+    def get_all_for_analytics(
+        self,
+        open_from: int | None = None,
+        open_to: int | None = None,
+        account_id: str = "default",
+    ) -> list[TradeAnalyticsRecord]:
         """Same rows as `get_all`, but selects only the columns
         `domain/analytics.py`'s aggregation reads (id, symbol, volume,
         open/close time, profit, skill, strategy_version) instead of the
@@ -119,6 +124,10 @@ class JournalRepository:
             TradeRow.skill,
             TradeRow.strategy_version,
         ).where(TradeRow.account_id == account_id)
+        if open_from is not None:
+            query = query.where(TradeRow.open_time >= open_from)
+        if open_to is not None:
+            query = query.where(TradeRow.open_time <= open_to)
         with self._session_factory() as session:
             rows = session.execute(query).all()
         return [

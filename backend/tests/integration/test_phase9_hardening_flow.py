@@ -24,6 +24,7 @@ from src.engine.application.position_manager import PositionManager
 from src.engine.application.risk_manager import RiskManager
 from src.engine.application.trade_loop import TradeEngine
 from src.engine.domain.models import RiskCaps
+from src.engine.domain.volatility import VolatilityConfig
 from src.journal.adapters.repository import JournalRepository
 from src.journal.application.trade_journal import TradeJournalService
 from src.journal.domain.models import MarketSnapshot
@@ -130,7 +131,7 @@ async def test_kill_switch_closes_paper_position_and_fires_alerts(tmp_path):
             risk_per_trade_pct=1.0,
             daily_loss_limit_pct=5.0,
             max_open_positions=5,
-            max_trades_per_day=20,
+            max_trades_per_day_enabled=False,
             consecutive_loss_pause=5,
         ),
         timezone="UTC",
@@ -144,6 +145,7 @@ async def test_kill_switch_closes_paper_position_and_fires_alerts(tmp_path):
         skill_selector=AlwaysAllowSkillSelector(),
         strategy_source=type("S", (), {"get": staticmethod(lambda name: None)})(),
         entry_timeframe="M5",
+        volatility_config=VolatilityConfig(),
         event_bus=event_bus,
     )
 

@@ -275,6 +275,40 @@ class SkillAssignmentService:
         )
         return skill, strategy
 
+    async def rename_bot(
+        self, symbol: str, bot_name: str, new_bot_name: str
+    ) -> tuple[NormalSkill, Strategy | None]:
+        """Renames an existing bot on `symbol` in place, keeping its
+        strategy/risk_multiplier/sessions/overrides — writes the YAML under
+        the new slug, deletes the old file, and hot-swaps the running
+        SkillSelector, no restart needed. Renaming changes this bot's MT5
+        magic number (`magic_number()` is derived from the full skill name,
+        which includes the bot slug) — any position the broker already has
+        open under the old magic number will no longer be recognized as
+        this bot's on the next `_try_enter` check, so avoid renaming a bot
+        while it holds an open position."""
+        old_slug = slugify(bot_name)
+        existing = await asyncio.to_thread(self._repository.get, symbol, old_slug)
+        if existing is None:
+            raise UnknownBotError(f"{symbol!r} has no bot named {old_slug!r}")
+
+        new_slug = slugify(new_bot_name)
+        if not new_slug:
+            raise InvalidBotNameError(f"{new_bot_name!r} has no valid slug characters")
+        strategy = self._strategy_registry.get(existing.strategy)
+        if new_slug == old_slug:
+            return existing, strategy
+        if await asyncio.to_thread(self._repository.get, symbol, new_slug) is not None:
+            raise DuplicateBotError(f"{symbol!r} already has a bot named {new_slug!r}")
+
+        skill = replace(existing, name=f"normal/{symbol.lower()}/{new_slug}")
+        await asyncio.to_thread(self._repository.save, skill)
+        await asyncio.to_thread(self._repository.delete, symbol, old_slug)
+        self._selector.remove(symbol, old_slug)
+        self._selector.set(skill)
+        logger.info("bot %s on %s renamed to %s", old_slug, symbol, new_slug)
+        return skill, strategy
+
     async def remove_bot(self, symbol: str, bot_name: str) -> None:
         """Deactivates one bot on `symbol`. Deliberately leaves the symbol
         itself in the automated-trading universe (configs/app.yaml, candle

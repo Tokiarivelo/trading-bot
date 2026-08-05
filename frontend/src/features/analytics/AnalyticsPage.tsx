@@ -19,9 +19,13 @@ const DEFAULT_CHARTED_BOTS = 3;
 const QUERY_KEY_SYMBOLS = "symbols";
 const QUERY_KEY_BOTS = "bots";
 const QUERY_KEY_CHART = "chart";
+const QUERY_KEY_FROM = "from";
+const QUERY_KEY_TO = "to";
 const LS_KEY_SYMBOLS = "tb.analytics.symbols";
 const LS_KEY_BOTS = "tb.analytics.bots";
 const LS_KEY_CHART = "tb.analytics.chart";
+const LS_KEY_FROM = "tb.analytics.from";
+const LS_KEY_TO = "tb.analytics.to";
 
 // Symbol/bot filters: empty set already means "everything," so the query
 // param and localStorage entry are simply omitted/absent in that case —
@@ -36,6 +40,16 @@ function loadFilterSet(queryKey: string, lsKey: string): Set<string> {
     return Array.isArray(parsed) ? new Set(parsed) : new Set();
   } catch {
     return new Set();
+  }
+}
+
+function loadFilterString(queryKey: string, lsKey: string): string {
+  try {
+    const raw = new URLSearchParams(window.location.search).get(queryKey);
+    if (raw !== null) return raw;
+    return localStorage.getItem(lsKey) ?? "";
+  } catch {
+    return "";
   }
 }
 
@@ -59,7 +73,22 @@ function loadChartSelection(): Set<string> | null {
 }
 
 export function AnalyticsPage() {
-  const { symbols, bots, loading, error, refresh } = useAnalytics();
+  const [dateFrom, setDateFrom] = useState<string>(() =>
+    loadFilterString(QUERY_KEY_FROM, LS_KEY_FROM),
+  );
+  const [dateTo, setDateTo] = useState<string>(() =>
+    loadFilterString(QUERY_KEY_TO, LS_KEY_TO),
+  );
+
+  const apiFilters = useMemo(
+    () => ({
+      open_from: dateFrom ? Math.floor(Date.parse(`${dateFrom}T00:00:00Z`) / 1000) : undefined,
+      open_to: dateTo ? Math.floor(Date.parse(`${dateTo}T23:59:59Z`) / 1000) : undefined,
+    }),
+    [dateFrom, dateTo],
+  );
+
+  const { symbols, bots, loading, error, refresh } = useAnalytics(apiFilters);
   const [selected, setSelected] = useState<Set<string> | null>(loadChartSelection);
   const [selectedSymbols, setSelectedSymbols] = useState<Set<string>>(() =>
     loadFilterSet(QUERY_KEY_SYMBOLS, LS_KEY_SYMBOLS),
@@ -90,6 +119,20 @@ export function AnalyticsPage() {
       } else {
         url.searchParams.set(QUERY_KEY_CHART, [...selected].join(","));
       }
+      if (dateFrom) {
+        url.searchParams.set(QUERY_KEY_FROM, dateFrom);
+        localStorage.setItem(LS_KEY_FROM, dateFrom);
+      } else {
+        url.searchParams.delete(QUERY_KEY_FROM);
+        localStorage.removeItem(LS_KEY_FROM);
+      }
+      if (dateTo) {
+        url.searchParams.set(QUERY_KEY_TO, dateTo);
+        localStorage.setItem(LS_KEY_TO, dateTo);
+      } else {
+        url.searchParams.delete(QUERY_KEY_TO);
+        localStorage.removeItem(LS_KEY_TO);
+      }
       window.history.replaceState(null, "", url);
 
       localStorage.setItem(LS_KEY_SYMBOLS, JSON.stringify([...selectedSymbols]));
@@ -98,7 +141,7 @@ export function AnalyticsPage() {
     } catch {
       // Ignore URL/storage errors during SSR or edge environments.
     }
-  }, [selectedSymbols, selectedBots, selected]);
+  }, [selectedSymbols, selectedBots, selected, dateFrom, dateTo]);
 
   const availableSymbols = useMemo(
     () =>
@@ -163,6 +206,8 @@ export function AnalyticsPage() {
   function clearFilters() {
     setSelectedSymbols(new Set());
     setSelectedBots(new Set());
+    setDateFrom("");
+    setDateTo("");
   }
 
   // Ranked (for stable chart color assignment) within the filtered set —
@@ -195,7 +240,16 @@ export function AnalyticsPage() {
     exporting,
     error: exportError,
     disabled: exportDisabled,
-  } = useAnalyticsExport(filteredSymbols, filteredBots, [...selectedSymbols], [...selectedBots]);
+  } = useAnalyticsExport(
+    filteredSymbols,
+    filteredBots,
+    [...selectedSymbols],
+    [...selectedBots],
+    dateFrom,
+    dateTo,
+    apiFilters.open_from,
+    apiFilters.open_to,
+  );
 
   return (
     <div className="flex h-screen flex-col bg-bg text-ink">
@@ -260,6 +314,10 @@ export function AnalyticsPage() {
               availableBots={availableBots}
               selectedBots={selectedBots}
               onToggleBot={toggleBot}
+              dateFrom={dateFrom}
+              onDateFromChange={setDateFrom}
+              dateTo={dateTo}
+              onDateToChange={setDateTo}
               onClear={clearFilters}
             />
 

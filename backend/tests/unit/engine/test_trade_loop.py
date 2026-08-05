@@ -4,6 +4,7 @@ from src.broker.domain.trading import ExecutionResult, OrderRejected, Position, 
 from src.engine.application.risk_manager import RiskManager
 from src.engine.application.trade_loop import TradeEngine, _veto_timeframe
 from src.engine.domain.models import RiskCaps
+from src.engine.domain.volatility import VolatilityConfig
 from src.market_data.domain.models import Candle, SymbolInfo, Timeframe
 from src.shared.events.bus import EventBus
 from src.shared.events.definitions import (
@@ -33,7 +34,7 @@ CAPS = RiskCaps(
     risk_per_trade_pct=1.0,
     daily_loss_limit_pct=5.0,
     max_open_positions=5,
-    max_trades_per_day=20,
+    max_trades_per_day_enabled=False,
     consecutive_loss_pause=5,
 )
 
@@ -49,14 +50,20 @@ BUY_SIGNAL = Signal(direction=Direction.BUY, sl_points=10.0, tp_points=15.0, rea
 
 def _uptrend_candles(symbol: str, timeframe: Timeframe, count: int) -> list[Candle]:
     base = datetime(2026, 7, 11, 8, 0, tzinfo=UTC)
+    # high/low track the close (constant +-1.0 band) rather than sitting at a
+    # fixed absolute level, so true range/ATR stays flat across the series —
+    # otherwise a fixed high/low against a steadily drifting close inflates
+    # the true-range "gap" component bar over bar, which the volatility
+    # guard (added in Phase B) would misread as escalating volatility purely
+    # from this fixture's shape, unrelated to whatever the test is checking.
     return [
         Candle(
             symbol=symbol,
             timeframe=timeframe,
             time=base,
             open=2400.0,
-            high=2401.0,
-            low=2399.0,
+            high=2400.0 + i * 0.5 + 1.0,
+            low=2400.0 + i * 0.5 - 1.0,
             close=2400.0 + i * 0.5,
             tick_volume=100,
             spread_points=30,
@@ -67,14 +74,15 @@ def _uptrend_candles(symbol: str, timeframe: Timeframe, count: int) -> list[Cand
 
 def _downtrend_candles(symbol: str, timeframe: Timeframe, count: int) -> list[Candle]:
     base = datetime(2026, 7, 11, 8, 0, tzinfo=UTC)
+    # Same flat-true-range rationale as _uptrend_candles above.
     return [
         Candle(
             symbol=symbol,
             timeframe=timeframe,
             time=base,
             open=2450.0,
-            high=2451.0,
-            low=2449.0,
+            high=2450.0 - i * 0.5 + 1.0,
+            low=2450.0 - i * 0.5 - 1.0,
             close=2450.0 - i * 0.5,
             tick_volume=100,
             spread_points=30,
@@ -83,15 +91,60 @@ def _downtrend_candles(symbol: str, timeframe: Timeframe, count: int) -> list[Ca
     ]
 
 
+def _volatility_ramp_candles(
+    symbol: str, timeframe: Timeframe, count: int, *, last_frac: float | None = None
+) -> list[Candle]:
+    """Widening-true-range candles (bar `i`'s range is `1 + i`), so
+    `latest_volatility_regime` ranks the most recent bar against its own
+    trailing ATR history without needing hundreds of bars of real market
+    data. `last_frac=None` keeps the ramp increasing through the final bar,
+    driving its ATR to the very top of its own history (EXTREME);
+    `last_frac=0.75` caps the final bar's range at 75% of the ramp's peak,
+    landing it in HIGH territory instead (elevated but not the outlier)."""
+    base = datetime(2026, 7, 11, 8, 0, tzinfo=UTC)
+    candles = []
+    for i in range(count):
+        if last_frac is not None and i == count - 1:
+            rng = float(count - 1) * last_frac
+        else:
+            rng = float(1 + i)
+        candles.append(
+            Candle(
+                symbol=symbol,
+                timeframe=timeframe,
+                time=base,
+                open=100.0,
+                high=100.0 + rng / 2,
+                low=100.0 - rng / 2,
+                close=100.0,
+                tick_volume=100,
+                spread_points=30,
+            )
+        )
+    return candles
+
+
 class FakeMarketData:
-    def __init__(self, info: SymbolInfo = XAUUSD_INFO, bar_count: int = 5, downtrend: bool = False):
+    def __init__(
+        self,
+        info: SymbolInfo = XAUUSD_INFO,
+        bar_count: int = 5,
+        downtrend: bool = False,
+        candles: list[Candle] | None = None,
+    ):
         self.info = info
         self.bar_count = bar_count
         self._downtrend = downtrend
+        # When set, every timeframe gets this exact series regardless of
+        # `bar_count`/`downtrend` — used by the volatility-guard tests, which
+        # need a specific ATR/percentile shape rather than a generic trend.
+        self._fixed_candles = candles
         self.requested_timeframes: list[Timeframe] = []
 
     async def get_candles(self, symbol, timeframe, count):
         self.requested_timeframes.append(timeframe)
+        if self._fixed_candles is not None:
+            return self._fixed_candles
         builder = _downtrend_candles if self._downtrend else _uptrend_candles
         return builder(symbol, timeframe, self.bar_count)
 
@@ -302,6 +355,7 @@ def make_engine(
     risk_manager=None,
     context_bars=5,
     event_bus=None,
+    volatility_config=None,
 ):
     market_data = market_data or FakeMarketData(bar_count=context_bars)
     order_service = order_service or FakeOrderService()
@@ -312,6 +366,11 @@ def make_engine(
     strategy_source = strategy_source or FakeStrategySource({"fake": strategy})
     risk_manager = risk_manager or RiskManager(caps=CAPS, timezone="UTC")
     event_bus = event_bus if event_bus is not None else EventBus()
+    # Default config's insufficient-history guard (needs atr_period=14 bars,
+    # existing tests use far fewer) keeps every pre-existing test's regime at
+    # NORMAL/nan — i.e. today's unscaled behavior — unless a test opts into a
+    # tuned config via the parameter below.
+    volatility_config = volatility_config or VolatilityConfig()
 
     engine = TradeEngine(
         market_data=market_data,
@@ -322,6 +381,7 @@ def make_engine(
         skill_selector=skill_selector,
         strategy_source=strategy_source,
         entry_timeframe="M5",
+        volatility_config=volatility_config,
         event_bus=event_bus,
         enabled=enabled,
         context_bars=context_bars,
@@ -414,7 +474,7 @@ async def test_pretrade_risk_block_skips_entry():
         risk_per_trade_pct=1.0,
         daily_loss_limit_pct=5.0,
         max_open_positions=1,
-        max_trades_per_day=20,
+        max_trades_per_day_enabled=False,
         consecutive_loss_pause=5,
     )
     risk_manager = RiskManager(caps=caps, timezone="UTC")
@@ -677,7 +737,7 @@ async def test_second_bot_sizing_sees_first_bots_fresh_position():
         risk_per_trade_pct=1.0,
         daily_loss_limit_pct=5.0,
         max_open_positions=1,
-        max_trades_per_day=20,
+        max_trades_per_day_enabled=False,
         consecutive_loss_pause=5,
     )
     decisions = [
@@ -991,4 +1051,66 @@ async def test_multi_position_scaling_opens_tiered_tp_orders():
     assert order_service.opened[0]["sl"] == 2400.3 - 10.0
     assert order_service.opened[1]["sl"] == 2400.3 - 10.0
     assert order_service.opened[2]["sl"] == 2400.3 - 10.0
+
+
+# ---- volatility guard (bot-agnostic, engine-level) --------------------------
+
+
+async def test_extreme_volatility_regime_blocks_entry(caplog):
+    volatility_config = VolatilityConfig(atr_period=3, regime_lookback_bars=10)
+    candles = _volatility_ramp_candles("XAUUSD", Timeframe.M5, 16)
+    market_data = FakeMarketData(candles=candles)
+    engine, order_service, *_ = make_engine(
+        market_data=market_data, context_bars=16, volatility_config=volatility_config
+    )
+
+    with caplog.at_level("INFO"):
+        await engine.on_candle_closed(CandleClosed(symbol="XAUUSD", timeframe="M5"))
+
+    assert order_service.opened == []
+    assert "ENTRY BLOCKED (volatility guard)" in caplog.text
+    assert "regime=EXTREME" in caplog.text
+
+
+async def test_high_volatility_regime_scales_sl_and_tp():
+    volatility_config = VolatilityConfig(atr_period=3, regime_lookback_bars=10)
+    candles = _volatility_ramp_candles("XAUUSD", Timeframe.M5, 16, last_frac=0.75)
+    market_data = FakeMarketData(candles=candles)
+    engine, order_service, *_ = make_engine(
+        market_data=market_data, context_bars=16, volatility_config=volatility_config
+    )
+
+    await engine.on_candle_closed(CandleClosed(symbol="XAUUSD", timeframe="M5"))
+
+    assert len(order_service.opened) == 1
+    order = order_service.opened[0]
+    # VolatilityConfig defaults: sl_multiplier_high = tp_multiplier_high = 1.3,
+    # versus the unscaled NORMAL baseline in
+    # test_successful_entry_opens_position_with_strategy_and_skill
+    # (sl=2400.30-10.0, tp=2400.30+15.0).
+    sl_mult = volatility_config.sl_multiplier_high
+    tp_mult = volatility_config.tp_multiplier_high
+    assert order["sl"] == 2400.30 - 1 * BUY_SIGNAL.sl_points * sl_mult
+    assert order["tp"] == 2400.30 + 1 * BUY_SIGNAL.tp_points * tp_mult
+
+
+async def test_disabled_volatility_guard_does_not_block_extreme_entry():
+    # Same EXTREME fixture as test_extreme_volatility_regime_blocks_entry, but
+    # with the live guard switched off first -- entry must go through
+    # unblocked and SL/TP must be unscaled (mult=1.0), as if volatility_config
+    # didn't exist at all.
+    volatility_config = VolatilityConfig(atr_period=3, regime_lookback_bars=10)
+    candles = _volatility_ramp_candles("XAUUSD", Timeframe.M5, 16)
+    market_data = FakeMarketData(candles=candles)
+    engine, order_service, *_ = make_engine(
+        market_data=market_data, context_bars=16, volatility_config=volatility_config
+    )
+    engine.set_volatility_guard_enabled(False)
+
+    await engine.on_candle_closed(CandleClosed(symbol="XAUUSD", timeframe="M5"))
+
+    assert len(order_service.opened) == 1
+    order = order_service.opened[0]
+    assert order["sl"] == 2400.30 - 1 * BUY_SIGNAL.sl_points
+    assert order["tp"] == 2400.30 + 1 * BUY_SIGNAL.tp_points
 

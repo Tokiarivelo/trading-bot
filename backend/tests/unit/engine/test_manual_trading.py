@@ -20,7 +20,7 @@ CAPS = RiskCaps(
     risk_per_trade_pct=0.5,
     daily_loss_limit_pct=2.0,
     max_open_positions=2,
-    max_trades_per_day=8,
+    max_trades_per_day_enabled=False,
     consecutive_loss_pause=3,
 )
 

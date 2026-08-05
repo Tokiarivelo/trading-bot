@@ -47,7 +47,7 @@ TEST_RISK_CAPS = RiskCaps(
     risk_per_trade_pct=0.5,
     daily_loss_limit_pct=2.0,
     max_open_positions=10,
-    max_trades_per_day=100,
+    max_trades_per_day_enabled=False,
     consecutive_loss_pause=5,
 )
 
@@ -163,7 +163,7 @@ class ContainerForTest:
                 risk_per_trade_pct=TEST_RISK_CAPS.risk_per_trade_pct,
                 daily_loss_limit_pct=TEST_RISK_CAPS.daily_loss_limit_pct,
                 max_open_positions=max_open_positions,
-                max_trades_per_day=TEST_RISK_CAPS.max_trades_per_day,
+                max_trades_per_day_enabled=TEST_RISK_CAPS.max_trades_per_day_enabled,
                 consecutive_loss_pause=TEST_RISK_CAPS.consecutive_loss_pause,
             )
         )

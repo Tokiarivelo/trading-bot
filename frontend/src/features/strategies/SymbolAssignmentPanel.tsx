@@ -58,6 +58,7 @@ export function SymbolAssignmentPanel() {
   const [busyKey, setBusyKey] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [newBotStrategy, setNewBotStrategy] = useState<Record<string, string>>({});
+  const [newBotName, setNewBotName] = useState<Record<string, string>>({});
   const [signalCounts, setSignalCounts] = useState<Map<string, BotSignalCounts>>(new Map());
   const [configuringKey, setConfiguringKey] = useState<string | null>(null);
 
@@ -109,10 +110,12 @@ export function SymbolAssignmentPanel() {
   async function addBot(symbol: string, fallbackStrategy: string | undefined) {
     const strategyName = newBotStrategy[symbol] ?? fallbackStrategy;
     if (!strategyName) return;
+    const botName = newBotName[symbol]?.trim() || undefined;
     setBusyKey(`${symbol}:__new__`);
     setError(null);
     try {
-      await addBotToSymbol(symbol, strategyName);
+      await addBotToSymbol(symbol, strategyName, botName);
+      setNewBotName((prev) => ({ ...prev, [symbol]: "" }));
       refresh();
     } catch (e) {
       setError(e instanceof ApiError ? e.message : `failed to add a bot to ${symbol}`);
@@ -259,29 +262,41 @@ export function SymbolAssignmentPanel() {
                 </div>
 
                 {activeBots.length > 0 && (
-                  <div className="mt-3 flex items-center gap-1.5">
-                    <select
-                      className="flex-1 min-w-0 rounded border border-line bg-bg/80 px-2 py-1 text-xs text-ink focus:border-accent focus:outline-none disabled:opacity-50"
-                      value={newBotStrategy[symbol] ?? activeBots[0]}
+                  <div className="mt-3 flex flex-col gap-1.5">
+                    <div className="flex items-center gap-1.5">
+                      <select
+                        className="flex-1 min-w-0 rounded border border-line bg-bg/80 px-2 py-1 text-xs text-ink focus:border-accent focus:outline-none disabled:opacity-50"
+                        value={newBotStrategy[symbol] ?? activeBots[0]}
+                        disabled={busyKey !== null}
+                        onChange={(e) =>
+                          setNewBotStrategy((prev) => ({ ...prev, [symbol]: e.target.value }))
+                        }
+                      >
+                        {activeBots.map((name) => (
+                          <option key={name} value={name}>
+                            {name}
+                          </option>
+                        ))}
+                      </select>
+                      <button
+                        type="button"
+                        className="shrink-0 rounded border border-accent px-2 py-1 text-3xs font-semibold text-accent hover:bg-accent hover:text-bg disabled:opacity-40"
+                        disabled={busyKey !== null}
+                        onClick={() => addBot(symbol, activeBots[0])}
+                      >
+                        {addBusy ? "…" : "+ Add bot"}
+                      </button>
+                    </div>
+                    <input
+                      type="text"
+                      placeholder={`Bot name (defaults to ${newBotStrategy[symbol] ?? activeBots[0]})`}
+                      value={newBotName[symbol] ?? ""}
                       disabled={busyKey !== null}
                       onChange={(e) =>
-                        setNewBotStrategy((prev) => ({ ...prev, [symbol]: e.target.value }))
+                        setNewBotName((prev) => ({ ...prev, [symbol]: e.target.value }))
                       }
-                    >
-                      {activeBots.map((name) => (
-                        <option key={name} value={name}>
-                          {name}
-                        </option>
-                      ))}
-                    </select>
-                    <button
-                      type="button"
-                      className="shrink-0 rounded border border-accent px-2 py-1 text-3xs font-semibold text-accent hover:bg-accent hover:text-bg disabled:opacity-40"
-                      disabled={busyKey !== null}
-                      onClick={() => addBot(symbol, activeBots[0])}
-                    >
-                      {addBusy ? "…" : "+ Add bot"}
-                    </button>
+                      className="w-full rounded border border-line bg-bg/80 px-2 py-1 text-xs text-ink placeholder:text-ink-muted focus:border-accent focus:outline-none disabled:opacity-50"
+                    />
                   </div>
                 )}
 

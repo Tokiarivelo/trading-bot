@@ -10,7 +10,7 @@ CAPS = RiskCaps(
     risk_per_trade_pct=0.5,
     daily_loss_limit_pct=2.0,
     max_open_positions=2,
-    max_trades_per_day=8,
+    max_trades_per_day_enabled=False,
     consecutive_loss_pause=3,
 )
 
@@ -52,7 +52,7 @@ def test_size_position_falls_back_to_min_lot_within_ceiling():
         risk_per_trade_pct=0.5,
         daily_loss_limit_pct=2.0,
         max_open_positions=2,
-        max_trades_per_day=8,
+        max_trades_per_day_enabled=False,
         consecutive_loss_pause=3,
         min_lot_fallback_enabled=True,
         max_risk_per_trade_pct=10.0,  # generous ceiling for a small account
@@ -76,7 +76,7 @@ def test_size_position_rejects_when_min_lot_exceeds_ceiling():
         risk_per_trade_pct=0.5,
         daily_loss_limit_pct=2.0,
         max_open_positions=2,
-        max_trades_per_day=8,
+        max_trades_per_day_enabled=False,
         consecutive_loss_pause=3,
         min_lot_fallback_enabled=True,
         max_risk_per_trade_pct=2.0,  # min-lot risk (5%) exceeds this
@@ -101,7 +101,7 @@ def test_size_position_ignores_ceiling_when_fallback_disabled():
         risk_per_trade_pct=0.5,
         daily_loss_limit_pct=2.0,
         max_open_positions=2,
-        max_trades_per_day=8,
+        max_trades_per_day_enabled=False,
         consecutive_loss_pause=3,
         min_lot_fallback_enabled=False,
         max_risk_per_trade_pct=50.0,  # generous, but fallback is off
@@ -191,14 +191,21 @@ def test_check_pretrade_blocks_at_max_open_positions():
     assert "max open positions" in decision.reason
 
 
-def test_check_pretrade_blocks_at_max_trades_per_day():
-    manager = make_manager()
+def test_check_pretrade_allows_when_daily_kill_switch_disabled():
+    manager = make_manager()  # CAPS has max_trades_per_day_enabled=False
     now = datetime(2026, 7, 11, 10, 0, tzinfo=UTC)
-    for _ in range(8):
+    for _ in range(50):
         manager.record_trade_opened(now)
     decision = manager.check_pretrade(open_positions_count=0, now=now)
+    assert decision.approved  # no count-based cap anymore
+
+
+def test_check_pretrade_blocks_when_daily_kill_switch_enabled():
+    caps = dataclasses.replace(CAPS, max_trades_per_day_enabled=True)
+    manager = make_manager(caps)
+    decision = manager.check_pretrade(open_positions_count=0)
     assert not decision.approved
-    assert "max trades per day" in decision.reason
+    assert "max_trades_per_day_enabled" in decision.reason
 
 
 def test_consecutive_losses_trip_circuit_breaker():
@@ -265,7 +272,7 @@ GLOBAL_CAPS = RiskCaps(
     risk_per_trade_pct=0.5,
     daily_loss_limit_pct=50.0,
     max_open_positions=100,
-    max_trades_per_day=100,
+    max_trades_per_day_enabled=False,
     consecutive_loss_pause=10,
     min_lot_fallback_enabled=True,
     max_risk_per_trade_pct=2.0,
@@ -275,11 +282,10 @@ GLOBAL_CAPS = RiskCaps(
 def test_apply_risk_override_tightens_numeric_caps():
     result = apply_risk_override(
         GLOBAL_CAPS,
-        {"risk_per_trade_pct": 0.25, "max_open_positions": 5, "max_trades_per_day": 20},
+        {"risk_per_trade_pct": 0.25, "max_open_positions": 5},
     )
     assert result.risk_per_trade_pct == 0.25
     assert result.max_open_positions == 5
-    assert result.max_trades_per_day == 20
     # untouched fields keep the global value
     assert result.daily_loss_limit_pct == GLOBAL_CAPS.daily_loss_limit_pct
     assert result.consecutive_loss_pause == GLOBAL_CAPS.consecutive_loss_pause
@@ -291,7 +297,6 @@ def test_apply_risk_override_tightens_numeric_caps():
         "risk_per_trade_pct",
         "daily_loss_limit_pct",
         "max_open_positions",
-        "max_trades_per_day",
         "consecutive_loss_pause",
     ],
 )
@@ -299,6 +304,17 @@ def test_apply_risk_override_rejects_loosening_numeric_caps(field):
     looser_value = getattr(GLOBAL_CAPS, field) * 2 + 1
     with pytest.raises(ValueError, match="cannot loosen"):
         apply_risk_override(GLOBAL_CAPS, {field: looser_value})
+
+
+def test_apply_risk_override_can_enable_daily_kill_switch():
+    result = apply_risk_override(GLOBAL_CAPS, {"max_trades_per_day_enabled": True})
+    assert result.max_trades_per_day_enabled is True
+
+
+def test_apply_risk_override_rejects_disabling_daily_kill_switch_when_globally_enabled():
+    enabled_global = dataclasses.replace(GLOBAL_CAPS, max_trades_per_day_enabled=True)
+    with pytest.raises(ValueError, match="cannot loosen"):
+        apply_risk_override(enabled_global, {"max_trades_per_day_enabled": False})
 
 
 def test_apply_risk_override_can_disable_min_lot_fallback():

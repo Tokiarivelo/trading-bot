@@ -46,9 +46,10 @@ class ManualTradeGate:
         tp: float | None = None,
         comment: str = "",
     ) -> ExecutionResult:
-        """Market order: full pretrade gate (pause, max open positions, max
-        trades/day) before the fill, then records the trade — the same
-        sequence `TradeEngine._try_enter` applies to automated entries."""
+        """Market order: full pretrade gate (pause, max open positions, the
+        max_trades_per_day_enabled manual kill switch) before the fill, then
+        records the trade — the same sequence `TradeEngine._try_enter`
+        applies to automated entries."""
         now = self._clock()
         open_count = len(await self._order_service.get_positions())
         decision = self._risk_manager.check_pretrade(open_count, now)
@@ -70,9 +71,9 @@ class ManualTradeGate:
         comment: str = "",
     ) -> PendingOrder:
         """Pending (limit/stop) order: only the pause/kill-switch state is
-        checked at placement — `max_open_positions`/`max_trades_per_day`
-        describe *open trades*, and a resting order isn't one yet, so those
-        are re-checked properly when it actually fills
+        checked at placement — `max_open_positions` describes *open trades*,
+        and `max_trades_per_day_enabled` is the same kind of deferred check,
+        so both are re-checked properly when the order actually fills
         (`PositionManager`/`ReconciliationService`)."""
         if self._risk_manager.paused:
             reason = self._risk_manager.status.pause_reason

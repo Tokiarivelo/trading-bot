@@ -119,7 +119,7 @@ class BacktestReport:
     risk_per_trade_pct: float = 0.5
     daily_loss_limit_pct: float = 2.0
     max_open_positions: int = 100
-    max_trades_per_day: int = 8
+    max_trades_per_day_enabled: bool = False
     consecutive_loss_pause: int = 10
     min_lot_fallback_enabled: bool = False
     max_risk_per_trade_pct: float | None = None

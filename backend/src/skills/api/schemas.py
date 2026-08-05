@@ -127,6 +127,15 @@ class UpdateBotIn(BaseModel):
     )
 
 
+class RenameBotIn(BaseModel):
+    new_bot_name: str = Field(
+        description="New short id for this bot on the symbol, slugified — must be unique "
+        "among the symbol's currently active bots. Changes the bot's MT5 magic number, so "
+        "avoid renaming a bot while it holds an open position (see PUT .../bots/{bot_name}/name).",
+        min_length=1,
+    )
+
+
 class UpdateBotConfigIn(BaseModel):
     risk_multiplier: float = Field(
         description="Position-size multiplier applied while this bot is active.", gt=0

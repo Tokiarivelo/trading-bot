@@ -87,9 +87,9 @@ export function useChartUIToggles() {
   const [showVolume, setShowVolume] = useState<boolean>(() => {
     try {
       const stored = localStorage.getItem("chart-show-volume");
-      return stored ? stored === "true" : true;
+      return stored ? stored === "true" : false;
     } catch {
-      return true;
+      return false;
     }
   });
 
@@ -103,16 +103,16 @@ export function useChartUIToggles() {
     });
   }
 
-  // Entry-arrow "BUY 0.01"/"SELL 0.01" text labels — on by default, but a
+  // Entry-arrow "BUY 0.01"/"SELL 0.01" text labels — off by default, as a
   // symbol with many trades stacks these into unreadable overlapping text
   // (the arrows/colors alone still show direction). Toggling this off blanks
   // just the label, the marker shape/color/position stays.
   const [showTradeLabels, setShowTradeLabels] = useState<boolean>(() => {
     try {
       const stored = localStorage.getItem("chart-show-trade-labels");
-      return stored ? stored === "true" : true;
+      return stored ? stored === "true" : false;
     } catch {
-      return true;
+      return false;
     }
   });
 
@@ -126,16 +126,16 @@ export function useChartUIToggles() {
     });
   }
 
-  // The entry-arrow markers themselves — on by default. Independent of
+  // The entry-arrow markers themselves — off by default. Independent of
   // `showTradeLabels` above (which only blanks the text): toggling this off
   // hides the arrow/circle shapes entirely, for reading raw price action on a
   // symbol whose chart is papered over with trade markers.
   const [showTradeMarkers, setShowTradeMarkers] = useState<boolean>(() => {
     try {
       const stored = localStorage.getItem("chart-show-trade-markers");
-      return stored ? stored === "true" : true;
+      return stored ? stored === "true" : false;
     } catch {
-      return true;
+      return false;
     }
   });
 

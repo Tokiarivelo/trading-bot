@@ -8,7 +8,13 @@ from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException, Path, Request
 
-from src.skills.api.schemas import AddBotIn, NormalSkillOut, UpdateBotConfigIn, UpdateBotIn
+from src.skills.api.schemas import (
+    AddBotIn,
+    NormalSkillOut,
+    RenameBotIn,
+    UpdateBotConfigIn,
+    UpdateBotIn,
+)
 from src.skills.application.skill_assignment import (
     DuplicateBotError,
     InvalidBotNameError,
@@ -116,6 +122,41 @@ async def update_bot(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except UnknownStrategyError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return NormalSkillOut.from_domain(skill, strategy=strategy)
+
+
+@router.put(
+    "/normal/{symbol}/bots/{bot_name}/name",
+    response_model=NormalSkillOut,
+    summary="Rename one bot",
+    description=(
+        "Renames `bot_name` on `symbol` in place, keeping its strategy, risk_multiplier, "
+        "sessions, and param/htf_veto overrides — writes the YAML under the new slug, deletes "
+        "the old file, and hot-swaps the running SkillSelector immediately, no restart needed. "
+        "Renaming changes this bot's MT5 magic number (derived from the full skill name), so "
+        "any position the broker already has open under the old name will no longer be "
+        "recognized as this bot's — avoid renaming a bot that currently holds an open position."
+    ),
+    responses={
+        404: {"description": "This symbol has no bot with that bot_name."},
+        409: {"description": "This symbol already has a bot with that new_bot_name."},
+        422: {"description": "new_bot_name has no valid slug characters."},
+    },
+)
+async def rename_bot(
+    request: Request,
+    body: RenameBotIn,
+    symbol: str = Path(description="Broker symbol, e.g. XAUUSD."),
+    bot_name: str = Path(description="This bot's current short id on the symbol."),
+) -> NormalSkillOut:
+    try:
+        skill, strategy = await _service(request).rename_bot(symbol, bot_name, body.new_bot_name)
+    except UnknownBotError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except InvalidBotNameError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except DuplicateBotError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     return NormalSkillOut.from_domain(skill, strategy=strategy)
 
 

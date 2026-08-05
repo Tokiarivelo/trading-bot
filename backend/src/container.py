@@ -60,6 +60,7 @@ from src.broker.application.account_service import AccountService
 from src.broker.application.health_monitor import GatewayHealthMonitor
 from src.broker.application.order_service import OrderService
 from src.broker.application.reconciliation import ReconciliationService
+from src.broker.application.reconciliation_poller import ReconciliationPoller
 from src.broker.application.spread_gate import SpreadGate
 from src.broker.domain.account import AccountConfig
 from src.broker.ports.trading import BrokerPort
@@ -68,6 +69,7 @@ from src.engine.application.position_manager import PositionManager
 from src.engine.application.risk_manager import RiskManager, apply_risk_override
 from src.engine.application.trade_loop import TradeEngine
 from src.engine.domain.models import RiskCaps
+from src.engine.domain.volatility import VolatilityConfig
 from src.indicators.adapters.repository import IndicatorRepository
 from src.indicators.application.service import IndicatorService
 from src.journal.adapters.market_context import CandleRepositoryMarketContext
@@ -96,6 +98,7 @@ from src.shared.config.loaders import (
     load_refinement_config,
     load_risk_caps,
     load_symbol_trading_config,
+    load_volatility_config,
 )
 from src.shared.config.settings import REPO_ROOT, Settings, load_yaml_config
 from src.shared.db.base import make_session_factory
@@ -224,6 +227,7 @@ class AccountRuntime:
     order_service: OrderService
     manual_trade_gate: ManualTradeGate
     reconciliation: ReconciliationService
+    reconciliation_poller: ReconciliationPoller
     health_monitor: GatewayHealthMonitor
     position_manager: PositionManager
     trade_journal: TradeJournalService
@@ -240,6 +244,7 @@ class AccountRuntime:
         await self.candle_stream.stop()
         await self.live_candle.stop()
         await self.health_monitor.stop()
+        await self.reconciliation_poller.stop()
         await self.gateway_client.aclose()
 
 
@@ -415,6 +420,7 @@ def build_container(settings: Settings | None = None) -> Container:
     )
 
     global_risk_caps = load_risk_caps(settings.configs_dir)
+    volatility_config = load_volatility_config(settings.configs_dir)
     account_risk_caps = {
         cfg.id: _resolve_account_risk_caps(global_risk_caps, cfg, settings.configs_dir)
         for cfg in account_configs
@@ -547,6 +553,7 @@ def build_container(settings: Settings | None = None) -> Container:
             strategy_version_repository=strategy_version_repository,
             baseline_strategies=baseline_strategies,
             risk_caps=account_risk_caps[account_cfg.id],
+            volatility_config=volatility_config,
             spread_gate=spread_gate,
             review_every_n_trades=review_every_n_trades,
             skill_selector=skill_selector,
@@ -610,6 +617,7 @@ def build_account_runtime(
     strategy_version_repository: StrategyVersionRepository,
     baseline_strategies: list[tuple[str, Strategy]],
     risk_caps: RiskCaps,
+    volatility_config: VolatilityConfig,
     spread_gate: SpreadGate,
     review_every_n_trades: int,
     skill_selector: SkillSelectorPort,
@@ -688,6 +696,11 @@ def build_account_runtime(
     reconciliation = ReconciliationService(
         broker=broker, journal=trade_journal, event_bus=event_bus
     )
+    reconciliation_poller = ReconciliationPoller(
+        reconciliation=reconciliation,
+        poll_interval_s=engine_config.get("reconciliation_poll_interval_s", 5.0),
+        account_id=account_id,
+    )
     health_monitor = GatewayHealthMonitor(
         account=account, reconciliation=reconciliation, event_bus=event_bus, account_id=account_id
     )
@@ -696,6 +709,7 @@ def build_account_runtime(
         market_data=market_data,
         reconciliation=reconciliation,
         risk_manager=risk_manager,
+        volatility_config=volatility_config,
     )
 
     strategy_registry = StrategyRegistry()
@@ -744,6 +758,7 @@ def build_account_runtime(
         skill_selector=skill_selector,
         strategy_source=strategy_registry,
         entry_timeframe=engine_config.get("entry_timeframe", "M5"),
+        volatility_config=volatility_config,
         event_bus=event_bus,
         enabled=engine_config.get("enabled", True),
     )
@@ -768,6 +783,7 @@ def build_account_runtime(
         order_service=order_service,
         manual_trade_gate=manual_trade_gate,
         reconciliation=reconciliation,
+        reconciliation_poller=reconciliation_poller,
         health_monitor=health_monitor,
         position_manager=position_manager,
         trade_journal=trade_journal,

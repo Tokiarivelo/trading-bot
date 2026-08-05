@@ -162,12 +162,26 @@ class TradeJournalService:
         method doing it internally."""
         return self._repository.get_by_id(trade_id, self._account_id)
 
-    async def get_symbol_analytics(self) -> list[SymbolAnalytics]:
-        trades = await asyncio.to_thread(self._repository.get_all_for_analytics, self._account_id)
+    async def get_symbol_analytics(
+        self, open_from: int | None = None, open_to: int | None = None
+    ) -> list[SymbolAnalytics]:
+        trades = await asyncio.to_thread(
+            self._repository.get_all_for_analytics,
+            open_from=open_from,
+            open_to=open_to,
+            account_id=self._account_id,
+        )
         return compute_symbol_analytics(trades)
 
-    async def get_bot_analytics(self) -> list[BotAnalytics]:
-        trades = await asyncio.to_thread(self._repository.get_all_for_analytics, self._account_id)
+    async def get_bot_analytics(
+        self, open_from: int | None = None, open_to: int | None = None
+    ) -> list[BotAnalytics]:
+        trades = await asyncio.to_thread(
+            self._repository.get_all_for_analytics,
+            open_from=open_from,
+            open_to=open_to,
+            account_id=self._account_id,
+        )
         return compute_bot_analytics(trades)
 
     async def search_trades(

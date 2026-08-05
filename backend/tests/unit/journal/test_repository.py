@@ -395,6 +395,17 @@ def test_get_all_for_analytics_scopes_to_account(repository):
     assert repository.get_all_for_analytics(account_id="default") == []
 
 
+def test_get_all_for_analytics_filters_by_open_time(repository):
+    t2 = int(utc(2026, 7, 11, 10, 0).timestamp())
+    repository.save(make_record("1", open_time=utc(2026, 7, 10, 10, 0)))
+    repository.save(make_record("2", open_time=utc(2026, 7, 11, 10, 0)))
+    repository.save(make_record("3", open_time=utc(2026, 7, 12, 10, 0)))
+
+    assert {r.id for r in repository.get_all_for_analytics(open_from=t2)} == {"2", "3"}
+    assert {r.id for r in repository.get_all_for_analytics(open_to=t2)} == {"1", "2"}
+    assert {r.id for r in repository.get_all_for_analytics(open_from=t2, open_to=t2)} == {"2"}
+
+
 def test_trade_row_declares_composite_account_symbol_close_index():
     """Every hot query (`get_last_n`, `get_markers`, `get_open`, `count_closed`,
     `search`) filters on account_id AND symbol together; without a composite

@@ -19,7 +19,7 @@ def _caps() -> RiskCaps:
         risk_per_trade_pct=0.5,
         daily_loss_limit_pct=2.0,
         max_open_positions=100,
-        max_trades_per_day=8,
+        max_trades_per_day_enabled=False,
         consecutive_loss_pause=10,
         min_lot_fallback_enabled=True,
         max_risk_per_trade_pct=2.0,

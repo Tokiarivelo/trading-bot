@@ -159,11 +159,10 @@ never explicitly "kept").
       longer guaranteed non-empty/relevant to the nav — fall back to first
       favorite, else first engine-configured symbol. Done:
       `setSymbol(favoriteSymbols[0] ?? configuredSymbols[0])` (`page.tsx:145`).
-- [x] Migration: on first load after this ships, seed
-      `tb.favoriteSymbols` from the current `DEFAULT_SYMBOLS` /
-      `config.symbols` once, so existing users don't lose their nav bar
-      contents outright — but stop hardcoding the constant going forward.
-      Done via `FAVORITES_MIGRATED_KEY` one-time guard (`page.tsx:65,84-92`).
+- [x] Initialization: on a clean load (fresh window / incognito, where neither
+      `tb.favoriteSymbols` nor `tb.extraSymbols` exist in localStorage), only open
+      the initial active symbol (`XAUUSD` by default) into `tb.extraSymbols`, ensuring
+      no additional symbol tabs are opened and nothing is marked as favorited (`★`) by default.
 
 ---
 

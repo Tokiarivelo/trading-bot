@@ -25,7 +25,6 @@ import { MenuButton } from "@/shared/ui/NavigationDrawer";
 
 const EXTRA_SYMBOLS_KEY = "tb.extraSymbols";
 const FAVORITE_SYMBOLS_KEY = "tb.favoriteSymbols";
-const FAVORITES_MIGRATED_KEY = "tb.favoritesMigrated";
 const LAST_SYMBOL_KEY = "tb.lastSymbol";
 const SYMBOL_QUERY_KEY = "symbol";
 const BACKTEST_REPORT_QUERY_KEY = "backtestReport";
@@ -180,9 +179,8 @@ export default function Home() {
       .then(() => setBackendUp(true))
       .catch(() => setBackendUp(false));
 
-    const storedExtras = readJsonList(EXTRA_SYMBOLS_KEY);
-    let storedFavorites = readJsonList(FAVORITE_SYMBOLS_KEY);
-    const migrated = localStorage.getItem(FAVORITES_MIGRATED_KEY) === "1";
+    let storedExtras = readJsonList(EXTRA_SYMBOLS_KEY);
+    const storedFavorites = readJsonList(FAVORITE_SYMBOLS_KEY);
 
     const urlSymbol = new URLSearchParams(window.location.search).get(SYMBOL_QUERY_KEY);
     let lastSymbol: string | null = null;
@@ -200,21 +198,9 @@ export default function Home() {
       .then((cfg) => {
         setConfig(cfg);
         const engineSymbols = cfg.symbols ?? DEFAULT_SYMBOLS;
-
-        // One-time migration: the nav bar used to be seeded implicitly from
-        // configuredSymbols — carry that over into favorites so existing
-        // users don't lose their nav bar contents now that it's user-owned.
-        if (!migrated) {
-          storedFavorites = Array.from(new Set([...storedFavorites, ...engineSymbols]));
-          writeJsonList(FAVORITE_SYMBOLS_KEY, storedFavorites);
-          localStorage.setItem(FAVORITES_MIGRATED_KEY, "1");
-          setFavoriteSymbols(storedFavorites);
-        }
-
-        const initial = resolved ?? storedFavorites[0] ?? engineSymbols[0] ?? DEFAULT_SYMBOLS[0];
+        const initial = resolved ?? storedFavorites[0] ?? storedExtras[0] ?? engineSymbols[0] ?? DEFAULT_SYMBOLS[0];
         if (
           initial &&
-          !engineSymbols.includes(initial) &&
           !storedFavorites.includes(initial) &&
           !storedExtras.includes(initial)
         ) {
@@ -225,7 +211,16 @@ export default function Home() {
         setSymbol((prev) => prev ?? initial);
       })
       .catch(() => {
-        const initial = resolved ?? storedFavorites[0] ?? DEFAULT_SYMBOLS[0];
+        const initial = resolved ?? storedFavorites[0] ?? storedExtras[0] ?? DEFAULT_SYMBOLS[0];
+        if (
+          initial &&
+          !storedFavorites.includes(initial) &&
+          !storedExtras.includes(initial)
+        ) {
+          const updatedExtras = [...storedExtras, initial];
+          writeJsonList(EXTRA_SYMBOLS_KEY, updatedExtras);
+          setExtraSymbols(updatedExtras);
+        }
         setSymbol((prev) => prev ?? initial);
       });
   }, []);
@@ -341,11 +336,20 @@ export default function Home() {
               className={`flex items-center gap-1 rounded border px-2 py-1 ${
                 s === symbol ? "border-accent text-accent" : "border-line text-ink-muted"
               }`}
-              title="Browsed from the broker's catalog — not pinned to the nav bar"
+              title={
+                configuredSymbols.includes(s)
+                  ? "Engine-traded symbol (configs/app.yaml) — not pinned to the nav bar"
+                  : "Browsed from the broker's catalog — not pinned to the nav bar"
+              }
             >
               <button className="cursor-pointer" onClick={() => setSymbol(s)}>
                 {s}
               </button>
+              {configuredSymbols.includes(s) && (
+                <span className="text-[10px] text-accent" title="Traded live by the engine">
+                  ●
+                </span>
+              )}
               <button
                 className="cursor-pointer text-ink-muted hover:text-accent"
                 onClick={() => toggleFavorite(s)}

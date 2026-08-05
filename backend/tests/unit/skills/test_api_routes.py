@@ -224,6 +224,41 @@ async def test_update_bot_unknown_strategy_422s(api):
     assert response.status_code == 422
 
 
+async def test_rename_bot_succeeds(api):
+    response = await api.put(
+        "/skills/normal/XAUUSD/bots/breakout_v1/name", json={"new_bot_name": "my_breakout"}
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["bot_name"] == "my_breakout"
+    assert body["strategy"] == "breakout_v1"  # unchanged
+
+    listing = await api.get("/skills/normal")
+    assert [s["bot_name"] for s in listing.json()] == ["my_breakout"]
+
+
+async def test_rename_bot_unknown_bot_404s(api):
+    response = await api.put(
+        "/skills/normal/XAUUSD/bots/does_not_exist/name", json={"new_bot_name": "new_name"}
+    )
+    assert response.status_code == 404
+
+
+async def test_rename_bot_invalid_name_422s(api):
+    response = await api.put(
+        "/skills/normal/XAUUSD/bots/breakout_v1/name", json={"new_bot_name": "***"}
+    )
+    assert response.status_code == 422
+
+
+async def test_rename_bot_duplicate_name_409s(api):
+    await api.post("/skills/normal/XAUUSD/bots", json={"strategy_name": "mean_reversion_v1"})
+    response = await api.put(
+        "/skills/normal/XAUUSD/bots/breakout_v1/name", json={"new_bot_name": "mean_reversion_v1"}
+    )
+    assert response.status_code == 409
+
+
 async def test_remove_bot_succeeds(api):
     response = await api.delete("/skills/normal/XAUUSD/bots/breakout_v1")
     assert response.status_code == 204

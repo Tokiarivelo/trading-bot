@@ -43,7 +43,11 @@ from src.market_data.adapters.candle_repository import CandleRepository
 from src.market_data.adapters.replay import ReplayMarketDataPort, SymbolSpec
 from src.market_data.adapters.symbol_spec_repository import SymbolSpecRepository
 from src.market_data.domain.models import Candle, Timeframe
-from src.shared.config.loaders import load_risk_caps, load_symbol_trading_config_if_exists
+from src.shared.config.loaders import (
+    load_risk_caps,
+    load_symbol_trading_config_if_exists,
+    load_volatility_config,
+)
 from src.shared.config.settings import CONFIGS_DIR, load_yaml_config
 from src.shared.db.base import make_session_factory
 from src.shared.events.bus import EventBus
@@ -161,6 +165,7 @@ async def run_backtest(
             )
     resolved_min_rr = symbol_config.min_rr if symbol_config is not None else DEFAULT_MIN_RR
     risk_caps = load_risk_caps(configs_dir)
+    volatility_config = load_volatility_config(configs_dir)
     if min_lot_fallback_enabled is not None or max_risk_per_trade_pct is not None:
         risk_caps = dataclasses.replace(
             risk_caps,
@@ -231,7 +236,9 @@ async def run_backtest(
         broker=broker, market_data=replay, spread_gate=spread_gate, event_bus=event_bus
     )
     risk_manager = RiskManager(caps=risk_caps, timezone=timezone)
-    position_manager = PositionManager(order_service=order_service, market_data=replay)
+    position_manager = PositionManager(
+        order_service=order_service, market_data=replay, volatility_config=volatility_config
+    )
 
     clock_box = {"now": history_start}
     clock: Callable[[], datetime] = lambda: clock_box["now"]  # noqa: E731
@@ -258,6 +265,7 @@ async def run_backtest(
         skill_selector=FixedSkillSelector(strategy_name),
         strategy_source=registry,
         entry_timeframe=strategy.spec.entry_timeframe,
+        volatility_config=volatility_config,
         clock=clock,
         context_builder=CachedContextBuilder(candles),
     )
@@ -324,7 +332,7 @@ async def run_backtest(
         risk_per_trade_pct=risk_caps.risk_per_trade_pct,
         daily_loss_limit_pct=risk_caps.daily_loss_limit_pct,
         max_open_positions=risk_caps.max_open_positions,
-        max_trades_per_day=risk_caps.max_trades_per_day,
+        max_trades_per_day_enabled=risk_caps.max_trades_per_day_enabled,
         consecutive_loss_pause=risk_caps.consecutive_loss_pause,
         min_lot_fallback_enabled=risk_caps.min_lot_fallback_enabled,
         max_risk_per_trade_pct=risk_caps.max_risk_per_trade_pct,

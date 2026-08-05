@@ -152,3 +152,19 @@ async def test_analytics_endpoints_empty_when_no_trades(api, repository, tmp_pat
 
     assert symbols.json() == []
     assert bots.json() == []
+
+
+async def test_analytics_endpoints_filter_by_open_from_and_open_to(api):
+    t_15 = int(utc(2026, 7, 10, 15, 0).timestamp())
+
+    res = await api.get(f"/accounts/default/journal/analytics/symbols?open_from={t_15}")
+    assert res.status_code == 200
+    xau = next(r for r in res.json() if r["symbol"] == "XAUUSD")
+    assert xau["closed_count"] == 1
+    assert xau["total_profit"] == -4.0
+
+    res_bots = await api.get(f"/accounts/default/journal/analytics/bots?open_to={t_15}")
+    assert res_bots.status_code == 200
+    assert len(res_bots.json()) == 1
+    bot = res_bots.json()[0]
+    assert bot["trade_count"] == 2

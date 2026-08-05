@@ -12,6 +12,7 @@ from src.alerting.domain.models import AlertEventFlags, AlertingConfig
 from src.broker.domain.account import AccountConfig
 from src.broker.domain.symbol_config import SymbolTradingConfig
 from src.engine.domain.models import RiskCaps
+from src.engine.domain.volatility import VolatilityConfig
 from src.news.domain.models import ImpactLevel, NewsConfig, TrackedEvent
 from src.shared.config.maintenance import MaintenanceConfig
 from src.shared.config.settings import load_yaml_config
@@ -53,10 +54,31 @@ def load_risk_caps(configs_dir: Path) -> RiskCaps:
         risk_per_trade_pct=data["risk_per_trade_pct"],
         daily_loss_limit_pct=data["daily_loss_limit_pct"],
         max_open_positions=data["max_open_positions"],
-        max_trades_per_day=data["max_trades_per_day"],
+        max_trades_per_day_enabled=data.get("max_trades_per_day_enabled", False),
         consecutive_loss_pause=data["consecutive_loss_pause"],
         min_lot_fallback_enabled=data.get("min_lot_fallback_enabled", False),
         max_risk_per_trade_pct=data.get("max_risk_per_trade_pct"),
+    )
+
+
+def load_volatility_config(configs_dir: Path) -> VolatilityConfig:
+    data = load_yaml_config("volatility", configs_dir)
+    return VolatilityConfig(
+        atr_period=data.get("atr_period", 14),
+        regime_lookback_bars=data.get("regime_lookback_bars", 100),
+        low_percentile=data.get("low_percentile", 20.0),
+        high_percentile=data.get("high_percentile", 70.0),
+        extreme_percentile=data.get("extreme_percentile", 90.0),
+        sl_multiplier_low=data.get("sl_multiplier_low", 0.85),
+        sl_multiplier_normal=data.get("sl_multiplier_normal", 1.0),
+        sl_multiplier_high=data.get("sl_multiplier_high", 1.3),
+        tp_multiplier_low=data.get("tp_multiplier_low", 0.85),
+        tp_multiplier_normal=data.get("tp_multiplier_normal", 1.0),
+        tp_multiplier_high=data.get("tp_multiplier_high", 1.3),
+        extreme_close_if_losing=data.get("extreme_close_if_losing", True),
+        extreme_profit_lock_r_mult=data.get("extreme_profit_lock_r_mult", 0.5),
+        chandelier_atr_mult=data.get("chandelier_atr_mult", 2.0),
+        chandelier_min_profit_r=data.get("chandelier_min_profit_r", 1.0),
     )
 
 

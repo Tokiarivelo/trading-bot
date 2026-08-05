@@ -295,7 +295,7 @@ async def test_get_report_defaults_risk_caps_for_legacy_reports(api):
         "risk_per_trade_pct",
         "daily_loss_limit_pct",
         "max_open_positions",
-        "max_trades_per_day",
+        "max_trades_per_day_enabled",
         "consecutive_loss_pause",
         "min_lot_fallback_enabled",
         "max_risk_per_trade_pct",
@@ -309,7 +309,7 @@ async def test_get_report_defaults_risk_caps_for_legacy_reports(api):
     assert body["risk_per_trade_pct"] == 0.5
     assert body["daily_loss_limit_pct"] == 2.0
     assert body["max_open_positions"] == 100
-    assert body["max_trades_per_day"] == 8
+    assert body["max_trades_per_day_enabled"] is False
     assert body["consecutive_loss_pause"] == 10
     assert body["min_lot_fallback_enabled"] is False
     assert body["max_risk_per_trade_pct"] is None

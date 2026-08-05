@@ -14,7 +14,9 @@ class RiskCaps:
     risk_per_trade_pct: float
     daily_loss_limit_pct: float
     max_open_positions: int
-    max_trades_per_day: int
+    # Manual daily kill switch, not a count: true blocks every new trade for
+    # the rest of the trading day; false leaves trade count today unlimited.
+    max_trades_per_day_enabled: bool = False
     consecutive_loss_pause: int
     # Broker-minimum-lot fallback (see RiskManager.size_position): when the
     # balance is too small for risk_per_trade_pct to reach volume_min,
