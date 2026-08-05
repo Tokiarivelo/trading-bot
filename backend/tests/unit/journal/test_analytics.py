@@ -200,6 +200,13 @@ def test_trade_analytics_record_has_no_json_snapshot_or_structure_fields():
         "profit",
         "skill",
         "strategy_version",
+        # Execution telemetry / excursion (OBSERVABILITY_PLAN.md Phase 3) —
+        # scalar columns the per-bot aggregates read, still no JSON.
+        "slippage",
+        "execution_latency_ms",
+        "broker_retcode",
+        "mfe",
+        "mae",
     }
     excluded = {
         "m5_entry_snapshot",
@@ -317,3 +324,84 @@ def test_bot_analytics_max_drawdown_zero_when_curve_never_dips():
     bot = compute_bot_analytics(trades)[0]
 
     assert bot.max_drawdown == 0.0
+
+
+# ── execution-quality aggregates (OBSERVABILITY_PLAN.md Phase 3) ────────────
+
+
+def telemetry_record(id: str, **kw) -> TradeRecord:
+    """A closed, bot-attributed trade carrying execution telemetry."""
+    defaults = dict(
+        skill="normal/xauusd/a",
+        close_time=utc(2026, 7, 10, 15, 0),
+        profit=10.0,
+    )
+    return make_record(id, **{**defaults, **kw})
+
+
+def test_bot_analytics_averages_slippage_latency_and_excursion():
+    bots = compute_bot_analytics(
+        [
+            telemetry_record("1", slippage=0.10, execution_latency_ms=200.0, mfe=8.0, mae=2.0),
+            telemetry_record("2", slippage=0.30, execution_latency_ms=400.0, mfe=4.0, mae=6.0),
+        ]
+    )
+
+    assert bots[0].avg_slippage == 0.20
+    assert bots[0].measured_slippage_count == 2
+    assert bots[0].avg_execution_latency_ms == 300.0
+    assert bots[0].avg_mfe == 6.0
+    assert bots[0].avg_mae == 4.0
+    assert bots[0].mfe_mae_ratio == 1.5
+
+
+def test_unmeasured_trades_are_skipped_rather_than_counted_as_zero():
+    """Trades journaled before Phase 3 carry no telemetry; folding them in as
+    zeros would drag every average toward 0 the longer a bot's history is."""
+    bots = compute_bot_analytics(
+        [
+            telemetry_record("1", slippage=0.40),
+            telemetry_record("2"),  # pre-Phase-3 row: slippage is None
+        ]
+    )
+
+    assert bots[0].avg_slippage == 0.40
+    assert bots[0].measured_slippage_count == 1
+
+
+def test_a_bot_with_no_telemetry_at_all_reports_none_not_zero():
+    bots = compute_bot_analytics([telemetry_record("1")])
+
+    assert bots[0].avg_slippage is None
+    assert bots[0].avg_execution_latency_ms is None
+    assert bots[0].avg_mfe is None
+    assert bots[0].mfe_mae_ratio is None
+    assert bots[0].retcode_histogram == ()
+
+
+def test_retcode_histogram_counts_codes_most_frequent_first():
+    bots = compute_bot_analytics(
+        [
+            telemetry_record("1", broker_retcode=10009),
+            telemetry_record("2", broker_retcode=10016),
+            telemetry_record("3", broker_retcode=10016),
+            telemetry_record("4"),  # no code reported — contributes no bucket
+        ]
+    )
+
+    assert bots[0].retcode_histogram == ((10016, 2), (10009, 1))
+
+
+def test_excursion_is_split_by_outcome_to_answer_tp_and_sl_questions():
+    """avg_mfe_on_losers answers "are my TPs too far", avg_mae_on_winners
+    answers "are my SLs too tight" — each must read only its own subset."""
+    bots = compute_bot_analytics(
+        [
+            telemetry_record("1", profit=10.0, mfe=12.0, mae=1.0),
+            telemetry_record("2", profit=-5.0, mfe=9.0, mae=7.0),
+            telemetry_record("3", profit=-5.0, mfe=11.0, mae=8.0),
+        ]
+    )
+
+    assert bots[0].avg_mfe_on_losers == 10.0
+    assert bots[0].avg_mae_on_winners == 1.0

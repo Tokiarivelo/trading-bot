@@ -274,6 +274,16 @@ class EquityPointOut(BaseModel):
     )
 
 
+class RetcodeCountOut(BaseModel):
+    """One bucket of a bot's broker-return-code histogram."""
+
+    retcode: int = Field(
+        description="Broker return code as reported on the fill — MT5 10009 means the deal "
+        "completed; 10016 is 'invalid stops', 10014 'invalid volume', and so on."
+    )
+    count: int = Field(description="How many of this bot's fills reported that code.")
+
+
 class BotAnalyticsOut(BaseModel):
     """Aggregate performance of one bot (skill), plus its equity curve — one
     entry per bot on `GET /journal/analytics/bots`. Trades placed manually
@@ -324,4 +334,63 @@ class BotAnalyticsOut(BaseModel):
     last_trade_time: int | None = Field(description="Latest open_time, epoch seconds UTC.")
     equity_curve: list[EquityPointOut] = Field(
         description="Cumulative-profit curve over this bot's closed trades, oldest first."
+    )
+    avg_slippage: float | None = Field(
+        description=(
+            "Average execution slippage in price units, signed so a POSITIVE number means "
+            "the fills cost the trader (bought higher / sold lower than the price the order "
+            "asked for). Null when none of this bot's trades carry the measurement — trades "
+            "journaled before execution telemetry existed are skipped, not counted as zero."
+        )
+    )
+    measured_slippage_count: int = Field(
+        description=(
+            "Number of this bot's trades `avg_slippage` averages over — the denominator, so a "
+            "large-looking average taken from two fills can be read as the noise it is."
+        )
+    )
+    avg_execution_latency_ms: float | None = Field(
+        description=(
+            "Average milliseconds from the strategy emitting the signal to the broker "
+            "acknowledging the fill. Null when unmeasured (manual/API trades carry no signal)."
+        )
+    )
+    retcode_histogram: list[RetcodeCountOut] = Field(
+        description=(
+            "Broker return codes across this bot's fills, most frequent first. MT5 10009 is a "
+            "clean deal; a recurring other code (e.g. 10016 invalid stops) is a systematic "
+            "execution problem, not bad luck. Empty when no fill reported a code."
+        )
+    )
+    avg_mfe: float | None = Field(
+        description=(
+            "Average maximum favorable excursion in price units over closed trades — how far "
+            "the market moved in the trade's favor from entry, at best. Null if unmeasured."
+        )
+    )
+    avg_mae: float | None = Field(
+        description=(
+            "Average maximum adverse excursion in price units over closed trades — how far "
+            "the market moved against the trade from entry, at worst. Null if unmeasured."
+        )
+    )
+    mfe_mae_ratio: float | None = Field(
+        description=(
+            "avg_mfe / avg_mae. Above 1 means trades generally run further in favor than "
+            "against. Null when avg_mae is zero or unmeasured."
+        )
+    )
+    avg_mfe_on_losers: float | None = Field(
+        description=(
+            "Average MFE across this bot's LOSING closed trades — how far in profit a loser "
+            "typically got before dying. Large relative to `avg_win` means the take-profit is "
+            "parked beyond where price actually turns. Null if no measured losers."
+        )
+    )
+    avg_mae_on_winners: float | None = Field(
+        description=(
+            "Average MAE across this bot's WINNING closed trades — how much heat a winner "
+            "typically took. Approaching the bot's stop distance means stops are as tight as "
+            "they can get before winners start being stopped out. Null if no measured winners."
+        )
     )

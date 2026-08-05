@@ -51,3 +51,13 @@ class TradeRow(Base):
     pattern: Mapped[str | None] = mapped_column(String(64), nullable=True)
     structure: Mapped[list] = mapped_column(JSON, default=list)
     indicators: Mapped[list] = mapped_column(JSON, default=list)
+    # Execution telemetry + excursion (OBSERVABILITY_PLAN.md Phase 3).
+    # Nullable throughout: every trade journaled before Phase 3 has no such
+    # measurement, and "unknown" must stay distinguishable from "zero
+    # slippage" / "never moved" in the analytics averages.
+    requested_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    slippage: Mapped[float | None] = mapped_column(Float, nullable=True)
+    execution_latency_ms: Mapped[float | None] = mapped_column(Float, nullable=True)
+    broker_retcode: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    mfe: Mapped[float | None] = mapped_column(Float, nullable=True)
+    mae: Mapped[float | None] = mapped_column(Float, nullable=True)

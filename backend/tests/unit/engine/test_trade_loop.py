@@ -161,6 +161,7 @@ class FakeOrderService:
         self.opened: list[dict] = []
         self.closed: list[int] = []
         self.signal_ids: list[str | None] = []
+        self.signal_emit_times: list = []
         self._raise_on_open = raise_on_open
 
     async def get_positions(self, symbol=None):
@@ -190,8 +191,10 @@ class FakeOrderService:
         structure=(),
         indicators=(),
         signal_id=None,
+        signal_emitted_at=None,
     ):
         self.signal_ids.append(signal_id)
+        self.signal_emit_times.append(signal_emitted_at)
         if self._raise_on_open:
             raise self._raise_on_open
         ticket = len(self.opened) + 1

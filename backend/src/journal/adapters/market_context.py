@@ -29,6 +29,12 @@ class CandleRepositoryMarketContext:
             m5=tuple(_to_snapshot(c) for c in m5), h1=tuple(_to_snapshot(c) for c in h1)
         )
 
+    async def latest_candle(self, symbol: str, timeframe: str) -> CandleSnapshot | None:
+        candles = await asyncio.to_thread(
+            self._repository.get_latest, symbol, Timeframe(timeframe), 1
+        )
+        return _to_snapshot(candles[-1]) if candles else None
+
 
 def _to_snapshot(candle: Candle) -> CandleSnapshot:
     return CandleSnapshot(

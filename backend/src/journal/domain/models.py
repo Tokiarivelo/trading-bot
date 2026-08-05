@@ -65,6 +65,33 @@ class TradeRecord:
     """Swing points as (label, price, time), label one of HH/HL/LH/LL."""
     indicators: tuple[tuple[str, float, float, str, bool], ...] = ()
     """Confluence-check readings as (name, value, threshold, comparison, passed)."""
+    # ── Execution telemetry (OBSERVABILITY_PLAN.md Phase 3) ────────────────
+    # Measured by `broker/application/order_service.py` around the broker call
+    # and carried here on `PositionOpened`. All None for trades journaled
+    # before Phase 3, and for fills whose caller had no reference price.
+    requested_price: float | None = None
+    """Tradable price the order asked for (ask to buy, bid to sell)."""
+    slippage: float | None = None
+    """Fill minus requested, signed so POSITIVE always means it cost the
+    trader (bought higher / sold lower). See `broker.domain.trading.
+    execution_slippage`."""
+    execution_latency_ms: float | None = None
+    """Milliseconds from the strategy emitting the signal to the broker
+    acknowledging the fill. None for manual/API trades (no signal)."""
+    broker_retcode: int | None = None
+    """Broker return code on the fill — MT5 10009 is a clean deal. None for
+    the paper broker, which has no such concept."""
+    # ── Excursion (MFE/MAE), also Phase 3 ──────────────────────────────────
+    # Accumulated while the position is open by `TradeJournalService.
+    # on_candle_closed` and finalized against the close price on
+    # `on_position_closed` — see `journal/domain/excursion.py` for the
+    # (pure) arithmetic and the rationale for where it lives.
+    mfe: float | None = None
+    """Maximum favorable excursion in price units — the furthest the market
+    ever moved in the trade's favor from entry. Non-negative."""
+    mae: float | None = None
+    """Maximum adverse excursion in price units — the furthest the market
+    ever moved against the trade from entry. Non-negative."""
 
     @property
     def is_open(self) -> bool:
@@ -72,10 +99,26 @@ class TradeRecord:
 
 
 @dataclass(frozen=True, kw_only=True)
+class OpenTradeExcursion:
+    """The only fields the per-candle MFE/MAE accumulation needs from an open
+    trade. Backs `JournalRepository.get_open_excursions`, which selects just
+    these columns — the accumulator runs on every closed candle for every open
+    position, so loading whole `TradeRecord`s (with their four JSON snapshot
+    columns) on that path would be pure waste."""
+
+    id: str
+    side: str  # "buy" | "sell"
+    open_price: float
+    mfe: float | None
+    mae: float | None
+
+
+@dataclass(frozen=True, kw_only=True)
 class TradeAnalyticsRecord:
     """Slim projection of `TradeRecord` carrying only the fields
     `domain/analytics.py`'s aggregation actually reads (id, symbol, volume,
-    open/close time, profit, skill, strategy_version). Backs
+    open/close time, profit, skill, strategy_version, and the Phase 3
+    execution-telemetry/excursion columns). Backs
     `JournalRepository.get_all_for_analytics`, which selects just these
     columns so SQLAlchemy never deserializes the four JSON snapshot/structure
     columns (`m5/h1_entry/exit_snapshot`, `structure`) that analytics never
@@ -90,6 +133,11 @@ class TradeAnalyticsRecord:
     profit: float | None
     skill: str | None
     strategy_version: str | None
+    slippage: float | None = None
+    execution_latency_ms: float | None = None
+    broker_retcode: int | None = None
+    mfe: float | None = None
+    mae: float | None = None
 
     @property
     def is_open(self) -> bool:

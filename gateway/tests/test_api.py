@@ -223,8 +223,12 @@ def test_order_maps_rejection_to_502(api, fake_mt5):
     response = api.post("/order", json={"symbol": "XAUUSD", "side": "buy", "volume": 0.1})
     assert response.status_code == 502
     # FakeMt5.reject_order returns retcode=10004 (requote) — the message
-    # should decode it in plain English, not just the bare number.
-    assert "requote" in response.json()["detail"]
+    # should decode it in plain English, not just the bare number, and the
+    # code itself travels as its own field so the backend can journal it
+    # without parsing prose (OBSERVABILITY_PLAN.md Phase 3).
+    detail = response.json()["detail"]
+    assert "requote" in detail["message"]
+    assert detail["retcode"] == 10004
 
 
 def test_close_position_returns_realized_profit(api):
@@ -265,4 +269,9 @@ def test_close_unknown_position_returns_502(api):
 def test_trading_requires_login(api):
     response = api.post("/order", json={"symbol": "XAUUSD", "side": "buy", "volume": 0.1})
     assert response.status_code == 502
-    assert "not logged in" in response.json()["detail"]
+    # A trading route's 502 detail is the structured refusal body; a
+    # not-logged-in failure isn't a trade-server rejection, so it carries no
+    # retcode.
+    detail = response.json()["detail"]
+    assert "not logged in" in detail["message"]
+    assert detail["retcode"] is None

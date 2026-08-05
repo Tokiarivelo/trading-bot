@@ -22,6 +22,15 @@ from ..schemas import (
 router = APIRouter()
 
 
+def _rejection(exc: Mt5Error) -> dict[str, object]:
+    """502 body for a broker refusal: the human message plus MT5's own
+    `retcode` as a separate field, so the backend records the code
+    structurally instead of regex-ing it out of the message
+    (OBSERVABILITY_PLAN.md Phase 3). `retcode` is null when the failure
+    wasn't a trade-server rejection (terminal unreachable, symbol lookup)."""
+    return {"message": str(exc), "retcode": exc.retcode}
+
+
 @router.post("/order", response_model=OrderResultOut)
 def order(body: OrderRequest) -> OrderResultOut:
     if body.side not in VALID_SIDES:
@@ -33,7 +42,7 @@ def order(body: OrderRequest) -> OrderResultOut:
             )
         )
     except Mt5Error as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
+        raise HTTPException(status_code=502, detail=_rejection(exc)) from exc
 
 
 @router.get("/positions", response_model=list[PositionOut])
@@ -41,7 +50,7 @@ def positions(symbol: str | None = None) -> list[PositionOut]:
     try:
         return [PositionOut(**p) for p in client.positions(symbol)]
     except Mt5Error as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
+        raise HTTPException(status_code=502, detail=_rejection(exc)) from exc
 
 
 @router.post("/positions/{ticket}/modify")
@@ -49,7 +58,7 @@ def modify_position(ticket: int, body: ModifyRequest) -> dict[str, str]:
     try:
         client.position_modify(ticket, body.sl, body.tp)
     except Mt5Error as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
+        raise HTTPException(status_code=502, detail=_rejection(exc)) from exc
     return {"status": "ok"}
 
 
@@ -58,7 +67,7 @@ def close_position(ticket: int, body: CloseRequest | None = None) -> OrderResult
     try:
         return OrderResultOut(**client.position_close(ticket, body.volume if body else None))
     except Mt5Error as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
+        raise HTTPException(status_code=502, detail=_rejection(exc)) from exc
 
 
 @router.get("/positions/{ticket}/history", response_model=PositionCloseInfoOut)
@@ -66,7 +75,7 @@ def position_history(ticket: int) -> PositionCloseInfoOut:
     try:
         info = client.position_close_info(ticket)
     except Mt5Error as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
+        raise HTTPException(status_code=502, detail=_rejection(exc)) from exc
     if info is None:
         raise HTTPException(status_code=404, detail=f"no close history for ticket {ticket}")
     return PositionCloseInfoOut(**info)
@@ -94,7 +103,7 @@ def place_pending_order(body: PendingOrderRequest) -> PendingOrderOut:
             )
         )
     except Mt5Error as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
+        raise HTTPException(status_code=502, detail=_rejection(exc)) from exc
 
 
 @router.get("/orders/pending", response_model=list[PendingOrderOut])
@@ -102,7 +111,7 @@ def pending_orders(symbol: str | None = None) -> list[PendingOrderOut]:
     try:
         return [PendingOrderOut(**o) for o in client.pending_orders(symbol)]
     except Mt5Error as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
+        raise HTTPException(status_code=502, detail=_rejection(exc)) from exc
 
 
 @router.post("/orders/pending/{ticket}/modify")
@@ -110,7 +119,7 @@ def modify_pending_order(ticket: int, body: ModifyPendingOrderRequest) -> dict[s
     try:
         client.modify_pending_order(ticket, body.price, body.sl, body.tp)
     except Mt5Error as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
+        raise HTTPException(status_code=502, detail=_rejection(exc)) from exc
     return {"status": "ok"}
 
 
@@ -119,5 +128,5 @@ def cancel_pending_order(ticket: int) -> dict[str, str]:
     try:
         client.cancel_pending_order(ticket)
     except Mt5Error as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
+        raise HTTPException(status_code=502, detail=_rejection(exc)) from exc
     return {"status": "ok"}

@@ -8,7 +8,8 @@ plumbing can be exercised end-to-end before the engine exists.
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from collections.abc import Callable
+from datetime import UTC, datetime
 
 from src.activity.domain.models import DecisionCheck
 from src.activity.ports.signal_decisions import SignalDecisionSinkPort
@@ -22,6 +23,7 @@ from src.broker.domain.trading import (
     PendingOrderRequest,
     Position,
     Side,
+    execution_slippage,
 )
 from src.broker.ports.trading import BrokerPort
 from src.market_data.ports.market_data import MarketDataPort
@@ -29,6 +31,11 @@ from src.shared.events.bus import EventBus
 from src.shared.events.definitions import PositionClosed, PositionOpened
 
 logger = logging.getLogger(__name__)
+
+# MT5 TRADE_RETCODE_DONE — the "the deal went through" code. Used only as the
+# threshold a recorded `broker_retcode` check is compared against, so the
+# decision trail shows what the code should have been.
+_RETCODE_DONE = 10009
 
 
 class OrderService:
@@ -39,11 +46,15 @@ class OrderService:
         spread_gate: SpreadGate,
         event_bus: EventBus,
         signal_decisions: SignalDecisionSinkPort | None = None,
+        clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
         self._broker = broker
         self._market_data = market_data
         self._spread_gate = spread_gate
         self._event_bus = event_bus
+        # Injected so execution-latency measurement (Phase 3) is deterministic
+        # under test; production passes wall-clock UTC.
+        self._clock = clock
         # Typed decision trail (OBSERVABILITY_PLAN.md Phase 1) — used only to
         # stamp the outcome of a `signal_id` the engine already recorded.
         # Optional: manual/API orders carry no signal_id, and the backtest
@@ -74,6 +85,7 @@ class OrderService:
         structure: tuple[tuple[str, float, datetime], ...] = (),
         indicators: tuple[tuple[str, float, float, str, bool], ...] = (),
         signal_id: str | None = None,
+        signal_emitted_at: datetime | None = None,
     ) -> ExecutionResult:
         """`max_spread_points`, when set, overrides the symbol's configured
         cap for this order only — used by news skills to widen (or, in
@@ -93,7 +105,12 @@ class OrderService:
         `signal_id`, when set, is the `SignalDecision` the engine recorded for
         the signal this order came from — this method stamps that decision's
         terminal outcome (`opened` / `spread_veto` / `broker_rejected`).
-        `None` for manual/API orders, which have no signal behind them."""
+        `None` for manual/API orders, which have no signal behind them.
+        `signal_emitted_at` is that same `SignalDecision`'s `created_at` — the
+        instant the strategy emitted the signal — passed down explicitly so
+        measuring execution latency costs no database read on the order path;
+        it is the emit end of the `signal_id` decision's signal→fill span
+        (OBSERVABILITY_PLAN.md Phase 3)."""
         info = await self._market_data.get_symbol_info(symbol)
         reference_price = info.ask if side is Side.BUY else info.bid
         sl_distance = abs(reference_price - sl) if sl is not None else None
@@ -158,13 +175,31 @@ class OrderService:
         try:
             result = await self._broker.open_position(order)
         except OrderRejected as exc:
+            # The broker's own numeric refusal code, recorded on the decision
+            # trail (there is no TradeRecord for an order that never filled) —
+            # a fleet dying on MT5 10016 "invalid stops" is otherwise only
+            # visible as free text in a log line.
+            retcode_checks = (
+                (
+                    DecisionCheck(
+                        name="broker_retcode",
+                        value=float(exc.retcode),
+                        threshold=float(_RETCODE_DONE),
+                        comparison="==",
+                        passed=False,
+                    ),
+                )
+                if exc.retcode is not None
+                else ()
+            )
             # Unlike the spread/RR veto above, this is the broker/MT5 itself
             # refusing the order (stops too close, market closed, filling
             # mode, price moved, ...) — without this log the rejection was
             # previously invisible: the caller only sees `OrderRejected`
             # propagate and silently gives up on the candle.
             logger.info(
-                "ENTRY REJECTED (broker): %s %s %.2f lots sl=%s tp=%s strategy=%s skill=%s — %s",
+                "ENTRY REJECTED (broker): %s %s %.2f lots sl=%s tp=%s strategy=%s skill=%s "
+                "retcode=%s — %s",
                 side.value,
                 symbol,
                 volume,
@@ -172,23 +207,45 @@ class OrderService:
                 tp,
                 strategy_version,
                 skill,
+                exc.retcode,
                 exc,
             )
             await self._record_outcome(
-                signal_id, "broker_rejected", base_reason=reason, explanation=str(exc)
+                signal_id,
+                "broker_rejected",
+                base_reason=reason,
+                explanation=str(exc),
+                checks=retcode_checks,
             )
             raise
+        # Execution telemetry, measured here because this is the only place
+        # that sees both the price the order asked for and the broker's ack
+        # (OBSERVABILITY_PLAN.md Phase 3). `reference_price` is the tradable
+        # price the spread gate was just evaluated against, so it is exactly
+        # the price this order was placed at.
+        requested_price = reference_price
+        slippage = execution_slippage(side, requested_price, result.price)
+        execution_latency_ms = (
+            (self._clock() - signal_emitted_at).total_seconds() * 1000.0
+            if signal_emitted_at is not None
+            else None
+        )
         logger.info(
-            "ENTRY OPENED: ticket=%d %s %s %.2f lots @ %.5f sl=%s tp=%s spread=%dpts "
+            "ENTRY OPENED: ticket=%d %s %s %.2f lots @ %.5f (requested %.5f, slippage %+.5f) "
+            "sl=%s tp=%s spread=%dpts latency=%sms retcode=%s "
             "strategy=%s skill=%s magic=%d reason=%s",
             result.ticket,
             side.value,
             symbol,
             volume,
             result.price,
+            requested_price,
+            slippage,
             sl,
             tp,
             result.spread_points,
+            f"{execution_latency_ms:.0f}" if execution_latency_ms is not None else "n/a",
+            result.retcode,
             strategy_version,
             skill,
             magic,
@@ -219,6 +276,10 @@ class OrderService:
                 pattern=pattern,
                 structure=structure,
                 indicators=indicators,
+                requested_price=requested_price,
+                slippage=slippage,
+                execution_latency_ms=execution_latency_ms,
+                broker_retcode=result.retcode,
             )
         )
         return result

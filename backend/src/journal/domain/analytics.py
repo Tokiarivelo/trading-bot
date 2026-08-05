@@ -86,6 +86,37 @@ class BotAnalytics:
     first_trade_time: int | None
     last_trade_time: int | None
     equity_curve: tuple[EquityPoint, ...]
+    # ── Execution quality (OBSERVABILITY_PLAN.md Phase 3) ──────────────────
+    # Every average here is taken over the trades that actually carry the
+    # measurement; trades journaled before Phase 3 (all-None columns) are
+    # skipped rather than counted as zero, which would silently drag a bot's
+    # average slippage toward 0 the longer its history is.
+    avg_slippage: float | None
+    """Mean signed slippage in price units, positive = the fills cost the
+    trader. None when no trade of this bot was measured."""
+    measured_slippage_count: int
+    """How many of this bot's trades the `avg_slippage` mean is over — the
+    denominator, so a -0.02 average off two fills isn't read as a verdict."""
+    avg_execution_latency_ms: float | None
+    """Mean signal-emit → broker-ack milliseconds. None when unmeasured."""
+    retcode_histogram: tuple[tuple[int, int], ...]
+    """`(broker_retcode, count)` over this bot's fills that reported one,
+    most frequent first. MT5 10009 is a clean deal; anything else recurring
+    here is a systematic execution problem."""
+    avg_mfe: float | None
+    """Mean maximum favorable excursion (price units) over closed trades."""
+    avg_mae: float | None
+    """Mean maximum adverse excursion (price units) over closed trades."""
+    mfe_mae_ratio: float | None
+    """avg_mfe / avg_mae. None when avg_mae is 0 or unmeasured."""
+    avg_mfe_on_losers: float | None
+    """Mean MFE across *losing* closed trades — "how far in profit was this
+    trade before it died". Large relative to the bot's average win is the
+    signature of a take-profit parked past where price actually turns."""
+    avg_mae_on_winners: float | None
+    """Mean MAE across *winning* closed trades — "how much heat a winner
+    took". Approaching the bot's stop distance means the stops are as tight
+    as they can get before winners start being stopped out."""
 
 
 def _closed(trades: list[AnalyticsRecord]) -> list[AnalyticsRecord]:
@@ -133,6 +164,33 @@ def _max_drawdown(equity_curve: tuple[EquityPoint, ...]) -> float:
         peak = max(peak, point.cumulative_profit)
         max_dd = max(max_dd, peak - point.cumulative_profit)
     return max_dd
+
+
+def _mean(values: list[float]) -> float | None:
+    """None (not 0.0) for an empty sample — "never measured" and "measured,
+    averages zero" are different answers, and only one of them is a reason to
+    go looking for a bug in the telemetry."""
+    return sum(values) / len(values) if values else None
+
+
+def _measured(trades: list[AnalyticsRecord], attribute: str) -> list[float]:
+    """The non-None readings of one telemetry attribute, in trade order."""
+    return [
+        float(getattr(t, attribute))
+        for t in trades
+        if getattr(t, attribute, None) is not None
+    ]
+
+
+def _retcode_histogram(trades: list[AnalyticsRecord]) -> tuple[tuple[int, int], ...]:
+    counts: dict[int, int] = defaultdict(int)
+    for t in trades:
+        code = getattr(t, "broker_retcode", None)
+        if code is not None:
+            counts[int(code)] += 1
+    # Most frequent first, code ascending as the tiebreak so the order is
+    # stable across calls (dashboards diff these lists).
+    return tuple(sorted(counts.items(), key=lambda item: (-item[1], item[0])))
 
 
 def compute_symbol_analytics(trades: list[AnalyticsRecord]) -> list[SymbolAnalytics]:
@@ -199,6 +257,9 @@ def compute_bot_analytics(trades: list[AnalyticsRecord]) -> list[BotAnalytics]:
         ]
         open_times = [int(t.open_time.timestamp()) for t in skill_trades]
         latest_trade = max(skill_trades, key=lambda t: t.open_time)
+        slippages = _measured(skill_trades, "slippage")
+        avg_mfe = _mean(_measured(closed, "mfe"))
+        avg_mae = _mean(_measured(closed, "mae"))
         results.append(
             BotAnalytics(
                 skill=skill,
@@ -226,6 +287,21 @@ def compute_bot_analytics(trades: list[AnalyticsRecord]) -> list[BotAnalytics]:
                 first_trade_time=min(open_times) if open_times else None,
                 last_trade_time=max(open_times) if open_times else None,
                 equity_curve=equity_curve,
+                avg_slippage=_mean(slippages),
+                measured_slippage_count=len(slippages),
+                avg_execution_latency_ms=_mean(
+                    _measured(skill_trades, "execution_latency_ms")
+                ),
+                retcode_histogram=_retcode_histogram(skill_trades),
+                avg_mfe=avg_mfe,
+                avg_mae=avg_mae,
+                mfe_mae_ratio=(
+                    avg_mfe / avg_mae
+                    if avg_mfe is not None and avg_mae is not None and avg_mae > 0
+                    else None
+                ),
+                avg_mfe_on_losers=_mean(_measured(losses, "mfe")),
+                avg_mae_on_winners=_mean(_measured(wins, "mae")),
             )
         )
     return sorted(results, key=lambda b: b.total_profit, reverse=True)

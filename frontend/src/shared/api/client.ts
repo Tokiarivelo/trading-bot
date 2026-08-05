@@ -440,6 +440,24 @@ export interface BotAnalytics {
   first_trade_time: number | null;
   last_trade_time: number | null;
   equity_curve: BotEquityPoint[];
+  // Execution quality (OBSERVABILITY_PLAN.md Phase 3). Null throughout means
+  // "never measured" — trades journaled before execution telemetry existed
+  // are skipped by the backend's averages rather than counted as zero.
+  avg_slippage: number | null; // price units, positive = the fills cost the trader
+  measured_slippage_count: number; // how many trades avg_slippage averages over
+  avg_execution_latency_ms: number | null; // signal emit -> broker ack
+  retcode_histogram: BotRetcodeCount[]; // most frequent first; MT5 10009 = clean deal
+  avg_mfe: number | null; // max favorable excursion, price units
+  avg_mae: number | null; // max adverse excursion, price units
+  mfe_mae_ratio: number | null;
+  avg_mfe_on_losers: number | null; // high vs avg_win => take-profits are too far
+  avg_mae_on_winners: number | null; // near the stop distance => stops are too tight
+}
+
+/** One bucket of a bot's broker-return-code histogram. */
+export interface BotRetcodeCount {
+  retcode: number; // MT5 code — 10009 done, 10016 invalid stops, 10014 invalid volume, ...
+  count: number;
 }
 
 export interface AnalyticsDateFilters {

@@ -87,6 +87,13 @@ class ExecutionResult:
     comment: str = ""
     magic: int = 0
     profit: float | None = None  # populated on close fills; None on open fills
+    retcode: int | None = None
+    """Broker return code for this deal — MT5's `OrderSendResult.retcode`
+    (10009 `TRADE_RETCODE_DONE` on a successful fill). `None` for brokers
+    that have no such concept (the paper broker) or a gateway too old to
+    report it. Recorded on the trade so execution-quality analytics can tell
+    a clean fill from one the broker only partly honoured
+    (OBSERVABILITY_PLAN.md Phase 3)."""
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -103,7 +110,30 @@ class ClosedPositionInfo:
 
 
 class OrderRejected(Exception):
-    """The broker (or a pre-trade rule) refused the order."""
+    """The broker (or a pre-trade rule) refused the order.
+
+    `retcode` is the broker's own numeric refusal code when the rejection came
+    from the broker itself — MT5 `10016` (invalid stops) once silently killed
+    an entire VIX75 fleet, and only the code identifies that unambiguously.
+    `None` when the refusal came from a backend-side pre-trade rule (spread/RR
+    gate, paper broker) or the gateway didn't report one."""
+
+    def __init__(self, message: str, retcode: int | None = None) -> None:
+        super().__init__(message)
+        self.retcode = retcode
+
+
+def execution_slippage(side: Side, requested_price: float, fill_price: float) -> float:
+    """Signed slippage on a fill, in price units, oriented so a POSITIVE
+    number always means the fill *cost* the trader.
+
+    A buy fills badly when it pays more than the ask it asked for, a sell when
+    it receives less than the bid it asked for — so the raw difference is
+    negated for sells. Keeping the sign convention in one pure function (and
+    not at each call site) is what makes "average slippage" comparable across
+    long and short bots at all."""
+    direction = 1.0 if side is Side.BUY else -1.0
+    return (fill_price - requested_price) * direction
 
 
 def pending_order_triggered(order: PendingOrder, bid: float, ask: float) -> bool:

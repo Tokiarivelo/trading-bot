@@ -101,6 +101,10 @@ class OrderResultOut(BaseModel):
     comment: str = ""
     magic: int = 0
     profit: float | None = None  # populated on close, None on open
+    retcode: int | None = None
+    """MT5 `OrderSendResult.retcode` for the deal — 10009 (TRADE_RETCODE_DONE)
+    on a successful fill. Reported so the backend can journal execution
+    quality; None from a gateway/broker that has no code to give."""
 
 
 class ModifyRequest(BaseModel):

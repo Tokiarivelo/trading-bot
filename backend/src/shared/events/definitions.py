@@ -56,6 +56,23 @@ class PositionOpened(Event):
     """Swing points as (label, price, time), label one of HH/HL/LH/LL."""
     indicators: tuple[tuple[str, float, float, str, bool], ...] = ()
     """Confluence-check readings as (name, value, threshold, comparison, passed)."""
+    # Execution telemetry (OBSERVABILITY_PLAN.md Phase 3) — measured by
+    # `broker/application/order_service.py` around the broker call and carried
+    # to the journal, which is the only subscriber that stores them.
+    requested_price: float | None = None
+    """Tradable price the order service saw when it sent the order (ask to
+    buy, bid to sell). None for fills whose caller had no reference price."""
+    slippage: float | None = None
+    """`price` minus `requested_price`, signed so a POSITIVE number always
+    means the fill cost the trader (bought higher / sold lower). None
+    whenever `requested_price` is None."""
+    execution_latency_ms: float | None = None
+    """Milliseconds from the strategy signal being emitted (the `created_at`
+    of its `SignalDecision`) to the broker acknowledging the fill. None for
+    manual/API orders, which have no signal behind them."""
+    broker_retcode: int | None = None
+    """Broker return code for the fill (MT5 10009 = done). None for brokers
+    with no such concept (paper)."""
 
 
 @dataclass(frozen=True, kw_only=True)

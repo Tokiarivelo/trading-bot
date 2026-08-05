@@ -37,7 +37,17 @@ _TERMINAL_PATH = "C:\\" + _TERMINAL_SUBPATH.replace("/", "\\") if _TERMINAL_SUBP
 
 
 class Mt5Error(Exception):
-    """Raised when the terminal is unreachable or a call is rejected."""
+    """Raised when the terminal is unreachable or a call is rejected.
+
+    `retcode` carries MT5's own `OrderSendResult.retcode` when the failure was
+    a trade-server rejection, so the backend can record the code structurally
+    instead of regex-ing it back out of this message (OBSERVABILITY_PLAN.md
+    Phase 3). `None` for non-trade failures (terminal unreachable, symbol
+    lookup, no result object at all)."""
+
+    def __init__(self, message: str, retcode: int | None = None) -> None:
+        super().__init__(message)
+        self.retcode = retcode
 
 
 _TIMEFRAME_SECONDS = {
@@ -284,6 +294,8 @@ class Mt5Client:
             raise Mt5Error(
                 f"order_send({symbol},{side}) rejected: retcode={code}{_retcode_reason(code)} "
                 f"{_last_error()}"
+            ,
+                retcode=code,
             )
         return {
             "ticket": int(result.order),
@@ -298,6 +310,7 @@ class Mt5Client:
             "comment": comment,
             "magic": magic,
             "profit": None,
+            "retcode": int(result.retcode),
         }
 
     def positions(self, symbol: str | None = None) -> list[dict[str, Any]]:
@@ -326,6 +339,8 @@ class Mt5Client:
             raise Mt5Error(
                 f"position_modify({ticket}) rejected: retcode={code}{_retcode_reason(code)} "
                 f"{_last_error()}"
+            ,
+                retcode=code,
             )
 
     def position_close(self, ticket: int, volume: float | None = None) -> dict[str, Any]:
@@ -356,6 +371,8 @@ class Mt5Client:
             raise Mt5Error(
                 f"position_close({ticket}) rejected: retcode={code}{_retcode_reason(code)} "
                 f"{_last_error()}"
+            ,
+                retcode=code,
             )
         return {
             "ticket": ticket,
@@ -369,6 +386,7 @@ class Mt5Client:
             "spread_points": int(mt5.symbol_info(position.symbol).spread),
             "comment": position.comment,
             "profit": profit,
+            "retcode": int(result.retcode),
         }
 
     def position_close_info(self, ticket: int) -> dict[str, Any] | None:
@@ -439,6 +457,8 @@ class Mt5Client:
             raise Mt5Error(
                 f"place_pending_order({symbol},{side},{order_type}) rejected: "
                 f"retcode={code}{_retcode_reason(code)} {_last_error()}"
+            ,
+                retcode=code,
             )
         return {
             "ticket": int(result.order),
@@ -480,6 +500,8 @@ class Mt5Client:
             raise Mt5Error(
                 f"modify_pending_order({ticket}) rejected: retcode={code}{_retcode_reason(code)} "
                 f"{_last_error()}"
+            ,
+                retcode=code,
             )
 
     def cancel_pending_order(self, ticket: int) -> None:
@@ -491,6 +513,8 @@ class Mt5Client:
             raise Mt5Error(
                 f"cancel_pending_order({ticket}) rejected: retcode={code}{_retcode_reason(code)} "
                 f"{_last_error()}"
+            ,
+                retcode=code,
             )
 
     def pending_orders(self, symbol: str | None = None) -> list[dict[str, Any]]:

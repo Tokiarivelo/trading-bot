@@ -9,12 +9,17 @@ export function SortTh<K extends string>({
   onSort,
   align = "left",
   className = "",
+  title,
 }: {
   label: React.ReactNode;
   sortKey: K;
   sort: SortState<K>;
   onSort: (key: K) => void;
   align?: "left" | "right";
+  /** Explains what the column means, replacing the default "Sort by X"
+   * hover text. Use it for columns whose header alone doesn't say what the
+   * number is (e.g. the sign convention of a slippage average). */
+  title?: string;
   /** Padding/font utilities — no default, since callers embed this in
    * tables with different row density (e.g. a compact docked panel vs. a
    * full-page history table). */
@@ -27,7 +32,7 @@ export function SortTh<K extends string>({
       className={`cursor-pointer select-none hover:text-ink ${
         align === "right" ? "text-right" : "text-left"
       } ${active ? "text-ink" : ""} ${className}`}
-      title={`Sort by ${typeof label === "string" ? label : sortKey}`}
+      title={title ?? `Sort by ${typeof label === "string" ? label : sortKey}`}
     >
       {label}
       <SortArrow active={active} dir={sort.dir} />

@@ -119,7 +119,37 @@ backend vocabulary and `SIGNAL_OUTCOME_META` so those rows keep rendering.
 
 ## Phase 3 — Execution telemetry
 
-**Status:** not started
+**Status:** ✅ done (uncommitted working tree, 2026-08-05)
+
+Landed: `TradeRecord.requested_price/slippage/execution_latency_ms/
+broker_retcode/mfe/mae` + migration `d9e0f1a2b3c4` + ORM + repository
+mapping; `broker.domain.trading.execution_slippage` (pure, one sign
+convention: positive always means the fill cost the trader);
+`ExecutionResult.retcode` and `OrderRejected.retcode`; measurement in
+`OrderService.open_position` (injected `clock` for deterministic latency
+tests), carried to the journal on `PositionOpened`; `trade_loop.py` passes
+`signal_emitted_at=now`, the same instant the signal's `SignalDecision` was
+recorded with. `journal/domain/excursion.py` holds the pure MFE/MAE
+arithmetic, accumulated by `TradeJournalService.on_candle_closed`
+(subscribed to `CandleClosed`, M5 only) and finalized against the exit price
+in `on_position_closed`; new `MarketContextPort.latest_candle` and
+`JournalRepository.get_open_excursions`/`update_excursion` keep that path
+cheap. `BotAnalytics` gains `avg_slippage`, `measured_slippage_count`,
+`avg_execution_latency_ms`, `retcode_histogram`, `avg_mfe`, `avg_mae`,
+`mfe_mae_ratio`, `avg_mfe_on_losers`, `avg_mae_on_winners`, all on
+`GET /journal/analytics/bots`; frontend surfaces them as four new columns on
+the existing `BotPerformanceTable`.
+
+**The gateway did drop the retcode** — it only ever appeared inside the
+free-text `Mt5Error` message, and never at all on a successful fill. The
+gateway response contract was extended: `OrderResultOut.retcode`, and 502
+refusals now carry `detail={"message", "retcode"}`. The backend adapter
+accepts a plain-string `detail` too, so a gateway/backend version skew
+degrades to "no retcode recorded" rather than crashing the order path.
+
+A *rejected* order produces no `TradeRecord`, so its retcode is recorded on
+the signal's decision trail instead, as a `DecisionCheck(name=
+"broker_retcode", threshold=10009, passed=False)`.
 
 Add to `TradeRecord` (+ migration, + journal write path):
 
@@ -189,6 +219,7 @@ have refused.
 |---|---|---|
 | 2026-08-05 | — | Plan created from code audit. |
 | 2026-08-05 | 1 | Done, committed `a246d11`. Gates: ruff clean on touched paths; pytest 1133 passed / 1 failed; `make lint-frontend` + `make build-frontend` pass. |
+| 2026-08-05 | 3 | Done, left uncommitted for review. Gates: ruff clean on every touched path (repo-wide `src tests` still reports the same ~298 pre-existing errors, all in `strategies/generated/xauusd_snd_qm_structure_*` + `test_position_manager.py`/`test_ws.py`); pytest passes apart from the three known pre-existing failures; `make lint-frontend` + `make build-frontend` pass. Note: `alembic upgrade head` had to be run on the dev DB — Phase 1/2's migrations had never been applied either, which is what `tests/unit/test_health.py` was failing on. |
 | 2026-08-05 | 2 | Done, left uncommitted for review. Gates: ruff clean on touched paths (repo-wide ruff has ~300 pre-existing errors, all in `strategies/generated/` + two unrelated test files); pytest passes apart from the three known pre-existing failures below; `make lint-frontend` + `make build-frontend` pass. |
 
 ## Known pre-existing breakage (NOT caused by this plan's work)

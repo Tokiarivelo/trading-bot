@@ -32,3 +32,28 @@ export function timeAgo(epochSeconds: number | null): string {
 export function plTone(value: number): string {
   return value >= 0 ? "text-ok" : "text-err";
 }
+
+/** A price-units figure (slippage, MFE/MAE). Unlike `money`, the scale varies
+ * wildly by symbol — 0.20 on XAUUSD is the same kind of number as 0.00020 on
+ * EURUSD — so this keeps enough significant digits for both instead of
+ * rounding the FX case away to "0.00". */
+export function priceDelta(value: number | null, opts: { sign?: boolean } = {}): string {
+  if (value === null) return "—";
+  const abs = Math.abs(value);
+  const digits = abs === 0 ? 2 : abs >= 1 ? 2 : abs >= 0.01 ? 3 : 5;
+  const sign = opts.sign && value >= 0 ? "+" : "";
+  return `${sign}${value.toFixed(digits)}`;
+}
+
+/** Milliseconds, promoted to seconds once the number stops being readable. */
+export function millis(value: number | null): string {
+  if (value === null) return "—";
+  return value < 1000 ? `${Math.round(value)}ms` : `${(value / 1000).toFixed(1)}s`;
+}
+
+/** Slippage is signed so POSITIVE means the fills cost the trader — the
+ * opposite tone convention to P/L, which is exactly why it isn't `plTone`. */
+export function slippageTone(value: number | null): string {
+  if (value === null) return "text-ink-muted";
+  return value > 0 ? "text-err" : "text-ok";
+}

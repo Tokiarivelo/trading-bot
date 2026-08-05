@@ -5,11 +5,16 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Literal
 
-from sqlalchemy import ColumnElement, func, select
+from sqlalchemy import ColumnElement, func, select, update
 from sqlalchemy.orm import Session, sessionmaker
 
 from src.journal.adapters.orm import TradeRow
-from src.journal.domain.models import CandleSnapshot, TradeAnalyticsRecord, TradeRecord
+from src.journal.domain.models import (
+    CandleSnapshot,
+    OpenTradeExcursion,
+    TradeAnalyticsRecord,
+    TradeRecord,
+)
 
 Outcome = Literal["win", "loss", "breakeven", "open"]
 OrderField = Literal["open_time", "close_time", "profit"]
@@ -123,6 +128,11 @@ class JournalRepository:
             TradeRow.profit,
             TradeRow.skill,
             TradeRow.strategy_version,
+            TradeRow.slippage,
+            TradeRow.execution_latency_ms,
+            TradeRow.broker_retcode,
+            TradeRow.mfe,
+            TradeRow.mae,
         ).where(TradeRow.account_id == account_id)
         if open_from is not None:
             query = query.where(TradeRow.open_time >= open_from)
@@ -142,6 +152,11 @@ class JournalRepository:
                 profit=row.profit,
                 skill=row.skill,
                 strategy_version=row.strategy_version,
+                slippage=row.slippage,
+                execution_latency_ms=row.execution_latency_ms,
+                broker_retcode=row.broker_retcode,
+                mfe=row.mfe,
+                mae=row.mae,
             )
             for row in rows
         ]
@@ -159,6 +174,46 @@ class JournalRepository:
         with self._session_factory() as session:
             rows = session.scalars(query).all()
         return [_to_domain(row) for row in rows]
+
+    def get_open_excursions(
+        self, symbol: str, account_id: str = "default"
+    ) -> list[OpenTradeExcursion]:
+        """Still-open trades on `symbol`, projected down to what the MFE/MAE
+        accumulator reads (Phase 3). Runs once per closed candle per symbol,
+        hence the narrow column list rather than `get_open`'s full rows."""
+        query = select(
+            TradeRow.id, TradeRow.side, TradeRow.open_price, TradeRow.mfe, TradeRow.mae
+        ).where(
+            TradeRow.close_time.is_(None),
+            TradeRow.symbol == symbol,
+            TradeRow.account_id == account_id,
+        )
+        with self._session_factory() as session:
+            rows = session.execute(query).all()
+        return [
+            OpenTradeExcursion(
+                id=row.id, side=row.side, open_price=row.open_price, mfe=row.mfe, mae=row.mae
+            )
+            for row in rows
+        ]
+
+    def update_excursion(
+        self, trade_id: str, mfe: float, mae: float, account_id: str = "default"
+    ) -> None:
+        """Writes just the two excursion columns of one trade.
+
+        A targeted UPDATE rather than `save()`: the accumulator fires on every
+        closed candle for every open position, and re-merging the whole row
+        (four JSON snapshot columns included) that often would rewrite far
+        more than it changes — and would race a concurrent close that is
+        rewriting the same row's exit fields."""
+        with self._session_factory() as session:
+            session.execute(
+                update(TradeRow)
+                .where(TradeRow.id == trade_id, TradeRow.account_id == account_id)
+                .values(mfe=mfe, mae=mae)
+            )
+            session.commit()
 
     def get_last_n_closed(
         self, symbol: str, count: int, skill: str | None = None, account_id: str = "default"
@@ -363,6 +418,12 @@ def _to_row(record: TradeRecord, account_id: str) -> TradeRow:
         pattern=record.pattern,
         structure=_structure_to_json(record.structure),
         indicators=_indicators_to_json(record.indicators),
+        requested_price=record.requested_price,
+        slippage=record.slippage,
+        execution_latency_ms=record.execution_latency_ms,
+        broker_retcode=record.broker_retcode,
+        mfe=record.mfe,
+        mae=record.mae,
     )
 
 
@@ -403,4 +464,10 @@ def _to_domain(row: TradeRow) -> TradeRecord:
         pattern=row.pattern,
         structure=_structure_from_json(row.structure),
         indicators=_indicators_from_json(row.indicators),
+        requested_price=row.requested_price,
+        slippage=row.slippage,
+        execution_latency_ms=row.execution_latency_ms,
+        broker_retcode=row.broker_retcode,
+        mfe=row.mfe,
+        mae=row.mae,
     )

@@ -13,6 +13,7 @@ from src.journal.api.schemas import (
     DecisionContextOut,
     EquityPointOut,
     IndicatorReadingOut,
+    RetcodeCountOut,
     StructurePointOut,
     SymbolAnalyticsOut,
     TradeHistoryPage,
@@ -316,6 +317,17 @@ def _bot_analytics_out(a: BotAnalytics) -> BotAnalyticsOut:
             )
             for p in a.equity_curve
         ],
+        avg_slippage=a.avg_slippage,
+        measured_slippage_count=a.measured_slippage_count,
+        avg_execution_latency_ms=a.avg_execution_latency_ms,
+        retcode_histogram=[
+            RetcodeCountOut(retcode=code, count=count) for code, count in a.retcode_histogram
+        ],
+        avg_mfe=a.avg_mfe,
+        avg_mae=a.avg_mae,
+        mfe_mae_ratio=a.mfe_mae_ratio,
+        avg_mfe_on_losers=a.avg_mfe_on_losers,
+        avg_mae_on_winners=a.avg_mae_on_winners,
     )
 
 
@@ -355,8 +367,11 @@ async def get_symbol_analytics(
         "profit factor, expectancy, max drawdown, average trade duration, and a full "
         "cumulative-profit equity curve. Sorted by total_profit descending, so the best- and "
         "worst-performing bots sort to the ends. Trades placed manually or via the API (no "
-        "`skill`) are excluded, since they aren't attributable to any bot. Powers the analytics "
-        "dashboard's bot comparison and equity-curve charts."
+        "`skill`) are excluded, since they aren't attributable to any bot. Also reports "
+        "execution quality per bot — average slippage, average signal-to-fill latency, a "
+        "broker-return-code histogram, and MFE/MAE excursion aggregates, which answer whether "
+        "a bot's take-profits sit past where price turns and whether its stops are too tight. "
+        "Powers the analytics dashboard's bot comparison and equity-curve charts."
     ),
 )
 async def get_bot_analytics(

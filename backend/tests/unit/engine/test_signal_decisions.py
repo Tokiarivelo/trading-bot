@@ -236,3 +236,13 @@ async def test_the_circuit_breaker_and_the_position_cap_are_no_longer_one_bucket
 
     assert paused_sink.final_outcome == "daily_loss_breaker"
     assert full_sink.final_outcome == "max_positions"
+
+
+async def test_the_order_gets_the_signals_emit_time_for_latency_measurement():
+    """The signal→fill latency span's emit end is exactly the `created_at`
+    the engine recorded this `signal_id`'s decision with — passed down
+    explicitly so `OrderService` never has to read it back from the database
+    on the order path (OBSERVABILITY_PLAN.md Phase 3)."""
+    sink, order_service = await _run()
+
+    assert order_service.signal_emit_times == [sink.recorded[0]["created_at"]]

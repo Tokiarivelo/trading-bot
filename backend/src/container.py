@@ -701,6 +701,9 @@ def build_account_runtime(
     )
     event_bus.subscribe(PositionOpened, trade_journal.on_position_opened)
     event_bus.subscribe(PositionClosed, trade_journal.on_position_closed)
+    # Accumulates MFE/MAE on open trades bar by bar (OBSERVABILITY_PLAN.md
+    # Phase 3); the handler ignores every timeframe but M5 itself.
+    event_bus.subscribe(CandleClosed, trade_journal.on_candle_closed)
 
     activity_log = ActivityLogService(
         activity_log_repository,

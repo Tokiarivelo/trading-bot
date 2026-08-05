@@ -166,7 +166,7 @@ class GatewayBroker:
         except httpx.HTTPError as exc:
             raise BrokerUnavailable(f"gateway unreachable: {exc}") from exc
         if response.status_code == 502:
-            raise OrderRejected(response.json().get("detail", "cancel rejected"))
+            raise _to_order_rejected(response, fallback="cancel rejected")
         if response.status_code != 200:
             raise BrokerUnavailable(
                 f"gateway /orders/pending/{ticket} -> {response.status_code}: {response.text}"
@@ -199,10 +199,33 @@ class GatewayBroker:
         except httpx.HTTPError as exc:
             raise BrokerUnavailable(f"gateway unreachable: {exc}") from exc
         if response.status_code == 502:
-            raise OrderRejected(response.json().get("detail", "order rejected"))
+            raise _to_order_rejected(response)
         if response.status_code != 200:
             raise BrokerUnavailable(f"gateway {path} -> {response.status_code}: {response.text}")
         return response.json()
+
+
+def _to_order_rejected(
+    response: httpx.Response, fallback: str = "order rejected"
+) -> OrderRejected:
+    """Rebuilds the gateway's structured 502 refusal body into `OrderRejected`.
+
+    The gateway sends `detail={"message": ..., "retcode": ...}` so MT5's own
+    return code survives the hop (OBSERVABILITY_PLAN.md Phase 3). A plain
+    string `detail` is still accepted — that's what an older gateway build
+    sends, and a version skew must degrade to "no retcode recorded", never to
+    a parse crash on the order path."""
+    try:
+        detail = response.json().get("detail", fallback)
+    except ValueError:
+        return OrderRejected(response.text or fallback)
+    if isinstance(detail, dict):
+        retcode = detail.get("retcode")
+        return OrderRejected(
+            str(detail.get("message", fallback)),
+            retcode=int(retcode) if retcode is not None else None,
+        )
+    return OrderRejected(str(detail))
 
 
 def _to_execution_result(payload: dict[str, Any]) -> ExecutionResult:
@@ -219,6 +242,7 @@ def _to_execution_result(payload: dict[str, Any]) -> ExecutionResult:
         comment=payload["comment"],
         magic=payload.get("magic", 0),
         profit=payload["profit"],
+        retcode=payload.get("retcode"),
     )
 
 

@@ -19,12 +19,25 @@ from src.journal.domain.analytics import (
     compute_bot_analytics,
     compute_symbol_analytics,
 )
+from src.journal.domain.excursion import Excursion, extend_excursion, finalize_excursion
 from src.journal.domain.models import TradeRecord
 from src.journal.ports.market_context import MarketContextPort
 from src.shared.events.bus import EventBus
-from src.shared.events.definitions import PositionClosed, PositionOpened, TenTradesCompleted
+from src.shared.events.definitions import (
+    CandleClosed,
+    PositionClosed,
+    PositionOpened,
+    TenTradesCompleted,
+)
 
 logger = logging.getLogger(__name__)
+
+# Excursion is accumulated off one timeframe only. M5 is the engine's own
+# clock (every symbol the engine trades publishes CandleClosed on it), so
+# using it means the accumulator never needs a subscription the rest of the
+# system doesn't already produce. A finer timeframe would only sharpen
+# intra-bar precision; the exit price is folded in on close regardless.
+EXCURSION_TIMEFRAME = "M5"
 
 
 class TradeJournalService:
@@ -70,16 +83,65 @@ class TradeJournalService:
             pattern=event.pattern,
             structure=event.structure,
             indicators=event.indicators,
+            requested_price=event.requested_price,
+            slippage=event.slippage,
+            execution_latency_ms=event.execution_latency_ms,
+            broker_retcode=event.broker_retcode,
+            # Excursion starts at zero, not None: the trade has now been
+            # measured (the market simply hasn't moved yet), which is what
+            # distinguishes it from a pre-Phase-3 row that never was.
+            mfe=0.0,
+            mae=0.0,
         )
         await asyncio.to_thread(self._repository.save, record, self._account_id)
         logger.info(
-            "trade journaled (open): id=%s %s %s %.2f lots @ %.5f",
+            "trade journaled (open): id=%s %s %s %.2f lots @ %.5f "
+            "requested=%s slippage=%s latency=%sms retcode=%s",
             record.id,
             event.side,
             event.symbol,
             event.volume,
             event.price,
+            event.requested_price,
+            event.slippage,
+            event.execution_latency_ms,
+            event.broker_retcode,
         )
+
+    async def on_candle_closed(self, event: CandleClosed) -> None:
+        """Extends every open trade's MFE/MAE with the candle that just
+        closed (OBSERVABILITY_PLAN.md Phase 3).
+
+        Only `EXCURSION_TIMEFRAME` bars count, so a symbol streaming several
+        timeframes doesn't accumulate the same price action more than once —
+        excursion is a running maximum, but double-counting would still make
+        the work quadratic in the number of subscribed timeframes for no
+        added information."""
+        if event.timeframe != EXCURSION_TIMEFRAME:
+            return
+        open_trades = await asyncio.to_thread(
+            self._repository.get_open_excursions, event.symbol, self._account_id
+        )
+        if not open_trades:
+            return
+        candle = await self._market_context.latest_candle(event.symbol, EXCURSION_TIMEFRAME)
+        if candle is None:
+            return
+        for trade in open_trades:
+            updated = extend_excursion(
+                Excursion(mfe=trade.mfe or 0.0, mae=trade.mae or 0.0),
+                side=trade.side,
+                open_price=trade.open_price,
+                high=candle.high,
+                low=candle.low,
+            )
+            await asyncio.to_thread(
+                self._repository.update_excursion,
+                trade.id,
+                updated.mfe,
+                updated.mae,
+                self._account_id,
+            )
 
     async def on_position_closed(self, event: PositionClosed) -> None:
         existing = await asyncio.to_thread(self._repository.get, event.position_id)
@@ -91,6 +153,16 @@ class TradeJournalService:
             )
             return
         snapshot = await self._market_context.capture(event.symbol)
+        # Fold the exit price into the excursion accumulated from closed
+        # candles. This is also what gives a trade that opened and closed
+        # inside a single candle real MFE/MAE numbers — no candle ever closed
+        # during its life, so this is its only measurement.
+        excursion = finalize_excursion(
+            Excursion(mfe=existing.mfe or 0.0, mae=existing.mae or 0.0),
+            side=existing.side,
+            open_price=existing.open_price,
+            close_price=event.close_price,
+        )
         closed = replace(
             existing,
             close_price=event.close_price,
@@ -99,10 +171,17 @@ class TradeJournalService:
             close_reason=event.close_reason or None,
             m5_exit_snapshot=snapshot.m5,
             h1_exit_snapshot=snapshot.h1,
+            mfe=excursion.mfe,
+            mae=excursion.mae,
         )
         await asyncio.to_thread(self._repository.save, closed, self._account_id)
         logger.info(
-            "trade journaled (close): id=%s %s profit=%.2f", closed.id, closed.symbol, event.profit
+            "trade journaled (close): id=%s %s profit=%.2f mfe=%.5f mae=%.5f",
+            closed.id,
+            closed.symbol,
+            event.profit,
+            excursion.mfe,
+            excursion.mae,
         )
 
         if closed.skill is None:

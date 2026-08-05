@@ -749,6 +749,10 @@ class TradeEngine:
                     # spread-veto / broker-reject outcome without the engine
                     # having to reach into the broker's own gates.
                     signal_id=signal_id,
+                    # Emit end of the signal→fill latency span: the exact
+                    # timestamp this signal's `SignalDecision` was recorded
+                    # with above (OBSERVABILITY_PLAN.md Phase 3).
+                    signal_emitted_at=now,
                     zone_kind=zone.kind.value if zone is not None else None,
                     zone_price_low=zone.price_low if zone is not None else None,
                     zone_price_high=zone.price_high if zone is not None else None,
