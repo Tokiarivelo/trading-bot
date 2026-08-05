@@ -35,6 +35,7 @@ class TradeRow(Base):
     close_price: Mapped[float | None] = mapped_column(Float, nullable=True)
     close_time: Mapped[int | None] = mapped_column(Integer, nullable=True)
     profit: Mapped[float | None] = mapped_column(Float, nullable=True)
+    close_reason: Mapped[str | None] = mapped_column(String(64), nullable=True)
     m5_entry_snapshot: Mapped[list] = mapped_column(JSON, default=list)
     h1_entry_snapshot: Mapped[list] = mapped_column(JSON, default=list)
     m5_exit_snapshot: Mapped[list] = mapped_column(JSON, default=list)

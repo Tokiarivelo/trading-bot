@@ -332,7 +332,9 @@ class PositionManager:
             and self._volatility_config is not None
             and self._volatility_config.extreme_close_if_losing
         ):
-            await self._order_service.close_position(position.ticket)
+            await self._order_service.close_position(
+                position.ticket, reason="volatility guard: EXTREME regime while losing"
+            )
             logger.info(
                 "volatility guard: ticket=%d %s closed — EXTREME regime while losing",
                 position.ticket,
@@ -343,12 +345,14 @@ class PositionManager:
             return
 
         target_sl: float | None = None
+        target_sl_reason: str | None = None
 
         # Rule 1: breakeven at +1R.
         if risk > 0 and progress >= risk:
             candidate = position.open_price
             if self._improves(candidate, position.sl, direction):
                 target_sl = candidate
+                target_sl_reason = "breakeven at +1R"
 
         # Rule 2: secure a small real profit once a fresh base has been
         # cleared, and ratchet SL via structural continuation trailing if the
@@ -368,6 +372,7 @@ class PositionManager:
                 floor = target_sl if target_sl is not None else position.sl
                 if self._improves(candidate, floor, direction):
                     target_sl = candidate
+                    target_sl_reason = "secure-base trailing"
 
         # Rule 3: "Zone Contraire" defensive breakeven — if approaching or
         # interacting with an unbroken opposing zone ahead of or around current
@@ -386,6 +391,7 @@ class PositionManager:
                         floor = target_sl if target_sl is not None else position.sl
                         if self._improves(candidate, floor, direction):
                             target_sl = candidate
+                            target_sl_reason = "zone-contraire defensive breakeven"
 
         # Rule 4 (volatility guard): EXTREME regime while winning locks in a
         # fraction of unrealized profit — feeds the same target_sl/_improves
@@ -404,6 +410,7 @@ class PositionManager:
             floor = target_sl if target_sl is not None else position.sl
             if self._improves(candidate, floor, direction):
                 target_sl = candidate
+                target_sl_reason = "volatility guard: EXTREME profit-lock"
 
         # Rule 5 (volatility guard): HIGH regime with enough running profit
         # trails SL behind the best favorable price reached since entry by a
@@ -430,9 +437,12 @@ class PositionManager:
             floor = target_sl if target_sl is not None else position.sl
             if self._improves(candidate, floor, direction):
                 target_sl = candidate
+                target_sl_reason = "volatility guard: HIGH-regime chandelier trail"
 
         if target_sl is not None:
-            await self._order_service.modify_position(position.ticket, sl=target_sl, tp=position.tp)
+            await self._order_service.modify_position(
+                position.ticket, sl=target_sl, tp=position.tp, reason=target_sl_reason or ""
+            )
             logger.info(
                 "sl secured: ticket=%d %s sl moved to %.5f (entry %.5f)",
                 position.ticket,
@@ -444,7 +454,9 @@ class PositionManager:
 
         candles_open = self._candles_since_open.get(position.ticket, 0)
         if candles_open >= self._time_stop_candles and progress <= 0:
-            await self._order_service.close_position(position.ticket)
+            await self._order_service.close_position(
+                position.ticket, reason="time-stop: no progress"
+            )
             logger.info(
                 "time-stop: ticket=%d %s closed after %d candles without progress",
                 position.ticket,

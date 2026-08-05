@@ -96,6 +96,7 @@ class TradeJournalService:
             close_price=event.close_price,
             close_time=event.occurred_at,
             profit=event.profit,
+            close_reason=event.close_reason or None,
             m5_exit_snapshot=snapshot.m5,
             h1_exit_snapshot=snapshot.h1,
         )

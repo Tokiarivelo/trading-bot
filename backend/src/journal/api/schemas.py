@@ -83,6 +83,14 @@ class TradeRecordOut(BaseModel):
         default=None, description="Epoch seconds UTC; null while the trade is open."
     )
     profit: float | None = Field(default=None, description="Realized P/L; null while open.")
+    close_reason: str | None = Field(
+        default=None,
+        description=(
+            "Why the position was closed by the engine's position manager, e.g. "
+            "'volatility guard: EXTREME regime while losing' or 'time-stop: no progress'. "
+            "Null for normal SL/TP fills or manual/API closes, which don't set a reason."
+        ),
+    )
     comment: str = ""
     strategy_version: str | None = Field(
         default=None, description="e.g. 'breakout_v1:v1'; null for manually placed trades."

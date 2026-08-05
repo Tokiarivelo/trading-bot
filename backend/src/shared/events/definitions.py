@@ -64,6 +64,7 @@ class PositionClosed(Event):
     position_id: str
     close_price: float
     profit: float
+    close_reason: str = ""
 
 
 @dataclass(frozen=True, kw_only=True)

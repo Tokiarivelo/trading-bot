@@ -176,15 +176,18 @@ class OrderService:
         )
         return result
 
-    async def close_position(self, ticket: int, volume: float | None = None) -> ExecutionResult:
+    async def close_position(
+        self, ticket: int, volume: float | None = None, reason: str = ""
+    ) -> ExecutionResult:
         result = await self._broker.close_position(ticket, volume)
         logger.info(
-            "position closed: ticket=%d %s %.2f lots @ %.5f profit=%.2f",
+            "position closed: ticket=%d %s %.2f lots @ %.5f profit=%.2f reason=%s",
             result.ticket,
             result.symbol,
             result.volume,
             result.price,
             result.profit or 0.0,
+            reason or "manual",
         )
         await self._event_bus.publish(
             PositionClosed(
@@ -192,6 +195,7 @@ class OrderService:
                 position_id=str(result.ticket),
                 close_price=result.price,
                 profit=result.profit or 0.0,
+                close_reason=reason,
             )
         )
         return result
@@ -240,9 +244,13 @@ class OrderService:
                 )
         return results
 
-    async def modify_position(self, ticket: int, sl: float | None, tp: float | None) -> None:
+    async def modify_position(
+        self, ticket: int, sl: float | None, tp: float | None, reason: str = ""
+    ) -> None:
         await self._broker.modify_position(ticket, sl, tp)
-        logger.info("position modified: ticket=%d sl=%s tp=%s", ticket, sl, tp)
+        logger.info(
+            "position modified: ticket=%d sl=%s tp=%s reason=%s", ticket, sl, tp, reason or "manual"
+        )
 
     async def get_positions(self, symbol: str | None = None) -> list[Position]:
         return await self._broker.get_positions(symbol)

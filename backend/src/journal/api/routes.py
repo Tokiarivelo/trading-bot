@@ -78,6 +78,7 @@ def _trade_out(record: TradeRecord) -> TradeRecordOut:
         close_price=record.close_price,
         close_time=int(record.close_time.timestamp()) if record.close_time else None,
         profit=record.profit,
+        close_reason=record.close_reason,
         comment=record.comment,
         strategy_version=record.strategy_version,
         skill=record.skill,

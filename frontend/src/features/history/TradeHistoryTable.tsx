@@ -149,6 +149,7 @@ function TradesTable({
           <SortTh className="px-3 py-2 font-medium" label="Closed" sortKey="close_time" sort={sort} onSort={toggle} />
           <SortTh className="px-3 py-2 font-medium" label="Open price" sortKey="open_price" sort={sort} onSort={toggle} align="right" />
           <SortTh className="px-3 py-2 font-medium" label="Close price" sortKey="close_price" sort={sort} onSort={toggle} align="right" />
+          <th className="px-3 py-2 font-medium">Close reason</th>
           <SortTh className="px-3 py-2 font-medium" label="P/L" sortKey="profit" sort={sort} onSort={toggle} align="right" />
           <SortTh className="px-3 py-2 font-medium" label="Strategy" sortKey="strategy_version" sort={sort} onSort={toggle} />
           <SortTh className="px-3 py-2 font-medium" label="Skill" sortKey="skill" sort={sort} onSort={toggle} />
@@ -176,6 +177,7 @@ function TradesTable({
             <Td>{t.close_time !== null ? formatTime(t.close_time) : "—"}</Td>
             <Td align="right">{t.open_price}</Td>
             <Td align="right">{t.close_price ?? "—"}</Td>
+            <Td className="text-ink-muted">{t.close_reason ?? "—"}</Td>
             <Td align="right" className={plTone(t.profit)}>
               {t.profit !== null ? t.profit.toFixed(2) : "—"}
             </Td>

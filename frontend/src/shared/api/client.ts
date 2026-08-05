@@ -296,6 +296,10 @@ export interface TradeHistoryItem {
   close_price: number | null;
   close_time: number | null; // epoch seconds UTC, null while open
   profit: number | null;
+  /** Why the engine's position manager closed this trade, e.g. "volatility
+   * guard: EXTREME regime while losing" or "time-stop: no progress". Null
+   * for normal SL/TP fills or manual/API closes. */
+  close_reason: string | null;
   comment: string;
   strategy_version: string | null;
   skill: string | null;
@@ -585,6 +589,10 @@ export interface BacktestSignal {
   outcome: "opened" | "htf_veto" | "risk_rejected" | "spread_veto" | "broker_rejected" | "skipped";
   /** The strategy's own reason string — pattern, zone rect, entry/SL/TP. */
   reason: string;
+  /** Intended entry price at the moment of the signal, when the source log
+   * line carried one. Optional: older persisted signals (and any backtest
+   * report written before the field existed) have none. */
+  price?: number | null;
 }
 
 /** Reconstructs one live bot's own signal→outcome trail — every setup its

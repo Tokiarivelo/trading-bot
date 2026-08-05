@@ -44,6 +44,7 @@ class TradeRecord:
     close_price: float | None = None
     close_time: datetime | None = None
     profit: float | None = None
+    close_reason: str | None = None
     m5_entry_snapshot: tuple[CandleSnapshot, ...] = ()
     h1_entry_snapshot: tuple[CandleSnapshot, ...] = ()
     m5_exit_snapshot: tuple[CandleSnapshot, ...] = ()

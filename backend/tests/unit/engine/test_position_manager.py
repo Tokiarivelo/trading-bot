@@ -66,18 +66,22 @@ class FakeOrderService:
         self._pending = pending or []
         self._simulates_pending_fills = simulates_pending_fills
         self.modified: list[tuple[int, float | None, float | None]] = []
+        self.modify_reasons: list[str] = []
         self.closed: list[int] = []
+        self.close_reasons: list[str] = []
         self.opened: list = []
         self.pending_cancelled: list[int] = []
 
     async def get_positions(self, symbol: str | None = None) -> list[Position]:
         return list(self._positions)
 
-    async def modify_position(self, ticket: int, sl, tp) -> None:
+    async def modify_position(self, ticket: int, sl, tp, reason: str = "") -> None:
         self.modified.append((ticket, sl, tp))
+        self.modify_reasons.append(reason)
 
-    async def close_position(self, ticket: int, volume=None):
+    async def close_position(self, ticket: int, volume=None, reason: str = ""):
         self.closed.append(ticket)
+        self.close_reasons.append(reason)
         self._positions = [p for p in self._positions if p.ticket != ticket]
 
     async def get_pending_orders(self, symbol: str | None = None) -> list[PendingOrder]:
