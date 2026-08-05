@@ -3,7 +3,7 @@ typed signal-decision trail the engine writes directly."""
 
 from __future__ import annotations
 
-from sqlalchemy import Float, Index, Integer, String, Text
+from sqlalchemy import JSON, Float, Index, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from src.shared.db.base import Base
@@ -46,3 +46,6 @@ class SignalDecisionRow(Base):
     outcome: Mapped[str] = mapped_column(String(32), index=True)
     reason: Mapped[str] = mapped_column(Text)
     confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    checks: Mapped[list] = mapped_column(JSON, default=list)
+    """`DecisionCheck` tuples as JSON arrays `[name, value, threshold,
+    comparison, passed]` — same flat encoding `TradeRow.indicators` uses."""

@@ -20,11 +20,13 @@ from __future__ import annotations
 
 import copy
 import logging
+import math
 import uuid
 from collections.abc import Callable
 from dataclasses import replace
 from datetime import UTC, datetime
 
+from src.activity.domain.models import DecisionCheck
 from src.activity.ports.signal_decisions import SignalDecisionSinkPort
 from src.broker.application.account_service import AccountService
 from src.broker.application.order_service import OrderService
@@ -55,6 +57,48 @@ from src.strategies.domain.models import Direction, MarketContext, Signal, Strat
 logger = logging.getLogger(__name__)
 
 DEFAULT_CONTEXT_BARS = 200
+
+# `RiskDecision.code` from the pre-trade gate -> the decision-trail outcome it
+# maps to (OBSERVABILITY_PLAN.md Phase 2). "paused" covers every circuit
+# breaker — daily loss, consecutive losses, manual kill — all of which surface
+# as the `daily_loss_breaker` bucket; the pause reason itself is carried in the
+# decision's `reason` text. Anything unmapped falls back to the pre-Phase-2
+# catch-all `risk_rejected`.
+_PRETRADE_OUTCOMES: dict[str, str] = {
+    "paused": "daily_loss_breaker",
+    "max_positions": "max_positions",
+    "daily_trading_disabled": "risk_rejected",
+}
+
+
+def _htf_check(*, passed: bool) -> DecisionCheck:
+    """The HTF-confirmation gate as a `DecisionCheck`. It's boolean, not
+    numeric, so it's encoded the way `TradeRecord.indicators` encodes boolean
+    readings: 1.0 for confirmed, compared `==` against the required 1.0."""
+    return DecisionCheck(
+        name="htf_confirm",
+        value=1.0 if passed else 0.0,
+        threshold=1.0,
+        comparison="==",
+        passed=passed,
+    )
+
+
+def _volatility_check(
+    percentile: float, config: VolatilityConfig, *, passed: bool
+) -> DecisionCheck:
+    """The ATR-percentile volatility guard as a `DecisionCheck`. `percentile`
+    is NaN when the entry timeframe had no candles to classify — recorded as
+    0.0 (the guard didn't block) rather than letting NaN reach the JSON
+    column, which can't represent it."""
+    value = 0.0 if math.isnan(percentile) else percentile
+    return DecisionCheck(
+        name="volatility_percentile",
+        value=value,
+        threshold=float(config.extreme_percentile),
+        comparison="<",
+        passed=passed,
+    )
 
 
 def _veto_timeframe(strategy: Strategy) -> str | None:
@@ -340,16 +384,34 @@ class TradeEngine:
         )
 
     async def _record_outcome(
-        self, signal_id: str, outcome: str, *, base_reason: str, explanation: str
+        self,
+        signal_id: str,
+        outcome: str,
+        *,
+        base_reason: str,
+        explanation: str,
+        checks: tuple[DecisionCheck, ...] = (),
     ) -> None:
         """Stamps a decision's terminal outcome, appending the gate's own
         explanation to the strategy's reason the same way the legacy
         log-scraper did (` — <explanation>`), so the chart's tooltip text is
-        unchanged by the move off log parsing."""
+        unchanged by the move off log parsing. `checks` are the structured
+        numbers the failing gate saw (Phase 2), appended to whatever earlier
+        gates already recorded."""
         if self._signal_decisions is None:
             return
         reason = base_reason if explanation in base_reason else f"{base_reason} — {explanation}"
-        await self._signal_decisions.record_outcome(signal_id, outcome, reason=reason)
+        await self._signal_decisions.record_outcome(
+            signal_id, outcome, reason=reason, checks=checks
+        )
+
+    async def _record_checks(self, signal_id: str, *checks: DecisionCheck) -> None:
+        """Records gates this signal **passed**, leaving the outcome alone —
+        so a filled (or later-vetoed) signal's trail shows every gate it
+        cleared and by how much, not only the one that stopped it."""
+        if self._signal_decisions is None or not checks:
+            return
+        await self._signal_decisions.record_checks(signal_id, tuple(checks))
 
     async def _enter_for_bot(
         self,
@@ -432,11 +494,30 @@ class TradeEngine:
             )
             await self._record_outcome(
                 signal_id,
-                "risk_rejected",
+                _PRETRADE_OUTCOMES.get(pretrade.code, "risk_rejected"),
                 base_reason=first_signal.reason,
                 explanation=pretrade.reason,
+                checks=(
+                    DecisionCheck(
+                        name="open_positions",
+                        value=float(len(open_positions)),
+                        threshold=float(self._risk_manager.caps.max_open_positions),
+                        comparison="<",
+                        passed=pretrade.code != "max_positions",
+                    ),
+                ),
             )
             return balance
+        await self._record_checks(
+            signal_id,
+            DecisionCheck(
+                name="open_positions",
+                value=float(len(open_positions)),
+                threshold=float(self._risk_manager.caps.max_open_positions),
+                comparison="<",
+                passed=True,
+            ),
+        )
 
         veto_tf = _veto_timeframe(strategy)
         veto_timeframes = (veto_tf,) if veto_tf is not None else ()
@@ -450,9 +531,14 @@ class TradeEngine:
                 veto_reason,
             )
             await self._record_outcome(
-                signal_id, "htf_veto", base_reason=first_signal.reason, explanation=veto_reason
+                signal_id,
+                "htf_veto",
+                base_reason=first_signal.reason,
+                explanation=veto_reason,
+                checks=(_htf_check(passed=False),),
             )
             return balance
+        await self._record_checks(signal_id, _htf_check(passed=True))
 
         if balance is None:
             # Carries the skill token and a " — <reason>" tail like every other
@@ -506,11 +592,15 @@ class TradeEngine:
                 )
                 await self._record_outcome(
                     signal_id,
-                    "risk_rejected",
+                    "volatility_guard",
                     base_reason=first_signal.reason,
                     explanation=f"regime=EXTREME percentile={percentile:.1f}",
+                    checks=(_volatility_check(percentile, self._volatility_config, passed=False),),
                 )
                 return balance
+            await self._record_checks(
+                signal_id, _volatility_check(percentile, self._volatility_config, passed=True)
+            )
 
             sl_mult, tp_mult = {
                 VolatilityRegime.LOW: (
@@ -549,12 +639,21 @@ class TradeEngine:
                 )
                 await self._record_outcome(
                     signal_id,
-                    "risk_rejected",
+                    "max_positions",
                     base_reason=first_signal.reason,
                     explanation=(
                         f"TP{idx + 1} of {len(signals)} skipped, "
                         f"{len(open_positions) + idx} open position(s) at cap "
                         f"{self._risk_manager._caps.max_open_positions}"
+                    ),
+                    checks=(
+                        DecisionCheck(
+                            name="open_positions",
+                            value=float(len(open_positions) + idx),
+                            threshold=float(self._risk_manager._caps.max_open_positions),
+                            comparison="<",
+                            passed=False,
+                        ),
                     ),
                 )
                 break
@@ -592,9 +691,18 @@ class TradeEngine:
                 )
                 await self._record_outcome(
                     signal_id,
-                    "risk_rejected",
+                    "risk_sizing",
                     base_reason=first_signal.reason,
                     explanation=f"TP{idx + 1}: {sizing.reason}",
+                    checks=(
+                        DecisionCheck(
+                            name="position_volume",
+                            value=sizing.volume,
+                            threshold=info.volume_min,
+                            comparison=">=",
+                            passed=False,
+                        ),
+                    ),
                 )
                 continue
             logger.info(
@@ -607,6 +715,16 @@ class TradeEngine:
                 decision.skill_name,
                 balance,
                 pos_risk_multiplier,
+            )
+            await self._record_checks(
+                signal_id,
+                DecisionCheck(
+                    name="position_volume",
+                    value=sizing.volume,
+                    threshold=info.volume_min,
+                    comparison=">=",
+                    passed=True,
+                ),
             )
 
             zone = signal.zone

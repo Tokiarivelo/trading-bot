@@ -14,7 +14,7 @@ import logging
 from datetime import datetime
 
 from src.activity.adapters.signal_decision_repository import SignalDecisionRepository
-from src.activity.domain.models import SignalDecision
+from src.activity.domain.models import DecisionCheck, SignalDecision
 
 logger = logging.getLogger(__name__)
 
@@ -64,13 +64,26 @@ class SignalDecisionService:
             logger.exception("could not record signal decision signal_id=%s", signal_id)
 
     async def record_outcome(
-        self, signal_id: str, outcome: str, *, reason: str | None = None
+        self,
+        signal_id: str,
+        outcome: str,
+        *,
+        reason: str | None = None,
+        checks: tuple[DecisionCheck, ...] = (),
     ) -> None:
         try:
             await asyncio.to_thread(
-                self._repository.set_outcome, signal_id, outcome, reason=reason
+                self._repository.set_outcome, signal_id, outcome, reason=reason, checks=checks
             )
         except Exception:
             logger.exception(
                 "could not record signal outcome signal_id=%s outcome=%s", signal_id, outcome
             )
+
+    async def record_checks(self, signal_id: str, checks: tuple[DecisionCheck, ...]) -> None:
+        if not checks:
+            return
+        try:
+            await asyncio.to_thread(self._repository.append_checks, signal_id, checks)
+        except Exception:
+            logger.exception("could not record signal checks signal_id=%s", signal_id)

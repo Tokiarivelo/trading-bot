@@ -36,6 +36,11 @@ class RiskDecision:
     approved: bool
     volume: float = 0.0
     reason: str = ""
+    code: str = ""
+    """Machine-readable identity of *which* cap blocked, so callers don't have
+    to pattern-match `reason` prose: "paused" (circuit breaker / kill switch),
+    "max_positions", "daily_trading_disabled", "sl_distance", "balance",
+    "min_lot". Empty on an approval (OBSERVABILITY_PLAN.md Phase 2)."""
 
 
 @dataclass(frozen=True, kw_only=True)

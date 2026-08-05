@@ -64,6 +64,74 @@ class LogDeleteResult(BaseModel):
     deleted: int = Field(description="Number of log entries removed.")
 
 
+class DecisionCheckOut(BaseModel):
+    """One gate the engine evaluated for a signal, with the numbers it saw.
+    Same five-field shape as a trade's `indicators` readings, so the two read
+    identically in the UI."""
+
+    name: str = Field(
+        description="Gate id: 'htf_confirm', 'volatility_percentile', 'open_positions', "
+        "'position_volume', 'spread_points', or 'risk_reward'."
+    )
+    value: float = Field(
+        description="What the gate measured, e.g. the live spread in points. Boolean gates "
+        "use 1.0/0.0."
+    )
+    threshold: float = Field(description="What it was measured against, e.g. the spread cap.")
+    comparison: str = Field(
+        description="The operator applied between value and threshold, e.g. '<=', '>=', '=='."
+    )
+    passed: bool = Field(description="Whether the signal cleared this gate.")
+
+
+class FunnelDropOut(BaseModel):
+    """One reason signals stopped at a given funnel stage, with how often."""
+
+    stage: str = Field(
+        description="The stage these signals failed to reach: 'passed_htf', 'sized_ok', "
+        "'passed_spread', or 'filled'."
+    )
+    outcome: str = Field(
+        description="The decision outcome that stopped them, e.g. 'htf_veto', "
+        "'volatility_guard', 'max_positions', 'risk_sizing', 'spread_veto', 'rr_gate', "
+        "'broker_rejected', 'daily_loss_breaker', 'risk_rejected', 'skipped'."
+    )
+    count: int = Field(description="How many of this bot's signals dropped out this way.")
+    example_reason: str = Field(
+        description="The reason text of one dropped signal, so the count is actionable "
+        "without a second query."
+    )
+
+
+class BotFunnelOut(BaseModel):
+    """One bot's signal→fill funnel over the queried period. The counts are
+    monotonically non-increasing and follow the engine's real gate order:
+    HTF confirmation, then volatility guard / position cap / lot sizing, then
+    the broker's spread + risk-reward gate, then the fill."""
+
+    bot: str = Field(description="Full bot id, e.g. 'normal/xauusd/breakout_v1'.")
+    symbols: list[str] = Field(
+        description="Every symbol this bot fired a signal on in the period, sorted."
+    )
+    fired: int = Field(description="Signals the strategy emitted.")
+    passed_htf: int = Field(
+        description="Of those, how many cleared the higher-timeframe confirmation and the "
+        "pre-trade risk gate."
+    )
+    sized_ok: int = Field(
+        description="Of those, how many cleared the volatility guard and open-position cap "
+        "and produced a tradable lot size."
+    )
+    passed_spread: int = Field(
+        description="Of those, how many cleared the broker spread cap and the "
+        "spread-adjusted risk-reward floor."
+    )
+    filled: int = Field(description="Of those, how many the broker actually filled.")
+    drops: list[FunnelDropOut] = Field(
+        description="Why the rest stopped, grouped by stage then outcome, earliest stage first."
+    )
+
+
 class BotSignalOut(BaseModel):
     """One strategy signal a live bot emitted — including signals that never
     became a trade (vetoed or rejected), so the chart can show every setup the
@@ -75,9 +143,13 @@ class BotSignalOut(BaseModel):
     direction: str = Field(description="'buy' or 'sell'.")
     outcome: str = Field(
         description="What the engine did with it: 'opened' (became a trade), 'htf_veto' "
-        "(higher-timeframe trend opposed it), 'risk_rejected' (position sizing failed the "
-        "risk caps), 'spread_veto' (spread/RR gate), 'broker_rejected' (the broker/MT5 itself "
-        "refused the order), or 'skipped' (no outcome line followed within the queried window)."
+        "(higher-timeframe trend opposed it), 'volatility_guard' (ATR regime was EXTREME), "
+        "'max_positions' (open-position cap), 'risk_sizing' (no tradable lot size), "
+        "'spread_veto' (live spread over the cap), 'rr_gate' (spread-adjusted risk-reward "
+        "floor), 'daily_loss_breaker' (a circuit breaker had the engine paused), "
+        "'broker_rejected' (the broker/MT5 itself refused the order), 'risk_rejected' "
+        "(any other pre-trade risk block — also every pre-Phase-2 row, where the named "
+        "buckets above were collapsed into this one), or 'skipped' (no outcome yet)."
     )
     reason: str = Field(
         description="The strategy's own reason string — pattern matched, zone rectangle, "
@@ -89,4 +161,10 @@ class BotSignalOut(BaseModel):
         description="Reference price the engine saw when the signal fired (ask for a buy, "
         "bid for a sell), so the chart can place the marker at the signal's own level. "
         "Null for log lines written before the price was recorded.",
+    )
+    checks: list[DecisionCheckOut] = Field(
+        default_factory=list,
+        description="Every gate the engine evaluated for this signal, in evaluation order, "
+        "with the numbers it saw. Empty for signals recorded before this was captured and "
+        "for rows recovered from the legacy log-scrape path.",
     )

@@ -583,10 +583,27 @@ export interface BacktestSignal {
   time: number; // epoch seconds UTC — simulated bot clock (bar close time), or live wall clock
   direction: "buy" | "sell";
   /** 'opened' (became a trade), 'htf_veto' (higher-TF trend opposed it),
-   * 'risk_rejected' (sizing failed the risk caps), 'spread_veto'
-   * (spread/RR gate), 'broker_rejected' (the broker/MT5 itself refused the
-   * order — live only), or 'skipped'. */
-  outcome: "opened" | "htf_veto" | "risk_rejected" | "spread_veto" | "broker_rejected" | "skipped";
+   * 'volatility_guard' (ATR regime EXTREME), 'max_positions' (open-position
+   * cap), 'risk_sizing' (no tradable lot size), 'spread_veto' (live spread
+   * over the cap), 'rr_gate' (spread-adjusted risk-reward floor),
+   * 'daily_loss_breaker' (a circuit breaker had the engine paused),
+   * 'broker_rejected' (the broker/MT5 itself refused the order — live only),
+   * 'risk_rejected' (any other pre-trade risk block; also every row written
+   * before the buckets were split — OBSERVABILITY_PLAN.md Phase 2), or
+   * 'skipped'. Every member must have an entry in
+   * `features/backtest/signalOutcome.ts`, which is indexed unguarded. */
+  outcome:
+    | "opened"
+    | "htf_veto"
+    | "risk_rejected"
+    | "spread_veto"
+    | "rr_gate"
+    | "volatility_guard"
+    | "max_positions"
+    | "risk_sizing"
+    | "daily_loss_breaker"
+    | "broker_rejected"
+    | "skipped";
   /** The strategy's own reason string — pattern, zone rect, entry/SL/TP. */
   reason: string;
   /** Intended entry price at the moment of the signal, when the source log
@@ -606,6 +623,47 @@ export const getLiveBotSignals = (accountId: string, skill: string, from?: numbe
   if (from !== undefined) params.set("from", String(from));
   if (to !== undefined) params.set("to", String(to));
   return api.get<BacktestSignal[]>(acctPath(accountId, `/activity/signals?${params}`));
+};
+
+/** One reason a bot's signals stopped at a given funnel stage. */
+export interface FunnelDrop {
+  /** The stage these signals failed to reach. */
+  stage: "passed_htf" | "sized_ok" | "passed_spread" | "filled";
+  outcome: BacktestSignal["outcome"] | string;
+  count: number;
+  /** One dropped signal's reason text, so the count is actionable. */
+  example_reason: string;
+}
+
+/** One bot's signal→fill funnel over a period. Counts are monotonically
+ * non-increasing and follow the engine's real gate order. */
+export interface BotFunnel {
+  bot: string;
+  symbols: string[];
+  fired: number;
+  passed_htf: number;
+  sized_ok: number;
+  passed_spread: number;
+  filled: number;
+  drops: FunnelDrop[];
+}
+
+/** `GET /accounts/{id}/activity/signals/funnel` — "of N signals this bot
+ * fired, why did only M trade?". Built only from the typed decision trail, so
+ * a period predating it returns an empty list rather than a misleading
+ * funnel. Defaults to the last 14 days server-side when `from` is omitted. */
+export const getSignalFunnel = (
+  accountId: string,
+  opts: { skill?: string; from?: number; to?: number } = {},
+) => {
+  const params = new URLSearchParams();
+  if (opts.skill !== undefined) params.set("skill", opts.skill);
+  if (opts.from !== undefined) params.set("from", String(opts.from));
+  if (opts.to !== undefined) params.set("to", String(opts.to));
+  const qs = params.toString();
+  return api.get<BotFunnel[]>(
+    acctPath(accountId, `/activity/signals/funnel${qs ? `?${qs}` : ""}`),
+  );
 };
 
 export interface BacktestReportSummary {

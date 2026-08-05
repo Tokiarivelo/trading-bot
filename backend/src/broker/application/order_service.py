@@ -10,8 +10,9 @@ from __future__ import annotations
 import logging
 from datetime import datetime
 
+from src.activity.domain.models import DecisionCheck
 from src.activity.ports.signal_decisions import SignalDecisionSinkPort
-from src.broker.application.spread_gate import SpreadGate
+from src.broker.application.spread_gate import DEFAULT_MIN_RR, SpreadGate
 from src.broker.domain.trading import (
     ExecutionResult,
     OrderRejected,
@@ -119,10 +120,37 @@ class OrderService:
                 skill,
                 veto.reason,
             )
+            # The two gates are distinct outcomes on the decision trail: a
+            # spread cap breach is a market-condition veto, an RR failure is
+            # the strategy's own SL/TP geometry not clearing the floor.
             await self._record_outcome(
-                signal_id, "spread_veto", base_reason=reason, explanation=veto.reason
+                signal_id,
+                "rr_gate" if veto.kind == "rr" else "spread_veto",
+                base_reason=reason,
+                explanation=veto.reason,
+                checks=(
+                    DecisionCheck(
+                        name="risk_reward" if veto.kind == "rr" else "spread_points",
+                        value=veto.value,
+                        threshold=veto.threshold,
+                        comparison=">=" if veto.kind == "rr" else "<=",
+                        passed=False,
+                    ),
+                ),
             )
             raise OrderRejected(veto.reason)
+
+        await self._record_checks(
+            signal_id,
+            self._passed_gate_checks(
+                symbol,
+                spread_points=info.spread_points,
+                point=info.point,
+                max_spread_override=max_spread_points,
+                sl_distance=sl_distance,
+                tp_distance=tp_distance,
+            ),
+        )
 
         order = OrderRequest(
             symbol=symbol, side=side, volume=volume, sl=sl, tp=tp, comment=comment, magic=magic
@@ -195,6 +223,59 @@ class OrderService:
         )
         return result
 
+    def _passed_gate_checks(
+        self,
+        symbol: str,
+        *,
+        spread_points: int,
+        point: float,
+        max_spread_override: int | None,
+        sl_distance: float | None,
+        tp_distance: float | None,
+    ) -> tuple[DecisionCheck, ...]:
+        """The spread/RR numbers as seen on an order the gate let through —
+        recorded so a filled signal's trail shows what it cleared by, not just
+        that it cleared. Mirrors `SpreadGate.check`'s own arithmetic; a gate
+        that didn't apply (no spread cap configured, or sl/tp not both set)
+        contributes no check rather than a fabricated one."""
+        config = self._spread_gate.get_config(symbol)
+        checks: list[DecisionCheck] = []
+        max_spread_points = (
+            max_spread_override
+            if max_spread_override is not None
+            else (config.max_spread_points if config is not None else None)
+        )
+        if max_spread_points is not None:
+            checks.append(
+                DecisionCheck(
+                    name="spread_points",
+                    value=float(spread_points),
+                    threshold=float(max_spread_points),
+                    comparison="<=",
+                    passed=True,
+                )
+            )
+        if sl_distance is not None and tp_distance is not None:
+            min_rr = config.min_rr if config is not None else DEFAULT_MIN_RR
+            required_tp = min_rr * (sl_distance + spread_points * point)
+            checks.append(
+                DecisionCheck(
+                    name="risk_reward",
+                    value=tp_distance,
+                    threshold=required_tp,
+                    comparison=">=",
+                    passed=True,
+                )
+            )
+        return tuple(checks)
+
+    async def _record_checks(
+        self, signal_id: str | None, checks: tuple[DecisionCheck, ...]
+    ) -> None:
+        if signal_id is None or self._signal_decisions is None or not checks:
+            return
+        await self._signal_decisions.record_checks(signal_id, checks)
+
     async def _record_outcome(
         self,
         signal_id: str | None,
@@ -202,6 +283,7 @@ class OrderService:
         *,
         base_reason: str,
         explanation: str | None = None,
+        checks: tuple[DecisionCheck, ...] = (),
     ) -> None:
         """Stamps the engine-recorded `SignalDecision`'s terminal outcome.
         No-op unless this order came from a recorded signal and a sink is
@@ -213,7 +295,9 @@ class OrderService:
         reason = None
         if explanation is not None and explanation not in base_reason:
             reason = f"{base_reason} — {explanation}" if base_reason else explanation
-        await self._signal_decisions.record_outcome(signal_id, outcome, reason=reason)
+        await self._signal_decisions.record_outcome(
+            signal_id, outcome, reason=reason, checks=checks
+        )
 
     async def close_position(
         self, ticket: int, volume: float | None = None, reason: str = ""

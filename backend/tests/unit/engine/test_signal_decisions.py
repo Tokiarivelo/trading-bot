@@ -1,7 +1,10 @@
 """Engine-side of the typed signal-decision trail (OBSERVABILITY_PLAN.md
-Phase 1): one recorded decision per fired signal, and the right outcome
-stamped on every path out of `_enter_for_bot`."""
+Phase 1, extended in Phase 2): one recorded decision per fired signal, the
+right — now per-gate, no longer collapsed into `risk_rejected` — outcome
+stamped on every path out of `_enter_for_bot`, and the structured
+`DecisionCheck`s each gate saw."""
 
+from src.activity.domain.models import DecisionCheck
 from src.broker.domain.trading import OrderRejected
 from src.engine.application.risk_manager import RiskManager
 from src.engine.domain.models import RiskCaps
@@ -29,12 +32,22 @@ class FakeSignalDecisionSink:
     def __init__(self) -> None:
         self.recorded: list[dict] = []
         self.outcomes: list[tuple[str, str, str | None]] = []
+        self.checks: list[DecisionCheck] = []
 
     async def record(self, **kwargs) -> None:
         self.recorded.append(kwargs)
 
-    async def record_outcome(self, signal_id, outcome, *, reason=None) -> None:
+    async def record_outcome(self, signal_id, outcome, *, reason=None, checks=()) -> None:
         self.outcomes.append((signal_id, outcome, reason))
+        self.checks.extend(checks)
+
+    async def record_checks(self, signal_id, checks) -> None:
+        self.checks.extend(checks)
+
+    def check(self, name: str) -> DecisionCheck:
+        """The last check recorded under `name` — gates that run per target
+        stamp one per target."""
+        return [c for c in self.checks if c.name == name][-1]
 
     @property
     def final_outcome(self) -> str:
@@ -91,6 +104,7 @@ async def test_htf_veto_outcome():
     assert order_service.opened == []
     assert sink.final_outcome == "htf_veto"
     assert "test buy — " in sink.outcomes[-1][2]
+    assert sink.check("htf_confirm").passed is False
 
 
 async def test_risk_gate_outcome_when_the_circuit_breaker_is_paused():
@@ -100,7 +114,7 @@ async def test_risk_gate_outcome_when_the_circuit_breaker_is_paused():
     sink, order_service = await _run(risk_manager=risk_manager)
 
     assert order_service.opened == []
-    assert sink.final_outcome == "risk_rejected"
+    assert sink.final_outcome == "daily_loss_breaker"
 
 
 async def test_max_open_positions_cap_outcome():
@@ -125,8 +139,10 @@ async def test_max_open_positions_cap_outcome():
     # TP1 fills (its outcome is the order service's job), TP2 hits the cap —
     # which must not downgrade the decision away from "opened".
     assert len(order_service.opened) == 1
-    assert sink.outcomes[-1][1] == "risk_rejected"
+    assert sink.outcomes[-1][1] == "max_positions"
     assert "at cap 1" in sink.outcomes[-1][2]
+    cap_check = sink.check("open_positions")
+    assert (cap_check.value, cap_check.threshold, cap_check.passed) == (1.0, 1.0, False)
 
 
 async def test_risk_sizing_rejection_outcome():
@@ -134,8 +150,9 @@ async def test_risk_sizing_rejection_outcome():
     sink, order_service = await _run(account=FakeAccountService(balance=1.0))
 
     assert order_service.opened == []
-    assert sink.final_outcome == "risk_rejected"
+    assert sink.final_outcome == "risk_sizing"
     assert "TP1:" in sink.outcomes[-1][2]
+    assert sink.check("position_volume").passed is False
 
 
 async def test_no_account_connected_is_recorded_as_skipped():
@@ -157,8 +174,11 @@ async def test_volatility_guard_block_outcome():
     )
 
     assert order_service.opened == []
-    assert sink.final_outcome == "risk_rejected"
+    assert sink.final_outcome == "volatility_guard"
     assert "EXTREME" in sink.outcomes[-1][2]
+    guard = sink.check("volatility_percentile")
+    assert guard.passed is False
+    assert guard.value >= guard.threshold
 
 
 async def test_broker_rejection_leaves_the_outcome_to_the_order_service():
@@ -179,3 +199,40 @@ async def test_no_sink_wired_still_trades():
     await engine.on_candle_closed(CandleClosed(symbol="XAUUSD", timeframe="M5"))
 
     assert len(order_service.opened) == 1
+
+
+async def test_a_filled_signal_records_every_gate_it_cleared():
+    """The funnel needs passing gates, not only the failing one: a signal that
+    made it to the broker must carry its HTF, volatility, position-cap and
+    sizing checks, all passed."""
+    sink, order_service = await _run()
+
+    assert len(order_service.opened) == 1
+    passed = {c.name: c for c in sink.checks}
+    assert set(passed) >= {
+        "open_positions",
+        "htf_confirm",
+        "volatility_percentile",
+        "position_volume",
+    }
+    assert all(c.passed for c in passed.values())
+
+
+async def test_the_circuit_breaker_and_the_position_cap_are_no_longer_one_bucket():
+    """Phase 2's whole point: a paused engine and a full position book used to
+    both read `risk_rejected`."""
+    paused = RiskManager(caps=CAPS, timezone="UTC")
+    paused.kill()
+    paused_sink, _ = await _run(risk_manager=paused)
+
+    full_caps = RiskCaps(
+        risk_per_trade_pct=1.0,
+        daily_loss_limit_pct=5.0,
+        max_open_positions=0,
+        max_trades_per_day_enabled=False,
+        consecutive_loss_pause=5,
+    )
+    full_sink, _ = await _run(risk_manager=RiskManager(caps=full_caps, timezone="UTC"))
+
+    assert paused_sink.final_outcome == "daily_loss_breaker"
+    assert full_sink.final_outcome == "max_positions"

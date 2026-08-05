@@ -79,7 +79,28 @@ parsed out of log text.
 
 ## Phase 2 — Veto funnel (structured checks)
 
-**Status:** not started
+**Status:** ✅ done (uncommitted working tree, 2026-08-05)
+
+Landed: `DecisionCheck` + `SIGNAL_OUTCOMES` and `SignalDecision.checks` in
+`activity/domain/models.py`; `signal_decisions.checks` JSON column (migration
+`c8d2e3f4a5b6`) with append semantics in the repository; `RiskDecision.code`
+and `SpreadVeto.kind/value/threshold` so the gates are identified structurally
+rather than by parsing their prose; per-gate outcomes stamped in
+`trade_loop.py` (`htf_veto`, `volatility_guard`, `max_positions`,
+`risk_sizing`, `daily_loss_breaker`) and `order_service.py` (`spread_veto` vs
+`rr_gate`, `broker_rejected`, `opened`); pure aggregation in
+`activity/domain/funnel.py`; `GET /activity/signals/funnel`; frontend
+`SIGNAL_OUTCOME_META` extended with all five new values in the same change
+(it is indexed unguarded), plus `features/analytics/SignalFunnelPanel.tsx` +
+`useSignalFunnel.ts`.
+
+Notes: the funnel's stage order follows the engine's **real** gate order
+(HTF → volatility/cap/sizing → spread/RR → fill), not the prose order below,
+so the counts stay monotonic. The funnel has no legacy log-scrape fallback on
+purpose — the old vocabulary collapsed every risk block into one bucket, which
+is the ambiguity it exists to remove. `bot_signals.py` still maps historical
+log lines onto the old vocabulary, and `risk_rejected` stays in both the
+backend vocabulary and `SIGNAL_OUTCOME_META` so those rows keep rendering.
 
 - Add `checks: tuple[DecisionCheck, ...]` to `SignalDecision` —
   `(name, value, threshold, comparison, passed)`, mirroring the shape already
@@ -168,6 +189,7 @@ have refused.
 |---|---|---|
 | 2026-08-05 | — | Plan created from code audit. |
 | 2026-08-05 | 1 | Done, committed `a246d11`. Gates: ruff clean on touched paths; pytest 1133 passed / 1 failed; `make lint-frontend` + `make build-frontend` pass. |
+| 2026-08-05 | 2 | Done, left uncommitted for review. Gates: ruff clean on touched paths (repo-wide ruff has ~300 pre-existing errors, all in `strategies/generated/` + two unrelated test files); pytest passes apart from the three known pre-existing failures below; `make lint-frontend` + `make build-frontend` pass. |
 
 ## Known pre-existing breakage (NOT caused by this plan's work)
 

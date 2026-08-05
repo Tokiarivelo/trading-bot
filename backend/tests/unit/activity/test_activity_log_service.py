@@ -136,6 +136,15 @@ class FakeSignalDecisionRepository:
         times = [int(d.created_at.timestamp()) for d in self.decisions]
         return min(times) if times else None
 
+    def list_between(self, *, account_id="default", created_from=None, created_to=None,
+                     bot=None, limit=20000):
+        rows = self.decisions if bot is None else [d for d in self.decisions if d.bot == bot]
+        if created_from is not None:
+            rows = [d for d in rows if int(d.created_at.timestamp()) >= created_from]
+        if created_to is not None:
+            rows = [d for d in rows if int(d.created_at.timestamp()) <= created_to]
+        return sorted(rows, key=lambda d: d.created_at)
+
     def list_for_bot(self, *, bot, account_id="default", created_from=None, created_to=None,
                      limit=5000):
         self.calls.append(
@@ -233,3 +242,69 @@ async def test_get_bot_signals_uses_only_the_log_scrape_while_the_table_is_empty
 
     assert [s.reason for s in signals] == ["scraped"]
     assert logs.calls
+
+
+# --- Phase 2: the veto funnel -------------------------------------------------
+
+
+async def test_get_signal_funnel_aggregates_the_typed_table_per_bot():
+    skill = "normal/xauusd/breakout_v1"
+    decisions = FakeSignalDecisionRepository(
+        [
+            _decision(1000, bot=skill, outcome="opened"),
+            _decision(1100, bot=skill, outcome="htf_veto"),
+            _decision(1200, bot=skill, outcome="spread_veto"),
+            _decision(1300, bot="normal/xauusd/other", outcome="opened"),
+        ]
+    )
+    service = ActivityLogService(
+        FakeLoggerFilteringRepository([]), signal_decisions=decisions
+    )
+
+    funnels = await service.get_signal_funnel(created_from=0, created_to=9999)
+
+    by_bot = {f.bot: f for f in funnels}
+    assert (by_bot[skill].fired, by_bot[skill].passed_htf, by_bot[skill].filled) == (3, 2, 1)
+    assert by_bot["normal/xauusd/other"].filled == 1
+
+
+async def test_get_signal_funnel_can_be_narrowed_to_one_bot():
+    skill = "normal/xauusd/breakout_v1"
+    decisions = FakeSignalDecisionRepository(
+        [
+            _decision(1000, bot=skill),
+            _decision(1100, bot="normal/xauusd/other"),
+        ]
+    )
+    service = ActivityLogService(
+        FakeLoggerFilteringRepository([]), signal_decisions=decisions
+    )
+
+    funnels = await service.get_signal_funnel(skill=skill, created_from=0)
+
+    assert [f.bot for f in funnels] == [skill]
+
+
+async def test_get_signal_funnel_never_falls_back_to_the_log_scrape():
+    """The legacy vocabulary collapsed every risk block into one bucket, so
+    scraping it would produce a misleading funnel — an empty table means an
+    empty funnel, not a reconstructed one."""
+    logs = FakeLoggerFilteringRepository(
+        [
+            _log(
+                10,
+                "src.engine.application.trade_loop",
+                "SIGNAL: XAUUSD buy @ 4000.00000 (1 target position(s)) via "
+                "strategy=breakout_v1 skill=normal/xauusd/breakout_v1 — legacy reason",
+            ),
+        ]
+    )
+    service = ActivityLogService(logs, signal_decisions=FakeSignalDecisionRepository([]))
+
+    assert await service.get_signal_funnel(created_from=0) == []
+
+
+async def test_get_signal_funnel_without_a_repository_is_empty():
+    service = ActivityLogService(FakeLoggerFilteringRepository([]))
+
+    assert await service.get_signal_funnel() == []

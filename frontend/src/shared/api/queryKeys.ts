@@ -68,6 +68,11 @@ export const queryKeys = {
      * breakdown. */
     bots: (accountId: string | null, openFrom?: number, openTo?: number) =>
       ["analytics", "bots", accountId, openFrom, openTo] as const,
+    /** `GET /accounts/{id}/activity/signals/funnel` — per-bot signal→fill
+     * veto funnel for the period (OBSERVABILITY_PLAN.md Phase 2). Keyed on
+     * the same date filters as the other analytics queries. */
+    signalFunnel: (accountId: string | null, from?: number, to?: number) =>
+      ["analytics", "signalFunnel", accountId, from, to] as const,
   },
   history: {
     /** Root key for all trade-history queries for an account — pass to

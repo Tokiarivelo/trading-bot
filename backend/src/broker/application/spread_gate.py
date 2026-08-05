@@ -38,6 +38,16 @@ DEFAULT_MIN_RR = 1.0
 @dataclass(frozen=True, kw_only=True)
 class SpreadVeto:
     reason: str
+    kind: str = "spread"
+    """Which of the two gates fired: `"spread"` (live spread over the cap) or
+    `"rr"` (spread-adjusted risk-reward floor). The two are separate outcomes
+    on the decision trail (`spread_veto` vs `rr_gate`), so they can't be told
+    apart from the reason text alone (OBSERVABILITY_PLAN.md Phase 2)."""
+    value: float = 0.0
+    """What was measured — spread in points, or the achieved TP distance."""
+    threshold: float = 0.0
+    """What it was measured against — the spread cap, or the required TP
+    distance."""
 
 
 class SpreadGate:
@@ -97,7 +107,12 @@ class SpreadGate:
             else (config.max_spread_points if config is not None else None)
         )
         if max_spread_points is not None and spread_points > max_spread_points:
-            return SpreadVeto(reason=f"spread {spread_points}pts > max {max_spread_points}pts")
+            return SpreadVeto(
+                reason=f"spread {spread_points}pts > max {max_spread_points}pts",
+                kind="spread",
+                value=float(spread_points),
+                threshold=float(max_spread_points),
+            )
         if sl_distance is None or tp_distance is None:
             # No RR to evaluate without both — a manual trader who omits
             # sl/tp is accepting that risk explicitly (F-manual-trading).
@@ -110,6 +125,9 @@ class SpreadGate:
                 reason=(
                     f"tp distance {tp_distance:.5f} < required {required_tp:.5f} "
                     f"(min_rr={min_rr}, spread-adjusted)"
-                )
+                ),
+                kind="rr",
+                value=tp_distance,
+                threshold=required_tp,
             )
         return None

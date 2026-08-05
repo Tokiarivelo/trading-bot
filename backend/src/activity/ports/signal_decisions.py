@@ -18,6 +18,8 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Protocol
 
+from src.activity.domain.models import DecisionCheck
+
 
 class SignalDecisionSinkPort(Protocol):
     async def record(
@@ -38,7 +40,24 @@ class SignalDecisionSinkPort(Protocol):
         (`outcome="skipped"`)."""
 
     async def record_outcome(
-        self, signal_id: str, outcome: str, *, reason: str | None = None
+        self,
+        signal_id: str,
+        outcome: str,
+        *,
+        reason: str | None = None,
+        checks: tuple[DecisionCheck, ...] = (),
     ) -> None:
         """Sets what the engine/broker finally did with the signal. Must never
-        be able to downgrade an already-`opened` decision."""
+        be able to downgrade an already-`opened` decision.
+
+        `checks` are appended to the decision's existing ones, so a gate can
+        record the numbers it saw (pass or fail) without knowing what earlier
+        gates already stamped. Passing `outcome` unchanged from the current
+        value is the way a *passing* gate records its check.
+        """
+
+    async def record_checks(
+        self, signal_id: str, checks: tuple[DecisionCheck, ...]
+    ) -> None:
+        """Appends passed-gate checks without touching the outcome — how the
+        engine records the gates a signal cleared on its way down."""

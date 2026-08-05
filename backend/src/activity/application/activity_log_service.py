@@ -10,6 +10,7 @@ from datetime import UTC, datetime, timedelta
 from src.activity.adapters.repository import ActivityLogRepository
 from src.activity.adapters.signal_decision_repository import SignalDecisionRepository
 from src.activity.application.bot_signals import extract_bot_signals
+from src.activity.domain.funnel import BotFunnel, build_funnels
 from src.activity.domain.models import BotSignal, LogEntry, SignalDecision
 
 # How far back to look when the caller doesn't specify a range — bounds the
@@ -76,6 +77,38 @@ class ActivityLogService:
             skill=skill, created_from=created_from, created_to=created_to
         )
         return legacy + typed
+
+    async def get_signal_funnel(
+        self,
+        *,
+        skill: str | None = None,
+        created_from: int | None = None,
+        created_to: int | None = None,
+    ) -> list[BotFunnel]:
+        """The veto funnel over the window: per bot, how many signals fired
+        and how many survived each gate, with the drop reasons
+        (OBSERVABILITY_PLAN.md Phase 2).
+
+        Built only from the typed `signal_decisions` table — unlike the signal
+        trail there is deliberately **no** legacy log-scrape fallback: the old
+        log vocabulary collapsed every risk block into one bucket, which is
+        exactly the ambiguity this funnel exists to remove. A window entirely
+        predating the table therefore returns an empty funnel rather than a
+        misleading one. Defaults to the last 14 days when `created_from` is
+        omitted, same as `get_bot_signals`.
+        """
+        if self._signal_decisions is None:
+            return []
+        if created_from is None:
+            created_from = int((datetime.now(UTC) - _DEFAULT_SIGNAL_WINDOW).timestamp())
+        decisions: list[SignalDecision] = await asyncio.to_thread(
+            self._signal_decisions.list_between,
+            account_id=self._account_id,
+            created_from=created_from,
+            created_to=created_to,
+            bot=skill,
+        )
+        return build_funnels(decisions)
 
     async def _scrape_bot_signals(
         self, *, skill: str, created_from: int, created_to: int | None
@@ -154,4 +187,5 @@ def _to_bot_signal(decision: SignalDecision) -> BotSignal:
         outcome=decision.outcome,
         reason=decision.reason,
         price=decision.price,
+        checks=decision.checks,
     )

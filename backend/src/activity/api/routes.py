@@ -6,7 +6,10 @@ from __future__ import annotations
 from fastapi import APIRouter, Query
 
 from src.activity.api.schemas import (
+    BotFunnelOut,
     BotSignalOut,
+    DecisionCheckOut,
+    FunnelDropOut,
     LogDeleteByFilterRequest,
     LogDeleteByIdsRequest,
     LogDeleteResult,
@@ -14,6 +17,7 @@ from src.activity.api.schemas import (
     LogHistoryPage,
 )
 from src.activity.application.activity_log_service import ActivityLogService
+from src.activity.domain.funnel import BotFunnel
 from src.activity.domain.models import BotSignal, LogEntry
 from src.shared.api.dependencies import AccountRuntimeDep
 
@@ -114,8 +118,76 @@ async def get_bot_signals(
             outcome=s.outcome,
             reason=s.reason,
             price=s.price,
+            checks=[
+                DecisionCheckOut(
+                    name=c.name,
+                    value=c.value,
+                    threshold=c.threshold,
+                    comparison=c.comparison,
+                    passed=c.passed,
+                )
+                for c in s.checks
+            ],
         )
         for s in signals
+    ]
+
+
+@router.get(
+    "/signals/funnel",
+    response_model=list[BotFunnelOut],
+    summary="Get the per-bot veto funnel for a period",
+    description=(
+        "Answers 'of N signals this bot fired, why did only M trade?' — for each bot that "
+        "fired at least one signal in the window, the count surviving each engine gate "
+        "(HTF confirmation and the pre-trade risk gate, then the volatility guard / "
+        "open-position cap / lot sizing, then the broker's spread cap and spread-adjusted "
+        "risk-reward floor, then the fill) plus the grouped reasons everything else "
+        "dropped out. Ordered busiest bot first. Built purely from the typed "
+        "`signal_decisions` table: unlike `GET /activity/signals` there is deliberately no "
+        "legacy log-scrape fallback, because the old log vocabulary collapsed every risk "
+        "block into a single bucket — the exact ambiguity this funnel exists to remove — "
+        "so a window that entirely predates that table returns an empty list. Defaults to "
+        "the last 14 days when `from` is omitted, to bound the query. Read-only; publishes "
+        "no events."
+    ),
+    responses={404: {"description": "No account with this `account_id` is configured."}},
+)
+async def get_signal_funnel(
+    account: AccountRuntimeDep,
+    skill: str | None = Query(
+        default=None,
+        description="Restrict to one bot by full id, e.g. 'normal/xauusd/breakout_v1'. "
+        "Omit for every bot that fired in the window.",
+    ),
+    frm: int | None = Query(
+        default=None, alias="from", description="Range start, epoch seconds UTC (inclusive)."
+    ),
+    to: int | None = Query(default=None, description="Range end, epoch seconds UTC (inclusive)."),
+) -> list[BotFunnelOut]:
+    funnels: list[BotFunnel] = await _service(account).get_signal_funnel(
+        skill=skill, created_from=frm, created_to=to
+    )
+    return [
+        BotFunnelOut(
+            bot=f.bot,
+            symbols=list(f.symbols),
+            fired=f.fired,
+            passed_htf=f.passed_htf,
+            sized_ok=f.sized_ok,
+            passed_spread=f.passed_spread,
+            filled=f.filled,
+            drops=[
+                FunnelDropOut(
+                    stage=d.stage,
+                    outcome=d.outcome,
+                    count=d.count,
+                    example_reason=d.example_reason,
+                )
+                for d in f.drops
+            ],
+        )
+        for f in funnels
     ]
 
 

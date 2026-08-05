@@ -21,6 +21,48 @@ class LogEntry:
 
 
 @dataclass(frozen=True, kw_only=True)
+class DecisionCheck:
+    """One gate the engine evaluated on its way from signal to fill, recorded
+    with the numbers it actually saw (OBSERVABILITY_PLAN.md Phase 2).
+
+    Deliberately the same five-field shape as `TradeRecord.indicators`
+    (`journal/domain/models.py`) — `(name, value, threshold, comparison,
+    passed)` — so "what did the strategy see" and "what did the engine check"
+    read identically in the UI. `value`/`threshold` are floats even for
+    boolean-ish gates (1.0/0.0), and `comparison` is the operator that was
+    applied, e.g. `"<="`, `">"`, `"=="`.
+    """
+
+    name: str
+    """Gate id, e.g. "htf_confirm", "spread_points", "risk_reward",
+    "volatility_percentile", "open_positions", "position_volume"."""
+    value: float
+    threshold: float
+    comparison: str
+    passed: bool
+
+
+# The closed outcome vocabulary of `SignalDecision.outcome`, in the order the
+# engine evaluates the gates. Phase 2 split the old collapsed `risk_rejected`
+# bucket into named reasons; `risk_rejected` itself stays in the vocabulary as
+# the catch-all for a pre-trade risk block that isn't one of the named ones
+# (and so historical rows keep rendering).
+SIGNAL_OUTCOMES: tuple[str, ...] = (
+    "skipped",
+    "daily_loss_breaker",
+    "risk_rejected",
+    "htf_veto",
+    "volatility_guard",
+    "max_positions",
+    "risk_sizing",
+    "spread_veto",
+    "rr_gate",
+    "broker_rejected",
+    "opened",
+)
+
+
+@dataclass(frozen=True, kw_only=True)
 class SignalDecision:
     """One strategy signal and what the engine decided to do with it, recorded
     as a first-class row at the moment it happens — the typed replacement for
@@ -47,10 +89,13 @@ class SignalDecision:
     bid for a sell."""
     created_at: datetime
     outcome: str
-    """Same CLOSED vocabulary as `BotSignal.outcome` (Phase 1 deliberately
-    keeps it unchanged; splitting `risk_rejected` is Phase 2's job)."""
+    """One of `SIGNAL_OUTCOMES` — the closed vocabulary above."""
     reason: str
     confidence: float | None = None
+    checks: tuple[DecisionCheck, ...] = ()
+    """Every gate evaluated for this signal, in evaluation order, appended as
+    the engine walks them. Empty for decisions recorded before Phase 2 and for
+    signals that never reached a gate."""
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -72,3 +117,6 @@ class BotSignal:
     """Reference price the engine saw when the signal fired — ask for a buy,
     bid for a sell. `None` for legacy log lines logged before the price was
     added to the `SIGNAL:` line, so the chart must treat it as optional."""
+    checks: tuple[DecisionCheck, ...] = ()
+    """The gates evaluated for this signal (Phase 2). Always empty on the
+    legacy log-scrape path, which has no structured checks to recover."""

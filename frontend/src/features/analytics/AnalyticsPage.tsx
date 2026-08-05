@@ -8,9 +8,11 @@ import { BotDrawdownChart } from "./BotDrawdownChart";
 import { BotEquityChart, seriesColor } from "./BotEquityChart";
 import { BotLegend } from "./BotLegend";
 import { BotPerformanceTable } from "./BotPerformanceTable";
+import { SignalFunnelPanel } from "./SignalFunnelPanel";
 import { SymbolAnalyticsTable } from "./SymbolAnalyticsTable";
 import { TradePnLHistogram } from "./TradePnLHistogram";
 import { useAnalytics } from "./useAnalytics";
+import { useSignalFunnel } from "./useSignalFunnel";
 import { useAnalyticsExport } from "./useAnalyticsExport";
 
 const MAX_CHARTED_BOTS = 6;
@@ -89,6 +91,14 @@ export function AnalyticsPage() {
   );
 
   const { symbols, bots, loading, error, refresh } = useAnalytics(apiFilters);
+  // Same window as the tables above, but a different source: the typed
+  // signal-decision trail rather than the journal, so this answers "why
+  // didn't it trade" where everything else answers "how did the trades go".
+  const {
+    funnels,
+    loading: funnelLoading,
+    error: funnelError,
+  } = useSignalFunnel(apiFilters.open_from, apiFilters.open_to);
   const [selected, setSelected] = useState<Set<string> | null>(loadChartSelection);
   const [selectedSymbols, setSelectedSymbols] = useState<Set<string>>(() =>
     loadFilterSet(QUERY_KEY_SYMBOLS, LS_KEY_SYMBOLS),
@@ -385,6 +395,17 @@ export function AnalyticsPage() {
                 </p>
               </header>
               <SymbolAnalyticsTable symbols={filteredSymbols} />
+            </section>
+
+            <section className="rounded-xl border border-line bg-panel/30 shadow-inner overflow-hidden">
+              <header className="border-b border-line px-4 py-2.5">
+                <h2 className="text-sm font-bold text-ink">Signal funnel</h2>
+                <p className="text-xs text-ink-muted">
+                  Of every signal each bot fired, how many survived each gate — and why the rest
+                  never became trades.
+                </p>
+              </header>
+              <SignalFunnelPanel funnels={funnels} loading={funnelLoading} error={funnelError} />
             </section>
           </>
         )}

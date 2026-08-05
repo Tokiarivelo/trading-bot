@@ -122,16 +122,20 @@ class RiskManager:
         now = now or datetime.now(self._tz)
         self._roll_day_if_needed(now)
         if self._paused:
-            return RiskDecision(approved=False, reason=f"engine paused: {self._pause_reason}")
+            return RiskDecision(
+                approved=False, reason=f"engine paused: {self._pause_reason}", code="paused"
+            )
         if open_positions_count >= self._caps.max_open_positions:
             return RiskDecision(
                 approved=False,
                 reason=f"max open positions reached ({self._caps.max_open_positions})",
+                code="max_positions",
             )
         if self._caps.max_trades_per_day_enabled:
             return RiskDecision(
                 approved=False,
                 reason="daily trading disabled (max_trades_per_day_enabled)",
+                code="daily_trading_disabled",
             )
         return RiskDecision(approved=True)
 
@@ -150,10 +154,13 @@ class RiskManager:
             return RiskDecision(
                 approved=False,
                 reason=f"sl distance must be positive (got {sl_distance_price:.5f})",
+                code="sl_distance",
             )
         if balance <= 0:
             return RiskDecision(
-                approved=False, reason=f"balance must be positive (got {balance:.2f})"
+                approved=False,
+                reason=f"balance must be positive (got {balance:.2f})",
+                code="balance",
             )
         risk_amount = balance * (self._caps.risk_per_trade_pct / 100) * risk_multiplier
         raw_volume = risk_amount / (sl_distance_price * contract_size)
@@ -169,6 +176,7 @@ class RiskManager:
                         f"{self._caps.risk_per_trade_pct}% x multiplier {risk_multiplier:.2f}) "
                         "— enable min_lot_fallback_enabled to trade the minimum lot anyway"
                     ),
+                    code="min_lot",
                 )
             # Rounding *up* to volume_min unconditionally would silently risk
             # more than risk_per_trade_pct allows. Instead of always
@@ -192,6 +200,7 @@ class RiskManager:
                         f"(risk_amount=${risk_amount:.2f} = balance ${balance:.2f} x "
                         f"{self._caps.risk_per_trade_pct}% x multiplier {risk_multiplier:.2f})"
                     ),
+                    code="min_lot",
                 )
             logger.info(
                 "risk manager: min-lot fallback — %.4f lots forced (effective risk "
