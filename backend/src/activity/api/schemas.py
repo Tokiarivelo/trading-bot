@@ -66,9 +66,10 @@ class LogDeleteResult(BaseModel):
 
 class BotSignalOut(BaseModel):
     """One strategy signal a live bot emitted — including signals that never
-    became a trade (vetoed or rejected). Reconstructed from that bot's own
-    decision-trail log lines, so the chart can show every setup the strategy
-    saw for this bot, not only its fills."""
+    became a trade (vetoed or rejected), so the chart can show every setup the
+    strategy saw for this bot, not only its fills. Read from the
+    `signal_decisions` table, with a legacy log-scrape fallback for the window
+    that predates it (see `GET /activity/signals`)."""
 
     time: int = Field(description="Epoch seconds UTC — when the strategy emitted this signal.")
     direction: str = Field(description="'buy' or 'sell'.")

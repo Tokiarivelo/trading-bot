@@ -29,8 +29,10 @@ import yaml
 from dotenv import dotenv_values
 
 from src.activity.adapters.repository import ActivityLogRepository
+from src.activity.adapters.signal_decision_repository import SignalDecisionRepository
 from src.activity.application.activity_log_service import ActivityLogService
 from src.activity.application.retention_service import ActivityLogRetentionService
+from src.activity.application.signal_decision_service import SignalDecisionService
 from src.ai.adapters.claude import ClaudeAdapter
 from src.ai.adapters.claude_code import ClaudeCodeAdapter
 from src.ai.adapters.gemini import GeminiAdapter
@@ -402,6 +404,7 @@ def build_container(settings: Settings | None = None) -> Container:
     symbol_spec_repository = SymbolSpecRepository(session_factory)
     journal_repository = JournalRepository(session_factory)
     activity_log_repository = ActivityLogRepository(session_factory)
+    signal_decision_repository = SignalDecisionRepository(session_factory)
     strategy_version_repository = StrategyVersionRepository(session_factory)
 
     # --- housekeeping: activity_logs retention + SQLite WAL checkpoint ---
@@ -550,6 +553,7 @@ def build_container(settings: Settings | None = None) -> Container:
             symbol_spec_repository=symbol_spec_repository,
             journal_repository=journal_repository,
             activity_log_repository=activity_log_repository,
+            signal_decision_repository=signal_decision_repository,
             strategy_version_repository=strategy_version_repository,
             baseline_strategies=baseline_strategies,
             risk_caps=account_risk_caps[account_cfg.id],
@@ -614,6 +618,7 @@ def build_account_runtime(
     symbol_spec_repository: SymbolSpecRepository,
     journal_repository: JournalRepository,
     activity_log_repository: ActivityLogRepository,
+    signal_decision_repository: SignalDecisionRepository,
     strategy_version_repository: StrategyVersionRepository,
     baseline_strategies: list[tuple[str, Strategy]],
     risk_caps: RiskCaps,
@@ -674,8 +679,17 @@ def build_account_runtime(
     broker: BrokerPort = (
         GatewayBroker(gateway_client) if account_cfg.mode == "live" else PaperBroker(market_data)
     )
+    # Typed signal-decision trail (OBSERVABILITY_PLAN.md Phase 1): the engine
+    # records a decision per signal, the order service stamps its fill/reject
+    # outcome, and the chart's signal trail reads the table back instead of
+    # regex-scraping log lines.
+    signal_decisions = SignalDecisionService(signal_decision_repository, account_id=account_id)
     order_service = OrderService(
-        broker=broker, market_data=market_data, spread_gate=spread_gate, event_bus=event_bus
+        broker=broker,
+        market_data=market_data,
+        spread_gate=spread_gate,
+        event_bus=event_bus,
+        signal_decisions=signal_decisions,
     )
 
     trade_journal = TradeJournalService(
@@ -688,7 +702,11 @@ def build_account_runtime(
     event_bus.subscribe(PositionOpened, trade_journal.on_position_opened)
     event_bus.subscribe(PositionClosed, trade_journal.on_position_closed)
 
-    activity_log = ActivityLogService(activity_log_repository, account_id=account_id)
+    activity_log = ActivityLogService(
+        activity_log_repository,
+        account_id=account_id,
+        signal_decisions=signal_decision_repository,
+    )
 
     risk_manager = RiskManager(caps=risk_caps, timezone=timezone)
     manual_trade_gate = ManualTradeGate(order_service=order_service, risk_manager=risk_manager)
@@ -759,6 +777,7 @@ def build_account_runtime(
         strategy_source=strategy_registry,
         entry_timeframe=engine_config.get("entry_timeframe", "M5"),
         volatility_config=volatility_config,
+        signal_decisions=signal_decisions,
         event_bus=event_bus,
         enabled=engine_config.get("enabled", True),
     )

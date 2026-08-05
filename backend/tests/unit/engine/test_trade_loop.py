@@ -160,6 +160,7 @@ class FakeOrderService:
         self._positions = positions or []
         self.opened: list[dict] = []
         self.closed: list[int] = []
+        self.signal_ids: list[str | None] = []
         self._raise_on_open = raise_on_open
 
     async def get_positions(self, symbol=None):
@@ -188,7 +189,9 @@ class FakeOrderService:
         pattern=None,
         structure=(),
         indicators=(),
+        signal_id=None,
     ):
+        self.signal_ids.append(signal_id)
         if self._raise_on_open:
             raise self._raise_on_open
         ticket = len(self.opened) + 1
@@ -356,6 +359,7 @@ def make_engine(
     context_bars=5,
     event_bus=None,
     volatility_config=None,
+    signal_decisions=None,
 ):
     market_data = market_data or FakeMarketData(bar_count=context_bars)
     order_service = order_service or FakeOrderService()
@@ -382,6 +386,7 @@ def make_engine(
         strategy_source=strategy_source,
         entry_timeframe="M5",
         volatility_config=volatility_config,
+        signal_decisions=signal_decisions,
         event_bus=event_bus,
         enabled=enabled,
         context_bars=context_bars,

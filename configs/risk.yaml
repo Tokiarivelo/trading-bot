@@ -5,7 +5,8 @@ risk_per_trade_pct: 0.5
 daily_loss_limit_pct: 50.0
 max_open_positions: 100
 max_trades_per_day: 100
-consecutive_loss_pause: 10 # circuit breaker: pause engine + notify after N straight losses
+consecutive_loss_pause: 1000 # circuit breaker: pause engine + notify after N straight losses
+consecutive_loss_pause_enabled: true # false = engine keeps running through any losing streak
 # On a small balance, risk_per_trade_pct alone can compute a lot size below
 # the broker's minimum (0.01), which used to just reject every trade. When
 # min_lot_fallback_enabled is true, the engine instead falls back to the

@@ -18,6 +18,9 @@ class RiskCaps:
     # the rest of the trading day; false leaves trade count today unlimited.
     max_trades_per_day_enabled: bool = False
     consecutive_loss_pause: int
+    # When false, the consecutive-loss circuit breaker never pauses the
+    # engine, regardless of consecutive_loss_pause's count.
+    consecutive_loss_pause_enabled: bool = True
     # Broker-minimum-lot fallback (see RiskManager.size_position): when the
     # balance is too small for risk_per_trade_pct to reach volume_min,
     # sizing normally rejects outright. Setting min_lot_fallback_enabled

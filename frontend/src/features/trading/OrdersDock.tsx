@@ -6,10 +6,12 @@
  * chart's bottom-right corner controls visibility and which screen edge
  * (top/bottom/left/right) the panel attaches to — both persisted so they
  * survive reloads. Visible by default; a user can hide it and that choice
- * persists too.
+ * persists too. The edge facing the chart is a drag handle that resizes the
+ * panel; the size is persisted separately per orientation (a horizontal dock
+ * stores a height, a vertical one a width) so switching sides keeps both.
  */
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { AllOrdersPanel } from "./AllOrdersPanel";
 import type { AllPositions } from "./useAllPositions";
 
@@ -17,6 +19,15 @@ type DockPosition = "top" | "bottom" | "left" | "right";
 
 const POSITION_KEY = "tb.ordersDock.position";
 const VISIBLE_KEY = "tb.ordersDock.visible";
+const HEIGHT_KEY = "tb.ordersDock.height";
+const WIDTH_KEY = "tb.ordersDock.width";
+
+const DEFAULT_HEIGHT = 280;
+const DEFAULT_WIDTH = 420;
+// Keep the panel usable at the small end and always leave room for the chart
+// at the large end (the max is re-clamped against the real viewport on drag).
+const MIN_HEIGHT = 120;
+const MIN_WIDTH = 260;
 const POSITIONS: { value: DockPosition; label: string }[] = [
   { value: "top", label: "Top" },
   { value: "bottom", label: "Bottom" },
@@ -45,6 +56,16 @@ function readVisible(): boolean {
   } catch {
     return true;
   }
+}
+
+function readSize(key: string, fallback: number, min: number): number {
+  try {
+    const stored = Number(localStorage.getItem(key));
+    if (Number.isFinite(stored) && stored >= min) return stored;
+  } catch {
+    // Ignore blocked localStorage — falls through to the default below.
+  }
+  return fallback;
 }
 
 export function OrdersDock({
@@ -77,10 +98,16 @@ export function OrdersDock({
   const [visible, setVisible] = useState(false);
   const [position, setPosition] = useState<DockPosition>("bottom");
   const [pickerOpen, setPickerOpen] = useState(false);
+  const [height, setHeight] = useState(DEFAULT_HEIGHT);
+  const [width, setWidth] = useState(DEFAULT_WIDTH);
+  const [resizing, setResizing] = useState(false);
+  const panelRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     setVisible(readVisible());
     setPosition(readPosition());
+    setHeight(readSize(HEIGHT_KEY, DEFAULT_HEIGHT, MIN_HEIGHT));
+    setWidth(readSize(WIDTH_KEY, DEFAULT_WIDTH, MIN_WIDTH));
   }, []);
 
   useEffect(() => {
@@ -113,18 +140,81 @@ export function OrdersDock({
 
   const isRow = position === "left" || position === "right";
 
+  // Persist the size, but only once the user stops dragging — writing on every
+  // pointermove would hammer localStorage at pointer-event rate.
+  useEffect(() => {
+    if (resizing) return;
+    try {
+      localStorage.setItem(HEIGHT_KEY, String(height));
+      localStorage.setItem(WIDTH_KEY, String(width));
+    } catch {
+      // Ignore blocked/full localStorage — the size just won't persist.
+    }
+  }, [resizing, height, width]);
+
+  const startResize = useCallback(
+    (e: React.PointerEvent<HTMLDivElement>) => {
+      const rect = panelRef.current?.getBoundingClientRect();
+      if (!rect) return;
+      e.preventDefault();
+      setResizing(true);
+      // The dock's outer edge is pinned to the layout, so measuring the
+      // pointer against it gives the new size directly — no delta bookkeeping.
+      const anchor = { top: rect.top, bottom: rect.bottom, left: rect.left, right: rect.right }[
+        position
+      ];
+
+      const onMove = (ev: PointerEvent) => {
+        if (position === "bottom" || position === "top") {
+          const raw = position === "bottom" ? anchor - ev.clientY : ev.clientY - anchor;
+          const max = Math.max(MIN_HEIGHT, window.innerHeight - 160);
+          setHeight(Math.round(Math.min(max, Math.max(MIN_HEIGHT, raw))));
+        } else {
+          const raw = position === "right" ? anchor - ev.clientX : ev.clientX - anchor;
+          const max = Math.max(MIN_WIDTH, window.innerWidth - 320);
+          setWidth(Math.round(Math.min(max, Math.max(MIN_WIDTH, raw))));
+        }
+      };
+      const onUp = () => {
+        setResizing(false);
+        window.removeEventListener("pointermove", onMove);
+        window.removeEventListener("pointerup", onUp);
+      };
+      window.addEventListener("pointermove", onMove);
+      window.addEventListener("pointerup", onUp);
+    },
+    [position],
+  );
+
+  // The grab strip sits just inside the edge facing the chart (the panel is
+  // `overflow-hidden`, so it can't hang outside).
+  const handle = (
+    <div
+      onPointerDown={startResize}
+      title="Drag to resize"
+      className={`absolute z-10 ${
+        isRow
+          ? `top-0 bottom-0 w-1.5 cursor-col-resize ${position === "left" ? "right-0" : "left-0"}`
+          : `left-0 right-0 h-1.5 cursor-row-resize ${position === "top" ? "bottom-0" : "top-0"}`
+      } ${resizing ? "bg-accent" : "hover:bg-accent/60"}`}
+    />
+  );
+
   const panel = (
     <div
+      ref={panelRef}
+      style={isRow ? { width } : { height }}
       className={
         isRow
-          ? `flex w-[420px] flex-shrink-0 flex-col overflow-hidden border-line bg-panel ${
+          ? `relative flex flex-shrink-0 flex-col overflow-hidden border-line bg-panel ${
               position === "left" ? "border-r" : "border-l"
             }`
-          : `flex h-[280px] flex-shrink-0 flex-col overflow-hidden border-line bg-panel ${
+          : `relative flex flex-shrink-0 flex-col overflow-hidden border-line bg-panel ${
               position === "top" ? "border-b" : "border-t"
             }`
       }
     >
+      {handle}
       <AllOrdersPanel
         allPositions={allPositions}
         selectedTicket={selectedTicket}

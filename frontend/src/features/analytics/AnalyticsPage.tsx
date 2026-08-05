@@ -218,8 +218,21 @@ export function AnalyticsPage() {
     [filteredBots],
   );
 
-  const activeSelection =
-    selected ?? new Set(rankedBots.slice(0, DEFAULT_CHARTED_BOTS).map((b) => b.skill));
+  // A charted skill that the current symbol/bot filters exclude isn't drawn
+  // anywhere, so it must not eat one of the MAX_CHARTED_BOTS slots — otherwise
+  // stale selections restored from the URL/localStorage silently make every
+  // remaining checkbox a no-op. Skip pruning while bots are still loading so a
+  // transiently empty list doesn't wipe the selection.
+  const activeSelection = useMemo(() => {
+    if (selected === null) {
+      return new Set(rankedBots.slice(0, DEFAULT_CHARTED_BOTS).map((b) => b.skill));
+    }
+    if (rankedBots.length === 0) return selected;
+    const visible = new Set(rankedBots.map((b) => b.skill));
+    return new Set([...selected].filter((skill) => visible.has(skill)));
+  }, [selected, rankedBots]);
+
+  const chartAtCapacity = activeSelection.size >= MAX_CHARTED_BOTS;
 
   function toggle(skill: string) {
     const next = new Set(activeSelection);
@@ -355,7 +368,13 @@ export function AnalyticsPage() {
                   Every bot ranked by realized profit — check the box to overlay its equity curve above.
                 </p>
               </header>
-              <BotPerformanceTable bots={filteredBots} selected={activeSelection} onToggle={toggle} />
+              <BotPerformanceTable
+                bots={filteredBots}
+                selected={activeSelection}
+                onToggle={toggle}
+                atCapacity={chartAtCapacity}
+                maxCharted={MAX_CHARTED_BOTS}
+              />
             </section>
 
             <section className="rounded-xl border border-line bg-panel/30 shadow-inner overflow-hidden">

@@ -21,6 +21,39 @@ class LogEntry:
 
 
 @dataclass(frozen=True, kw_only=True)
+class SignalDecision:
+    """One strategy signal and what the engine decided to do with it, recorded
+    as a first-class row at the moment it happens — the typed replacement for
+    regex-scraping `SIGNAL:`/`ENTRY *` log lines back out of `LogEntry`
+    (`application/bot_signals.py`, now legacy/backfill-only).
+
+    The engine writes one of these when a signal fires (`outcome="skipped"`,
+    i.e. no terminal outcome yet) and updates `outcome` once the entry is
+    filled, vetoed, or rejected. Human-readable log lines are still emitted —
+    they are just no longer the source of truth.
+    """
+
+    signal_id: str
+    """UUID4 hex assigned by the engine when the signal fires — the join key
+    every later outcome update targets."""
+    account_id: str
+    bot: str  # full skill id, e.g. "normal/xauusd/breakout_v1"
+    strategy: str  # StrategySpec.name
+    symbol: str
+    timeframe: str  # the bot's own entry timeframe, e.g. "M5"
+    direction: str  # "buy" | "sell"
+    price: float | None
+    """Reference price the engine saw when the signal fired — ask for a buy,
+    bid for a sell."""
+    created_at: datetime
+    outcome: str
+    """Same CLOSED vocabulary as `BotSignal.outcome` (Phase 1 deliberately
+    keeps it unchanged; splitting `risk_rejected` is Phase 2's job)."""
+    reason: str
+    confidence: float | None = None
+
+
+@dataclass(frozen=True, kw_only=True)
 class BotSignal:
     """One strategy signal a live bot emitted — including ones that never
     became a trade (vetoed or rejected). Reconstructed from this bot's own

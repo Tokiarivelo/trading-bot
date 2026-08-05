@@ -228,7 +228,10 @@ class RiskManager:
         else:
             self._consecutive_losses = 0
 
-        if self._consecutive_losses >= self._caps.consecutive_loss_pause:
+        if (
+            self._caps.consecutive_loss_pause_enabled
+            and self._consecutive_losses >= self._caps.consecutive_loss_pause
+        ):
             self._trigger_pause(
                 f"{self._consecutive_losses} consecutive losses "
                 f"(cap {self._caps.consecutive_loss_pause})"
@@ -298,6 +301,7 @@ class RiskManager:
         daily_loss_limit_pct: float | None = None,
         max_open_positions: int | None = None,
         consecutive_loss_pause: int | None = None,
+        consecutive_loss_pause_enabled: bool | None = None,
     ) -> None:
         """Live-updates the core sizing/circuit-breaker caps on the running
         engine — this is the account owner adjusting their own caps through
@@ -316,6 +320,8 @@ class RiskManager:
             updates["max_open_positions"] = max_open_positions
         if consecutive_loss_pause is not None:
             updates["consecutive_loss_pause"] = consecutive_loss_pause
+        if consecutive_loss_pause_enabled is not None:
+            updates["consecutive_loss_pause_enabled"] = consecutive_loss_pause_enabled
         if not updates:
             return
         self._caps = dataclasses.replace(self._caps, **updates)

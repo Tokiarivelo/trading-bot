@@ -152,7 +152,8 @@ async def update_max_trades_per_day_enabled(
     summary="Adjust the core sizing/circuit-breaker caps, live",
     description=(
         "Updates, on the running engine, any of risk_per_trade_pct, "
-        "daily_loss_limit_pct, max_open_positions, and consecutive_loss_pause — see "
+        "daily_loss_limit_pct, max_open_positions, consecutive_loss_pause, and "
+        "consecutive_loss_pause_enabled — see "
         "`RiskManager.size_position`/`check_pretrade`/`record_trade_closed`. Every field "
         "is optional and independent; omitted fields keep their current value. This is "
         "the account owner adjusting their own caps, so — unlike a per-account "
@@ -170,6 +171,7 @@ async def update_core_risk_caps(
         daily_loss_limit_pct=body.daily_loss_limit_pct,
         max_open_positions=body.max_open_positions,
         consecutive_loss_pause=body.consecutive_loss_pause,
+        consecutive_loss_pause_enabled=body.consecutive_loss_pause_enabled,
     )
     return RiskCapsOut(**asdict(_risk_manager(account).caps))
 

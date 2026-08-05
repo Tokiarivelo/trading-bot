@@ -1,7 +1,7 @@
 from datetime import UTC, datetime
 
 from src.activity.application.activity_log_service import ActivityLogService
-from src.activity.domain.models import LogEntry
+from src.activity.domain.models import LogEntry, SignalDecision
 
 
 class FakeRepository:
@@ -122,3 +122,114 @@ async def test_get_bot_signals_defaults_a_bounded_time_window():
 
     for _, _, kwargs in repository.calls:
         assert kwargs["created_from"] is not None
+
+
+class FakeSignalDecisionRepository:
+    """Enough of `SignalDecisionRepository` to exercise the table-vs-legacy
+    boundary in `get_bot_signals`."""
+
+    def __init__(self, decisions: list[SignalDecision]) -> None:
+        self.decisions = decisions
+        self.calls: list[dict] = []
+
+    def earliest_created_at(self, *, account_id="default"):
+        times = [int(d.created_at.timestamp()) for d in self.decisions]
+        return min(times) if times else None
+
+    def list_for_bot(self, *, bot, account_id="default", created_from=None, created_to=None,
+                     limit=5000):
+        self.calls.append(
+            dict(bot=bot, created_from=created_from, created_to=created_to)
+        )
+        rows = [d for d in self.decisions if d.bot == bot]
+        if created_from is not None:
+            rows = [d for d in rows if int(d.created_at.timestamp()) >= created_from]
+        if created_to is not None:
+            rows = [d for d in rows if int(d.created_at.timestamp()) <= created_to]
+        return sorted(rows, key=lambda d: d.created_at)
+
+
+def _decision(at: int, *, bot: str, outcome: str = "opened") -> SignalDecision:
+    return SignalDecision(
+        signal_id=f"sig-{at}",
+        account_id="default",
+        bot=bot,
+        strategy="breakout_v1",
+        symbol="XAUUSD",
+        timeframe="M5",
+        direction="buy",
+        price=4000.0,
+        created_at=datetime.fromtimestamp(at, tz=UTC),
+        outcome=outcome,
+        reason=f"typed reason {at}",
+        confidence=0.7,
+    )
+
+
+async def test_get_bot_signals_reads_the_typed_table_when_it_covers_the_window():
+    skill = "normal/xauusd/breakout_v1"
+    logs = FakeLoggerFilteringRepository(
+        [
+            _log(
+                0,
+                "src.engine.application.trade_loop",
+                f"SIGNAL: XAUUSD buy via strategy=breakout_v1 skill={skill} — scraped",
+            )
+        ]
+    )
+    decisions = FakeSignalDecisionRepository([_decision(2_000, bot=skill)])
+    service = ActivityLogService(logs, signal_decisions=decisions)
+
+    signals = await service.get_bot_signals(skill=skill, created_from=2_000)
+
+    assert [s.reason for s in signals] == ["typed reason 2000"]
+    assert logs.calls == []  # legacy scrape not consulted at all
+
+
+async def test_get_bot_signals_falls_back_to_the_log_scrape_below_the_table_start():
+    skill = "normal/xauusd/breakout_v1"
+    logs = FakeLoggerFilteringRepository(
+        [
+            _log(
+                0,
+                "src.engine.application.trade_loop",
+                f"SIGNAL: XAUUSD buy via strategy=breakout_v1 skill={skill} — scraped",
+            ),
+            _log(
+                1,
+                "src.broker.application.order_service",
+                f"ENTRY OPENED: ticket=1 buy XAUUSD 0.01 lots @ 4000.00 sl=None tp=None "
+                f"spread=1pts strategy=breakout_v1:v1 skill={skill} magic=1 reason=scraped",
+            ),
+        ]
+    )
+    table_start = int(datetime(2026, 7, 17, 13, 0, tzinfo=UTC).timestamp())
+    decisions = FakeSignalDecisionRepository([_decision(table_start, bot=skill)])
+    service = ActivityLogService(logs, signal_decisions=decisions)
+
+    signals = await service.get_bot_signals(skill=skill, created_from=0)
+
+    # Legacy half first (it is older), typed half second, no overlap.
+    assert [s.reason for s in signals] == ["scraped", f"typed reason {table_start}"]
+    # The legacy query is capped at the row before the table's first decision.
+    for _, _, kwargs in logs.calls:
+        assert kwargs["created_to"] == table_start - 1
+
+
+async def test_get_bot_signals_uses_only_the_log_scrape_while_the_table_is_empty():
+    skill = "normal/xauusd/breakout_v1"
+    logs = FakeLoggerFilteringRepository(
+        [
+            _log(
+                0,
+                "src.engine.application.trade_loop",
+                f"SIGNAL: XAUUSD buy via strategy=breakout_v1 skill={skill} — scraped",
+            )
+        ]
+    )
+    service = ActivityLogService(logs, signal_decisions=FakeSignalDecisionRepository([]))
+
+    signals = await service.get_bot_signals(skill=skill, created_from=0)
+
+    assert [s.reason for s in signals] == ["scraped"]
+    assert logs.calls

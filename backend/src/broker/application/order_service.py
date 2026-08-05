@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 from datetime import datetime
 
+from src.activity.ports.signal_decisions import SignalDecisionSinkPort
 from src.broker.application.spread_gate import SpreadGate
 from src.broker.domain.trading import (
     ExecutionResult,
@@ -36,11 +37,17 @@ class OrderService:
         market_data: MarketDataPort,
         spread_gate: SpreadGate,
         event_bus: EventBus,
+        signal_decisions: SignalDecisionSinkPort | None = None,
     ) -> None:
         self._broker = broker
         self._market_data = market_data
         self._spread_gate = spread_gate
         self._event_bus = event_bus
+        # Typed decision trail (OBSERVABILITY_PLAN.md Phase 1) — used only to
+        # stamp the outcome of a `signal_id` the engine already recorded.
+        # Optional: manual/API orders carry no signal_id, and the backtest
+        # runner wires no sink at all.
+        self._signal_decisions = signal_decisions
 
     async def open_position(
         self,
@@ -65,6 +72,7 @@ class OrderService:
         pattern: str | None = None,
         structure: tuple[tuple[str, float, datetime], ...] = (),
         indicators: tuple[tuple[str, float, float, str, bool], ...] = (),
+        signal_id: str | None = None,
     ) -> ExecutionResult:
         """`max_spread_points`, when set, overrides the symbol's configured
         cap for this order only — used by news skills to widen (or, in
@@ -80,7 +88,11 @@ class OrderService:
         independent of the strategies module; they flow straight into the
         published `PositionOpened` event unused by order placement itself.
         `indicators` is `(name, value, threshold, comparison, passed)` tuples,
-        flattened from `Signal.indicators` (`IndicatorReading`)."""
+        flattened from `Signal.indicators` (`IndicatorReading`).
+        `signal_id`, when set, is the `SignalDecision` the engine recorded for
+        the signal this order came from — this method stamps that decision's
+        terminal outcome (`opened` / `spread_veto` / `broker_rejected`).
+        `None` for manual/API orders, which have no signal behind them."""
         info = await self._market_data.get_symbol_info(symbol)
         reference_price = info.ask if side is Side.BUY else info.bid
         sl_distance = abs(reference_price - sl) if sl is not None else None
@@ -107,6 +119,9 @@ class OrderService:
                 skill,
                 veto.reason,
             )
+            await self._record_outcome(
+                signal_id, "spread_veto", base_reason=reason, explanation=veto.reason
+            )
             raise OrderRejected(veto.reason)
 
         order = OrderRequest(
@@ -131,6 +146,9 @@ class OrderService:
                 skill,
                 exc,
             )
+            await self._record_outcome(
+                signal_id, "broker_rejected", base_reason=reason, explanation=str(exc)
+            )
             raise
         logger.info(
             "ENTRY OPENED: ticket=%d %s %s %.2f lots @ %.5f sl=%s tp=%s spread=%dpts "
@@ -148,6 +166,7 @@ class OrderService:
             magic,
             comment or "manual",
         )
+        await self._record_outcome(signal_id, "opened", base_reason=reason)
         await self._event_bus.publish(
             PositionOpened(
                 symbol=symbol,
@@ -175,6 +194,26 @@ class OrderService:
             )
         )
         return result
+
+    async def _record_outcome(
+        self,
+        signal_id: str | None,
+        outcome: str,
+        *,
+        base_reason: str,
+        explanation: str | None = None,
+    ) -> None:
+        """Stamps the engine-recorded `SignalDecision`'s terminal outcome.
+        No-op unless this order came from a recorded signal and a sink is
+        wired. `explanation` (veto/reject text) is appended to the strategy's
+        own reason exactly as the legacy log-scraper merged it; a fill has
+        none, so its reason is left untouched."""
+        if signal_id is None or self._signal_decisions is None:
+            return
+        reason = None
+        if explanation is not None and explanation not in base_reason:
+            reason = f"{base_reason} — {explanation}" if base_reason else explanation
+        await self._signal_decisions.record_outcome(signal_id, outcome, reason=reason)
 
     async def close_position(
         self, ticket: int, volume: float | None = None, reason: str = ""

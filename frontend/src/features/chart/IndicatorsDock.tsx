@@ -35,6 +35,7 @@ import type {
   ManualIndicatorType,
 } from './types';
 import { IndicatorCodePeek } from './IndicatorCodePeek';
+import { listBottomPanes, MAIN_PANE_OPTION, NEW_PANE_OPTION } from './paneTargets';
 
 const PRESET_COLORS = [
   "#42a5f5", // Blue
@@ -53,6 +54,8 @@ const TYPE_LABELS: Record<ManualIndicatorType, string> = {
   bollinger: "Bollinger Bands",
   vwap: "VWAP",
   atr: "ATR",
+  volatility: "Volatility (Historical %)",
+  volume_profile: "Volume Profile",
   structure: "Structure (HH/HL/LH/LL)",
   qml: "Quasimodo (QML / inversed)",
   snd: "S&D zones (RBR/DBD/RBD/DBR)",
@@ -69,6 +72,11 @@ const TYPE_DEFAULTS: Record<ManualIndicatorType, { period: number; editablePerio
   rsi: { period: 14, editablePeriod: true },
   atr: { period: 14, editablePeriod: true },
   bollinger: { period: 20, editablePeriod: true },
+  // period here is the rolling stdev window, same meaning as other periods.
+  volatility: { period: 20, editablePeriod: true },
+  // period here doubles as bucketCount's fallback display; actual bucket
+  // count/lookback are edited via the dedicated volume-profile controls.
+  volume_profile: { period: 24, editablePeriod: true },
   macd: { period: 12, editablePeriod: false }, // fixed 12/26/9, see indicatorLabel()
   vwap: { period: 0, editablePeriod: false }, // cumulative, no period
   // period here is the swing-detection lookback (bars each side), same
@@ -98,6 +106,10 @@ function indicatorLabel(type: ManualIndicatorType, period: number): string {
       return "VWAP";
     case "bollinger":
       return `Bollinger (${period}, 2σ)`;
+    case "volatility":
+      return `Volatility (${period}, HV%)`;
+    case "volume_profile":
+      return `Volume Profile (${period} buckets)`;
     case "structure":
       return `Structure (lookback ${period})`;
     case "qml":
@@ -175,6 +187,22 @@ export function IndicatorsDock({ indicators, onAdd, onRemove, onUpdate, onCustom
     localStorage.setItem('chart-default-indicator-width', String(lineWidth));
   }, [lineWidth]);
 
+  // Which "screen" (pane) the next-added indicator targets — 'main' the
+  // price pane, an existing bottom pane's key (combine), or the
+  // NEW_PANE_OPTION sentinel (always creates a fresh pane at add time). See
+  // paneTargets.ts for the full contract this feeds `ManualIndicator.paneTarget`.
+  const [paneChoice, setPaneChoice] = useState<string>(MAIN_PANE_OPTION);
+  const bottomPanes = listBottomPanes(indicators);
+
+  /** Resolves the current pane picker choice to a `ManualIndicator.paneTarget`
+   * value — a fresh `paneKey` for "New split pane" so the choice is fixed
+   * from add time on, not re-resolved every render. */
+  function resolvePaneTarget(): ManualIndicator['paneTarget'] {
+    if (paneChoice === MAIN_PANE_OPTION) return 'main';
+    if (paneChoice === NEW_PANE_OPTION) return { paneKey: crypto.randomUUID() };
+    return { paneKey: paneChoice };
+  }
+
   const [customIndicators, setCustomIndicators] = useState<IndicatorSummary[]>([]);
   const [selectedCustomId, setSelectedCustomId] = useState<string | null>(null);
   const [peekIndicator, setPeekIndicator] = useState<{ id: string; name: string } | null>(null);
@@ -222,6 +250,7 @@ export function IndicatorsDock({ indicators, onAdd, onRemove, onUpdate, onCustom
         lineWidth,
         label: chosen.name,
         indicatorId: chosen.id,
+        paneTarget: resolvePaneTarget(),
       });
       return;
     }
@@ -234,6 +263,7 @@ export function IndicatorsDock({ indicators, onAdd, onRemove, onUpdate, onCustom
       lineStyle,
       lineWidth,
       label: indicatorLabel(type, resolvedPeriod),
+      paneTarget: resolvePaneTarget(),
     });
   }
 
@@ -254,6 +284,7 @@ export function IndicatorsDock({ indicators, onAdd, onRemove, onUpdate, onCustom
       lineWidth,
       label: 'Preview (unsaved)',
       previewCode: newCode,
+      paneTarget: resolvePaneTarget(),
     });
     setNewCodeRan(true);
     setSaveError(null);
@@ -276,6 +307,7 @@ export function IndicatorsDock({ indicators, onAdd, onRemove, onUpdate, onCustom
         lineWidth,
         label: created.name,
         indicatorId: created.id,
+        paneTarget: resolvePaneTarget(),
       });
       setSelectedCustomId(created.id);
       setNewCode('');
@@ -433,6 +465,57 @@ export function IndicatorsDock({ indicators, onAdd, onRemove, onUpdate, onCustom
             <option value={4}>4px</option>
           </select>
         </label>
+
+        {/* Screen (pane) picker — which chart pane the next-added indicator
+            renders on. Selected screen is highlighted like an active tab,
+            matching the accent/panel/line tokens used everywhere else in
+            this dock. See paneTargets.ts for what each option resolves to. */}
+        <div
+          role="group"
+          aria-label="Target screen"
+          style={{ display: "flex", alignItems: "center", gap: 4 }}
+        >
+          <span style={{ fontSize: 11, color: "var(--color-ink-muted)" }}>Screen</span>
+          <button
+            type="button"
+            onClick={() => setPaneChoice(MAIN_PANE_OPTION)}
+            title="Render on the main price chart"
+            className={`cursor-pointer rounded border px-1.5 py-0.5 text-xs ${
+              paneChoice === MAIN_PANE_OPTION
+                ? "border-accent bg-accent/15 text-accent"
+                : "border-line text-ink-muted hover:border-accent hover:text-accent"
+            }`}
+          >
+            Main chart
+          </button>
+          {bottomPanes.map((pane) => (
+            <button
+              key={pane.key}
+              type="button"
+              onClick={() => setPaneChoice(pane.key)}
+              title={`Combine into the same pane as: ${pane.label}`}
+              className={`cursor-pointer rounded border px-1.5 py-0.5 text-xs ${
+                paneChoice === pane.key
+                  ? "border-accent bg-accent/15 text-accent"
+                  : "border-line text-ink-muted hover:border-accent hover:text-accent"
+              }`}
+            >
+              {pane.label.length > 24 ? `${pane.label.slice(0, 24)}…` : pane.label}
+            </button>
+          ))}
+          <button
+            type="button"
+            onClick={() => setPaneChoice(NEW_PANE_OPTION)}
+            title="Create a new split pane below the chart"
+            className={`cursor-pointer rounded border px-1.5 py-0.5 text-xs ${
+              paneChoice === NEW_PANE_OPTION
+                ? "border-accent bg-accent/15 text-accent"
+                : "border-line text-ink-muted hover:border-accent hover:text-accent"
+            }`}
+          >
+            + New split pane
+          </button>
+        </div>
 
         {!writingNewCode && (
           <button

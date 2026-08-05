@@ -28,10 +28,16 @@ export function BotPerformanceTable({
   bots,
   selected,
   onToggle,
+  atCapacity = false,
+  maxCharted,
 }: {
   bots: BotAnalytics[];
   selected: Set<string>;
   onToggle: (skill: string) => void;
+  /** True when the chart already holds `maxCharted` bots — unchecked boxes are
+   * then disabled so the cap reads as a limit rather than a broken checkbox. */
+  atCapacity?: boolean;
+  maxCharted?: number;
 }) {
   const { sorted, sort, toggle } = useSortableRows<BotAnalytics, SortKey>(bots, sortValue, {
     key: "total_profit",
@@ -82,7 +88,13 @@ export function BotPerformanceTable({
                   type="checkbox"
                   checked={selected.has(b.skill)}
                   onChange={() => onToggle(b.skill)}
-                  className="cursor-pointer accent-accent"
+                  disabled={atCapacity && !selected.has(b.skill)}
+                  title={
+                    atCapacity && !selected.has(b.skill)
+                      ? `Chart is full (${maxCharted} bots) — uncheck one first`
+                      : undefined
+                  }
+                  className="cursor-pointer accent-accent disabled:cursor-not-allowed disabled:opacity-40"
                   aria-label={`Show ${b.bot_name} equity curve`}
                 />
               </Td>

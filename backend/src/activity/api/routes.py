@@ -83,9 +83,13 @@ async def get_history(
     response_model=list[BotSignalOut],
     summary="Get one bot's signal→outcome trail for the chart",
     description=(
-        "Reconstructs `skill`'s own signal decisions from its persisted decision-trail log "
-        "lines — every setup the strategy saw, whether it became a trade or was vetoed/"
-        "rejected, in the order it happened. `skill` is the full bot id from `GET "
+        "Returns `skill`'s own signal decisions — every setup the strategy saw, whether it "
+        "became a trade or was vetoed/rejected, in the order it happened. Served from the "
+        "`signal_decisions` table the engine writes directly; the part of the requested "
+        "window that predates that table's oldest row falls back to reconstructing the "
+        "trail from persisted decision-trail log lines (legacy path), and the two halves "
+        "are concatenated at that boundary without overlapping. `skill` is the full bot id "
+        "from `GET "
         "/skills/normal` (e.g. 'normal/xauusd/breakout_v1'), passed as a query param rather "
         "than a path segment since it contains '/'. Defaults to the last 14 days if `from` is "
         "omitted, to bound the query. This is the live analog of a backtest report's "

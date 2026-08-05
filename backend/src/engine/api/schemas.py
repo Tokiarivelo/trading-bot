@@ -43,6 +43,11 @@ class RiskCapsOut(BaseModel):
     consecutive_loss_pause: int = Field(
         description="Circuit breaker: pause after this many losing trades in a row."
     )
+    consecutive_loss_pause_enabled: bool = Field(
+        description="When false, the consecutive-loss circuit breaker never pauses the engine, "
+        "regardless of consecutive_loss_pause's count — the engine keeps running through any "
+        "losing streak."
+    )
     min_lot_fallback_enabled: bool = Field(
         description="When true, a balance too small for risk_per_trade_pct to reach the "
         "broker's minimum lot trades that minimum lot anyway, as long as its effective "
@@ -179,4 +184,9 @@ class UpdateCoreRiskCapsIn(BaseModel):
         default=None,
         gt=0,
         description="Circuit breaker: pause after this many losing trades in a row.",
+    )
+    consecutive_loss_pause_enabled: bool | None = Field(
+        default=None,
+        description="When false, the consecutive-loss circuit breaker never pauses the engine, "
+        "regardless of consecutive_loss_pause's count. Omitted/null leaves this untouched.",
     )

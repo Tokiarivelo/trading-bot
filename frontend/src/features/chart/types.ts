@@ -24,6 +24,8 @@ export type ManualIndicatorType =
   | 'bollinger'
   | 'vwap'
   | 'atr'
+  | 'volatility'
+  | 'volume_profile'
   | 'structure'
   | 'qml'
   | 'snd'
@@ -52,6 +54,23 @@ export interface ManualIndicator {
    * instead of GET /indicators/{id}/compute. Mutually exclusive with
    * `indicatorId`. See IndicatorsDock's "Write new code…" option. */
   previewCode?: string;
+  /** Set only when type === 'volume_profile': number of price buckets the
+   * histogram bins tick_volume into. Reuses `period` for the lookback (how
+   * many recent candles to profile) to match the existing optional-field
+   * pattern rather than adding a whole parallel settings shape. */
+  bucketCount?: number;
+  /** Set only when type === 'volume_profile': which side of the pane the
+   * horizontal bars extend from. Defaults to 'right' when unset. */
+  side?: 'left' | 'right';
+  /** Which chart "screen" (pane) this indicator renders on — see
+   * `paneTargets.ts` for the full contract and resolution rules.
+   * `'main'` = the price pane; `{ paneKey }` = a bottom pane identified by a
+   * stable logical key (NOT a raw pane index, which shifts as panes are
+   * added/removed) — two indicators sharing the same `paneKey` render
+   * stacked in the same real chart pane. `undefined` = legacy default
+   * (oscillators get their own bottom pane, everything else goes to main),
+   * preserving where already-persisted indicators render. */
+  paneTarget?: 'main' | { paneKey: string };
 }
 
 export type DrawingToolType =

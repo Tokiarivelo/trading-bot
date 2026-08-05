@@ -66,6 +66,16 @@ Read `IMPLEMENTATION_PLAN.md` for the full design. These rules are binding.
   `useState`/`setInterval` poll — adopted in `features/trading/`, the pattern
   for migrating other feature folders.
 - All charting via `lightweight-charts` only.
+- Chart indicator panes: `frontend/src/features/chart/paneTargets.ts` is the
+  canonical pane-target extension point. Every `ManualIndicator` (added via
+  `IndicatorsDock.tsx`) carries an optional `paneTarget: 'main' | { paneKey:
+  string }`; `useIndicators.ts` resolves it through `paneKeyOf()` and its
+  local `getPaneForManualIndicator()`/`getOscillatorPane()` pane-key→real-pane
+  map. A new chart indicator must read/write `paneTarget` through these
+  helpers to pick its "screen" (main pane, an existing bottom pane shared
+  with another indicator, or a new split pane) — never hardcode a new
+  scaleMargins band on the main pane or call `chart.addPane()`
+  unconditionally; that logic already exists and must be reused.
 - API types come from the backend OpenAPI schema — don't hand-write duplicates.
   See "API documentation (OpenAPI)" above: every backend route is fully typed
   and documented, so the schema at `/openapi.json` (`make openapi`) is always

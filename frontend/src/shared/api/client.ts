@@ -1317,6 +1317,9 @@ export interface RiskCaps {
    * the rest of the trading day; false leaves trade count today unlimited. */
   max_trades_per_day_enabled: boolean;
   consecutive_loss_pause: number;
+  /** When false, the consecutive-loss circuit breaker never pauses the engine,
+   * regardless of consecutive_loss_pause's count. */
+  consecutive_loss_pause_enabled: boolean;
   /** When true, a balance too small for risk_per_trade_pct to reach the broker's
    * minimum lot trades that minimum lot anyway, capped by max_risk_per_trade_pct. */
   min_lot_fallback_enabled: boolean;
@@ -1348,6 +1351,7 @@ export interface CoreRiskCapsUpdate {
   daily_loss_limit_pct?: number;
   max_open_positions?: number;
   consecutive_loss_pause?: number;
+  consecutive_loss_pause_enabled?: boolean;
 }
 
 /** Live-updates any of the core sizing/circuit-breaker caps on the running

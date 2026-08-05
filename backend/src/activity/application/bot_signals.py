@@ -1,4 +1,20 @@
-"""Reconstructs one live bot's `BotSignal`s from its own persisted decision-
+"""LEGACY / BACKFILL ONLY — do not extend.
+
+Since OBSERVABILITY_PLAN.md Phase 1 the source of truth for a bot's
+signal→outcome trail is the `signal_decisions` table, written directly by
+`engine/application/trade_loop.py` and `broker/application/order_service.py`
+through `activity.ports.signal_decisions.SignalDecisionSinkPort`. This module
+survives only to answer the window that predates that table (see
+`ActivityLogService.get_bot_signals`, which concatenates the two halves at
+the table's oldest row) — historical `activity_logs` rows can be read no
+other way.
+
+Consequences: no new outcome value, field, or log prefix should be added
+here; add it to `SignalDecision` and the writers instead. When the retention
+job has aged out every log line older than the table's first row, this module
+and its call site can be deleted outright.
+
+Reconstructs one live bot's `BotSignal`s from its own persisted decision-
 trail log lines — the live analog of `backtest.application.signals.extract_signals`,
 same log-scraping rationale (no dedicated event, engine code untouched), but
 scoped to one `skill` among the several bots that may be logging concurrently

@@ -18,6 +18,7 @@ interface CoreCapsForm {
   daily_loss_limit_pct: string;
   max_open_positions: string;
   consecutive_loss_pause: string;
+  consecutive_loss_pause_enabled: boolean;
 }
 
 function toCoreCapsForm(caps: RiskCaps): CoreCapsForm {
@@ -26,6 +27,7 @@ function toCoreCapsForm(caps: RiskCaps): CoreCapsForm {
     daily_loss_limit_pct: String(caps.daily_loss_limit_pct),
     max_open_positions: String(caps.max_open_positions),
     consecutive_loss_pause: String(caps.consecutive_loss_pause),
+    consecutive_loss_pause_enabled: caps.consecutive_loss_pause_enabled,
   };
 }
 
@@ -108,6 +110,7 @@ export function RiskSettingsPanel() {
           daily_loss_limit_pct: Number(coreForm.daily_loss_limit_pct),
           max_open_positions: Number(coreForm.max_open_positions),
           consecutive_loss_pause: Number(coreForm.consecutive_loss_pause),
+          consecutive_loss_pause_enabled: coreForm.consecutive_loss_pause_enabled,
         };
   const isCoreValid =
     parsedCore !== null &&
@@ -127,9 +130,14 @@ export function RiskSettingsPanel() {
     (parsedCore.risk_per_trade_pct !== caps.risk_per_trade_pct ||
       parsedCore.daily_loss_limit_pct !== caps.daily_loss_limit_pct ||
       parsedCore.max_open_positions !== caps.max_open_positions ||
-      parsedCore.consecutive_loss_pause !== caps.consecutive_loss_pause);
+      parsedCore.consecutive_loss_pause !== caps.consecutive_loss_pause ||
+      parsedCore.consecutive_loss_pause_enabled !== caps.consecutive_loss_pause_enabled);
 
   function updateCoreField(field: keyof CoreCapsForm, value: string) {
+    setCoreForm((prev) => (prev ? { ...prev, [field]: value } : prev));
+  }
+
+  function toggleCoreCheckbox(field: "consecutive_loss_pause_enabled", value: boolean) {
     setCoreForm((prev) => (prev ? { ...prev, [field]: value } : prev));
   }
 
@@ -207,9 +215,27 @@ export function RiskSettingsPanel() {
               step="1"
               className={inputCls}
               value={coreForm.consecutive_loss_pause}
+              disabled={!coreForm.consecutive_loss_pause_enabled}
               onChange={(e) => updateCoreField("consecutive_loss_pause", e.target.value)}
             />
           </label>
+        </div>
+        <div className="mt-3 flex items-center gap-4">
+          <label className="flex items-center gap-2 text-sm text-ink">
+            <input
+              type="checkbox"
+              checked={coreForm.consecutive_loss_pause_enabled}
+              onChange={(e) =>
+                toggleCoreCheckbox("consecutive_loss_pause_enabled", e.target.checked)
+              }
+            />
+            Pause on consecutive losses
+          </label>
+          <span className="text-xs text-ink-muted">
+            {coreForm.consecutive_loss_pause_enabled
+              ? "Engine pauses after the loss streak above."
+              : "Disabled — engine keeps running through any losing streak."}
+          </span>
         </div>
         <div className="mt-3 flex items-center gap-3">
           <button

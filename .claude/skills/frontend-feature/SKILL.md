@@ -21,6 +21,13 @@ frontend stack: **Next.js (App Router) + Tailwind CSS + TypeScript**.
   the `lightweight-charts-drawing` package on top of it (see
   `features/chart/ChartPanel.tsx` / `DrawingToolbar.tsx`) — don't add a
   second charting or drawing library for a new chart-adjacent feature.
+- Chart indicator panes: before adding a new chart indicator or touching
+  pane placement, read `features/chart/paneTargets.ts` — it's the canonical
+  extension point (`ManualIndicator.paneTarget`, `paneKeyOf()`, resolved to a
+  real pane in `useIndicators.ts`'s `getPaneForManualIndicator()`). Reuse it
+  to pick where a new indicator renders (main pane, an existing bottom pane,
+  or a new split pane) instead of hardcoding a new scaleMargins band or
+  calling `chart.addPane()` unconditionally.
 - API types are **hand-maintained, not code-generated** — there is no
   openapi-typescript step in this repo. `src/shared/api/client.ts` is one
   ~1100-line file holding every `export interface` (mirroring a backend

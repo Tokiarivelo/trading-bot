@@ -949,6 +949,46 @@ export function detectPatterns(
   return points;
 }
 
+/**
+ * Historical (realized) Volatility %, annualized — the stdev of log returns
+ * over a rolling `period`-candle window, expressed as an annualized
+ * percentage: `100 * stdev(logReturns) * sqrt(barsPerYear)`. Distinct from
+ * `atr` (an average absolute range in price units, not annualized, not based
+ * on returns) — this is the standard "HV" oscillator, plotted in its own
+ * bottom pane like RSI. `barsPerYear` approximates trading-minutes-per-year
+ * for intraday FX/CFD data (24/5 market, ~252 trading days); callers on a
+ * coarser timeframe should scale it, but a fixed approximation is fine for a
+ * relative/comparative oscillator like this.
+ */
+export function historicalVolatility(
+  candles: Candle[],
+  period: number,
+  barsPerYear = 252 * 24 * 60,
+): LinePoint[] {
+  if (candles.length < period + 1) return [];
+  const logReturns: number[] = [];
+  for (let i = 1; i < candles.length; i++) {
+    const prevClose = candles[i - 1].close;
+    const close = candles[i].close;
+    logReturns.push(prevClose > 0 && close > 0 ? Math.log(close / prevClose) : 0);
+  }
+
+  const points: LinePoint[] = [];
+  const annualize = Math.sqrt(barsPerYear);
+  for (let i = period - 1; i < logReturns.length; i++) {
+    let sum = 0;
+    for (let j = i - period + 1; j <= i; j++) sum += logReturns[j];
+    const mean = sum / period;
+    let variance = 0;
+    for (let j = i - period + 1; j <= i; j++) variance += (logReturns[j] - mean) ** 2;
+    variance /= period;
+    const stdev = Math.sqrt(variance);
+    // logReturns[i] corresponds to candles[i + 1]
+    points.push(toPoint(candles[i + 1], 100 * stdev * annualize));
+  }
+  return points;
+}
+
 /** Average True Range with Wilder smoothing (same scheme as `rsi` above). */
 export function atr(candles: Candle[], period: number): LinePoint[] {
   if (candles.length < period + 1) return [];

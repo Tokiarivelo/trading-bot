@@ -20,10 +20,12 @@ from __future__ import annotations
 
 import copy
 import logging
+import uuid
 from collections.abc import Callable
 from dataclasses import replace
 from datetime import UTC, datetime
 
+from src.activity.ports.signal_decisions import SignalDecisionSinkPort
 from src.broker.application.account_service import AccountService
 from src.broker.application.order_service import OrderService
 from src.broker.domain.trading import OrderRejected, Position, Side
@@ -99,6 +101,7 @@ class TradeEngine:
         strategy_source: StrategySourcePort,
         entry_timeframe: str,
         volatility_config: VolatilityConfig,
+        signal_decisions: SignalDecisionSinkPort | None = None,
         event_bus: EventBus | None = None,
         enabled: bool = True,
         context_bars: int = DEFAULT_CONTEXT_BARS,
@@ -117,6 +120,10 @@ class TradeEngine:
         self._entry_timeframe = entry_timeframe
         self._volatility_config = volatility_config
         self._volatility_guard_enabled = True
+        # Typed decision trail (OBSERVABILITY_PLAN.md Phase 1). Optional so a
+        # backtest engine / unit test can run without a database; when absent
+        # the human-readable log lines below are all that's produced.
+        self._signal_decisions = signal_decisions
         self._event_bus = event_bus
         self._enabled = enabled
         self._context_bars = context_bars
@@ -306,6 +313,44 @@ class TradeEngine:
         for decision, strategy in candidates:
             balance = await self._enter_for_bot(symbol, decision, strategy, ctx, info, now, balance)
 
+    async def _record_decision(
+        self,
+        *,
+        signal_id: str,
+        decision: SkillDecision,
+        strategy: Strategy,
+        symbol: str,
+        signal: Signal,
+        price: float,
+        created_at: datetime,
+    ) -> None:
+        if self._signal_decisions is None:
+            return
+        await self._signal_decisions.record(
+            signal_id=signal_id,
+            bot=decision.skill_name,
+            strategy=strategy.spec.name,
+            symbol=symbol,
+            timeframe=strategy.spec.entry_timeframe,
+            direction=signal.direction.value,
+            price=price,
+            created_at=created_at,
+            reason=signal.reason,
+            confidence=signal.confidence,
+        )
+
+    async def _record_outcome(
+        self, signal_id: str, outcome: str, *, base_reason: str, explanation: str
+    ) -> None:
+        """Stamps a decision's terminal outcome, appending the gate's own
+        explanation to the strategy's reason the same way the legacy
+        log-scraper did (` — <explanation>`), so the chart's tooltip text is
+        unchanged by the move off log parsing."""
+        if self._signal_decisions is None:
+            return
+        reason = base_reason if explanation in base_reason else f"{base_reason} — {explanation}"
+        await self._signal_decisions.record_outcome(signal_id, outcome, reason=reason)
+
     async def _enter_for_bot(
         self,
         symbol: str,
@@ -351,6 +396,19 @@ class TradeEngine:
             decision.skill_name,
             first_signal.reason,
         )
+        # Recorded before any gate runs, so a signal that is immediately
+        # vetoed still exists in the trail with outcome="skipped" until its
+        # terminal outcome lands below.
+        signal_id = uuid.uuid4().hex
+        await self._record_decision(
+            signal_id=signal_id,
+            decision=decision,
+            strategy=strategy,
+            symbol=symbol,
+            signal=first_signal,
+            price=signal_price,
+            created_at=now,
+        )
 
         if strategy.spec.close_on_opposite_signal:
             open_positions, closed = await self._close_opposite_position(
@@ -372,6 +430,12 @@ class TradeEngine:
                 decision.skill_name,
                 pretrade.reason,
             )
+            await self._record_outcome(
+                signal_id,
+                "risk_rejected",
+                base_reason=first_signal.reason,
+                explanation=pretrade.reason,
+            )
             return balance
 
         veto_tf = _veto_timeframe(strategy)
@@ -385,6 +449,9 @@ class TradeEngine:
                 decision.skill_name,
                 veto_reason,
             )
+            await self._record_outcome(
+                signal_id, "htf_veto", base_reason=first_signal.reason, explanation=veto_reason
+            )
             return balance
 
         if balance is None:
@@ -396,6 +463,12 @@ class TradeEngine:
                 symbol,
                 first_signal.direction.value,
                 decision.skill_name,
+            )
+            await self._record_outcome(
+                signal_id,
+                "skipped",
+                base_reason=first_signal.reason,
+                explanation="no account balance available, cannot size the entry",
             )
             return balance
 
@@ -431,6 +504,12 @@ class TradeEngine:
                     decision.skill_name,
                     percentile,
                 )
+                await self._record_outcome(
+                    signal_id,
+                    "risk_rejected",
+                    base_reason=first_signal.reason,
+                    explanation=f"regime=EXTREME percentile={percentile:.1f}",
+                )
                 return balance
 
             sl_mult, tp_mult = {
@@ -450,7 +529,9 @@ class TradeEngine:
         else:
             sl_mult, tp_mult = 1.0, 1.0
 
-        # Split risk across multiple targets so total risk per trade setup remains aligned with user config
+        # Split risk across multiple targets so total risk per trade setup
+        # remains aligned with user config
+
         pos_risk_multiplier = decision.risk_multiplier / len(signals)
 
         for idx, signal in enumerate(signals):
@@ -465,6 +546,16 @@ class TradeEngine:
                     len(signals),
                     len(open_positions) + idx,
                     self._risk_manager._caps.max_open_positions,
+                )
+                await self._record_outcome(
+                    signal_id,
+                    "risk_rejected",
+                    base_reason=first_signal.reason,
+                    explanation=(
+                        f"TP{idx + 1} of {len(signals)} skipped, "
+                        f"{len(open_positions) + idx} open position(s) at cap "
+                        f"{self._risk_manager._caps.max_open_positions}"
+                    ),
                 )
                 break
 
@@ -499,6 +590,12 @@ class TradeEngine:
                     abs(reference_price - sl_price),
                     pos_risk_multiplier,
                 )
+                await self._record_outcome(
+                    signal_id,
+                    "risk_rejected",
+                    base_reason=first_signal.reason,
+                    explanation=f"TP{idx + 1}: {sizing.reason}",
+                )
                 continue
             logger.info(
                 "SIZING OK (TP%d/%d): %s %s %.2f lots [%s] (balance=%.2f, risk_multiplier=%.2f)",
@@ -513,7 +610,9 @@ class TradeEngine:
             )
 
             zone = signal.zone
-            comment_text = f"TP{idx+1}:{signal.reason}"[:29] if len(signals) > 1 else signal.reason[:29]
+            comment_text = (
+                f"TP{idx+1}:{signal.reason}"[:29] if len(signals) > 1 else signal.reason[:29]
+            )
             try:
                 await self._order_service.open_position(
                     symbol,
@@ -528,6 +627,10 @@ class TradeEngine:
                     max_spread_points=decision.max_spread_points,
                     reason=signal.reason,
                     confidence=signal.confidence,
+                    # Lets the order service stamp this decision's fill /
+                    # spread-veto / broker-reject outcome without the engine
+                    # having to reach into the broker's own gates.
+                    signal_id=signal_id,
                     zone_kind=zone.kind.value if zone is not None else None,
                     zone_price_low=zone.price_low if zone is not None else None,
                     zone_price_high=zone.price_high if zone is not None else None,

@@ -62,6 +62,7 @@ import {
   detectBases,
   detectPatterns,
   ema,
+  historicalVolatility,
   macd,
   quasimodoLevels,
   rsi,
@@ -71,7 +72,9 @@ import {
   swingStructure,
   vwap,
 } from './indicators';
+import { VolumeProfilePrimitive } from './volumeProfilePrimitive';
 import { cssVar, derivePeriodParam, hexToRgba, pickZoneColor, usesSndZones } from './chartFormat';
+import { isOscillatorType, paneKeyOf } from './paneTargets';
 import {
   loadManualIndicators,
   saveManualIndicators,
@@ -173,6 +176,12 @@ export function useIndicators(params: UseIndicatorsParams) {
   // Series added for the active strategy's PDF-derived indicators (EMA/SMA/
   // RSI/MACD/Bollinger) — replaced wholesale on every recompute.
   const indicatorSeriesRef = useRef<ISeriesApi<'Line' | 'Histogram'>[]>([]);
+  // Volume Profile primitives attached to the main candle series (not a
+  // series of their own) — tracked separately so they can be detached
+  // wholesale each recompute, same "wholesale replace" convention as
+  // `indicatorSeriesRef`, since `series.attachPrimitive`/`detachPrimitive`
+  // isn't touched by `chart.removeSeries`.
+  const volumeProfilePrimitivesRef = useRef<VolumeProfilePrimitive[]>([]);
   const activeStrategyRef = useRef<StrategyVersionSummary | null>(activeStrategy);
   activeStrategyRef.current = activeStrategy;
 
@@ -217,6 +226,16 @@ export function useIndicators(params: UseIndicatorsParams) {
         }
       }
       indicatorSeriesRef.current = [];
+
+      const candleSeries = chartController!.getCandleSeries();
+      for (const primitive of volumeProfilePrimitivesRef.current) {
+        try {
+          candleSeries?.detachPrimitive(primitive);
+        } catch {
+          // Series may already be gone if the chart is mid-teardown.
+        }
+      }
+      volumeProfilePrimitivesRef.current = [];
       for (const drawing of manager.getAllDrawings()) {
         if (
           drawing.id.startsWith(STRATEGY_DRAWING_PREFIX) ||
@@ -240,9 +259,55 @@ export function useIndicators(params: UseIndicatorsParams) {
           ? allCandles.slice(allCandles.length - MAX_INDICATOR_CANDLES)
           : allCandles;
 
-      let rsiScaleReady = false;
-      let macdScaleReady = false;
-      let atrScaleReady = false;
+      // Real bottom panes (lightweight-charts v5 `chart.addPane()` /
+      // `chart.addSeries(Series, options, paneIndex)`) instead of the old
+      // same-pane `scaleMargins` band trick — each oscillator group gets its
+      // own independent price axis below the main price/volume pane (pane
+      // 0, untouched). Panes beyond 0 are fully torn down and rebuilt every
+      // recompute, same "wholesale replace" convention as `indicatorSeriesRef`
+      // above, so a toggled-off oscillator's pane never lingers empty.
+      for (let i = chart.panes().length - 1; i >= 1; i--) {
+        try {
+          chart.removePane(i);
+        } catch {
+          // Already gone if the chart is mid-teardown.
+        }
+      }
+      const paneIndexForGroup = new Map<string, number>();
+      const OSCILLATOR_PANE_HEIGHT = 130; // px, ~ one of a few stacked bottom panes
+      const getOscillatorPane = (group: string): number => {
+        let idx = paneIndexForGroup.get(group);
+        if (idx === undefined) {
+          const pane = chart.addPane();
+          idx = pane.paneIndex();
+          pane.setHeight(OSCILLATOR_PANE_HEIGHT);
+          paneIndexForGroup.set(group, idx);
+        }
+        return idx;
+      };
+      // Manual-indicator pane resolution (see paneTargets.ts): a manual
+      // indicator's `paneTarget` resolves via `paneKeyOf()` to either
+      // 'main' or a bottom-pane key, which this maps to a real pane index —
+      // reusing `getOscillatorPane` (and its dedup map) so an explicit
+      // `paneKey` two indicators share lands them in the SAME pane, exactly
+      // like the legacy `legacy:<type>` grouping already did for same-type
+      // oscillators.
+      const getPaneForManualIndicator = (
+        manualIndicator: ManualIndicator,
+      ): { paneIndex: number; ownPriceScaleId?: string } => {
+        const key = paneKeyOf(manualIndicator);
+        if (key === 'main') {
+          // Oscillators explicitly forced onto the main pane need their own
+          // price scale so RSI (0-100) or an unbounded MACD histogram don't
+          // distort the candle scale — same trick the old overlay hack
+          // used, now opt-in via the pane picker instead of automatic.
+          if (isOscillatorType(manualIndicator.type)) {
+            return { paneIndex: 0, ownPriceScaleId: `manual-osc-${manualIndicator.id}` };
+          }
+          return { paneIndex: 0 };
+        }
+        return { paneIndex: getOscillatorPane(key) };
+      };
 
       for (const indicator of spec?.indicators ?? []) {
         switch (indicator.type) {
@@ -271,25 +336,21 @@ export function useIndicators(params: UseIndicatorsParams) {
             break;
           }
           case 'rsi': {
-            const series = chart.addSeries(LineSeries, {
-              color: '#ab47bc',
-              lineWidth: 1,
-              priceScaleId: 'strategy-rsi',
-              priceLineVisible: false,
-              lastValueVisible: false,
-              title: indicator.label,
-              autoscaleInfoProvider: () => ({
-                priceRange: { minValue: 0, maxValue: 100 },
-              }),
-            });
-            if (!rsiScaleReady) {
-              // Own band above the volume series's band (top: 0.8, bottom: 0
-              // — see the volume series setup above) so the two don't overlap.
-              series
-                .priceScale()
-                .applyOptions({ scaleMargins: { top: 0.55, bottom: 0.25 } });
-              rsiScaleReady = true;
-            }
+            const rsiPaneIndex = getOscillatorPane('rsi');
+            const series = chart.addSeries(
+              LineSeries,
+              {
+                color: '#ab47bc',
+                lineWidth: 1,
+                priceLineVisible: false,
+                lastValueVisible: false,
+                title: indicator.label,
+                autoscaleInfoProvider: () => ({
+                  priceRange: { minValue: 0, maxValue: 100 },
+                }),
+              },
+              rsiPaneIndex,
+            );
             series.setData(rsi(candles, indicator.period));
             indicatorSeriesRef.current.push(series);
             break;
@@ -303,36 +364,38 @@ export function useIndicators(params: UseIndicatorsParams) {
               slow,
               signal,
             );
-            const macdSeries = chart.addSeries(LineSeries, {
-              color: '#26a69a',
-              lineWidth: 1,
-              priceScaleId: 'strategy-macd',
-              priceLineVisible: false,
-              lastValueVisible: false,
-              title: `${indicator.label} macd`,
-            });
-            const signalSeries = chart.addSeries(LineSeries, {
-              color: '#ef5350',
-              lineWidth: 1,
-              priceScaleId: 'strategy-macd',
-              priceLineVisible: false,
-              lastValueVisible: false,
-              title: `${indicator.label} signal`,
-            });
-            const histSeries = chart.addSeries(HistogramSeries, {
-              priceScaleId: 'strategy-macd',
-              priceLineVisible: false,
-              lastValueVisible: false,
-              title: `${indicator.label} hist`,
-            });
-            if (!macdScaleReady) {
-              // Own band above RSI's (0.55-0.75) and volume's (0.8-1.0), so
-              // all three can coexist without overlapping.
-              macdSeries
-                .priceScale()
-                .applyOptions({ scaleMargins: { top: 0.3, bottom: 0.5 } });
-              macdScaleReady = true;
-            }
+            const macdPaneIndex = getOscillatorPane('macd');
+            const macdSeries = chart.addSeries(
+              LineSeries,
+              {
+                color: '#26a69a',
+                lineWidth: 1,
+                priceLineVisible: false,
+                lastValueVisible: false,
+                title: `${indicator.label} macd`,
+              },
+              macdPaneIndex,
+            );
+            const signalSeries = chart.addSeries(
+              LineSeries,
+              {
+                color: '#ef5350',
+                lineWidth: 1,
+                priceLineVisible: false,
+                lastValueVisible: false,
+                title: `${indicator.label} signal`,
+              },
+              macdPaneIndex,
+            );
+            const histSeries = chart.addSeries(
+              HistogramSeries,
+              {
+                priceLineVisible: false,
+                lastValueVisible: false,
+                title: `${indicator.label} hist`,
+              },
+              macdPaneIndex,
+            );
             macdSeries.setData(macdLine);
             signalSeries.setData(signalLine);
             histSeries.setData(histogram);
@@ -425,123 +488,180 @@ export function useIndicators(params: UseIndicatorsParams) {
               ? [2, 2]
               : undefined;
 
+        const { paneIndex: manualPaneIndex, ownPriceScaleId } =
+          getPaneForManualIndicator(manualIndicator);
+
         switch (manualIndicator.type) {
           case 'ema': {
-            const series = chart.addSeries(LineSeries, {
-              color: manualIndicator.color,
-              lineWidth: lineWidthVal,
-              lineStyle: lineStyleVal,
-              priceLineVisible: false,
-              lastValueVisible: false,
-              title: manualIndicator.label,
-            });
+            const series = chart.addSeries(
+              LineSeries,
+              {
+                color: manualIndicator.color,
+                lineWidth: lineWidthVal,
+                lineStyle: lineStyleVal,
+                priceLineVisible: false,
+                lastValueVisible: false,
+                title: manualIndicator.label,
+              },
+              manualPaneIndex,
+            );
             series.setData(ema(candles, manualIndicator.period));
             indicatorSeriesRef.current.push(series);
             break;
           }
           case 'sma': {
-            const series = chart.addSeries(LineSeries, {
-              color: manualIndicator.color,
-              lineWidth: lineWidthVal,
-              lineStyle: lineStyleVal,
-              priceLineVisible: false,
-              lastValueVisible: false,
-              title: manualIndicator.label,
-            });
+            const series = chart.addSeries(
+              LineSeries,
+              {
+                color: manualIndicator.color,
+                lineWidth: lineWidthVal,
+                lineStyle: lineStyleVal,
+                priceLineVisible: false,
+                lastValueVisible: false,
+                title: manualIndicator.label,
+              },
+              manualPaneIndex,
+            );
             series.setData(sma(candles, manualIndicator.period));
             indicatorSeriesRef.current.push(series);
             break;
           }
           case 'vwap': {
-            const series = chart.addSeries(LineSeries, {
-              color: manualIndicator.color,
-              lineWidth: lineWidthVal,
-              lineStyle: lineStyleVal,
-              priceLineVisible: false,
-              lastValueVisible: false,
-              title: manualIndicator.label,
-            });
+            const series = chart.addSeries(
+              LineSeries,
+              {
+                color: manualIndicator.color,
+                lineWidth: lineWidthVal,
+                lineStyle: lineStyleVal,
+                priceLineVisible: false,
+                lastValueVisible: false,
+                title: manualIndicator.label,
+              },
+              manualPaneIndex,
+            );
             series.setData(vwap(candles));
             indicatorSeriesRef.current.push(series);
             break;
           }
           case 'rsi': {
-            const series = chart.addSeries(LineSeries, {
-              color: manualIndicator.color,
-              lineWidth: lineWidthVal,
-              lineStyle: lineStyleVal,
-              priceScaleId: 'strategy-rsi',
-              priceLineVisible: false,
-              lastValueVisible: false,
-              title: manualIndicator.label,
-              autoscaleInfoProvider: () => ({
-                priceRange: { minValue: 0, maxValue: 100 },
-              }),
-            });
-            if (!rsiScaleReady) {
-              series
-                .priceScale()
-                .applyOptions({ scaleMargins: { top: 0.55, bottom: 0.25 } });
-              rsiScaleReady = true;
+            const series = chart.addSeries(
+              LineSeries,
+              {
+                color: manualIndicator.color,
+                lineWidth: lineWidthVal,
+                lineStyle: lineStyleVal,
+                priceLineVisible: false,
+                lastValueVisible: false,
+                title: manualIndicator.label,
+                priceScaleId: ownPriceScaleId,
+                autoscaleInfoProvider: () => ({
+                  priceRange: { minValue: 0, maxValue: 100 },
+                }),
+              },
+              manualPaneIndex,
+            );
+            if (ownPriceScaleId) {
+              // Forced onto the main pane: pin its own price scale to a thin
+              // band at the bottom so it doesn't distort the candle scale —
+              // same trick the old overlay hack used automatically, now
+              // opt-in via the pane picker.
+              chart.priceScale(ownPriceScaleId).applyOptions({
+                scaleMargins: { top: 0.8, bottom: 0 },
+              });
             }
             series.setData(rsi(candles, manualIndicator.period));
             indicatorSeriesRef.current.push(series);
             break;
           }
           case 'atr': {
-            const series = chart.addSeries(LineSeries, {
-              color: manualIndicator.color,
-              lineWidth: lineWidthVal,
-              lineStyle: lineStyleVal,
-              priceScaleId: 'manual-atr',
-              priceLineVisible: false,
-              lastValueVisible: false,
-              title: manualIndicator.label,
-            });
-            if (!atrScaleReady) {
-              // Own band, clear of RSI (0.55-0.75), MACD (0.3-0.5) and
-              // volume (0.8-1.0).
-              series
-                .priceScale()
-                .applyOptions({ scaleMargins: { top: 0.05, bottom: 0.75 } });
-              atrScaleReady = true;
+            const series = chart.addSeries(
+              LineSeries,
+              {
+                color: manualIndicator.color,
+                lineWidth: lineWidthVal,
+                lineStyle: lineStyleVal,
+                priceLineVisible: false,
+                lastValueVisible: false,
+                title: manualIndicator.label,
+                priceScaleId: ownPriceScaleId,
+              },
+              manualPaneIndex,
+            );
+            if (ownPriceScaleId) {
+              chart.priceScale(ownPriceScaleId).applyOptions({
+                scaleMargins: { top: 0.8, bottom: 0 },
+              });
             }
             series.setData(atr(candles, manualIndicator.period));
             indicatorSeriesRef.current.push(series);
             break;
           }
+          case 'volatility': {
+            const series = chart.addSeries(
+              LineSeries,
+              {
+                color: manualIndicator.color,
+                lineWidth: lineWidthVal,
+                lineStyle: lineStyleVal,
+                priceLineVisible: false,
+                lastValueVisible: false,
+                title: manualIndicator.label,
+                priceScaleId: ownPriceScaleId,
+              },
+              manualPaneIndex,
+            );
+            if (ownPriceScaleId) {
+              chart.priceScale(ownPriceScaleId).applyOptions({
+                scaleMargins: { top: 0.8, bottom: 0 },
+              });
+            }
+            series.setData(historicalVolatility(candles, manualIndicator.period));
+            indicatorSeriesRef.current.push(series);
+            break;
+          }
           case 'macd': {
             const { macdLine, signalLine, histogram } = macd(candles, 12, 26, 9);
-            const macdSeries = chart.addSeries(LineSeries, {
-              color: manualIndicator.color,
-              lineWidth: lineWidthVal,
-              lineStyle: lineStyleVal,
-              priceScaleId: 'strategy-macd',
-              priceLineVisible: false,
-              lastValueVisible: false,
-              title: `${manualIndicator.label} macd`,
-            });
-            const signalSeries = chart.addSeries(LineSeries, {
-              color: '#ef5350',
-              lineWidth: lineWidthVal,
-              lineStyle: lineStyleVal,
-              priceScaleId: 'strategy-macd',
-              priceLineVisible: false,
-              lastValueVisible: false,
-              title: `${manualIndicator.label} signal`,
-            });
-            const histSeries = chart.addSeries(HistogramSeries, {
-              priceScaleId: 'strategy-macd',
-              priceLineVisible: false,
-              lastValueVisible: false,
-              title: `${manualIndicator.label} hist`,
-            });
-            if (!macdScaleReady) {
-              macdSeries
-                .priceScale()
-                .applyOptions({ scaleMargins: { top: 0.3, bottom: 0.5 } });
-              macdScaleReady = true;
+            if (ownPriceScaleId) {
+              chart.priceScale(ownPriceScaleId).applyOptions({
+                scaleMargins: { top: 0.8, bottom: 0 },
+              });
             }
+            const macdSeries = chart.addSeries(
+              LineSeries,
+              {
+                color: manualIndicator.color,
+                lineWidth: lineWidthVal,
+                lineStyle: lineStyleVal,
+                priceLineVisible: false,
+                lastValueVisible: false,
+                title: `${manualIndicator.label} macd`,
+                priceScaleId: ownPriceScaleId,
+              },
+              manualPaneIndex,
+            );
+            const signalSeries = chart.addSeries(
+              LineSeries,
+              {
+                color: '#ef5350',
+                lineWidth: lineWidthVal,
+                lineStyle: lineStyleVal,
+                priceLineVisible: false,
+                lastValueVisible: false,
+                title: `${manualIndicator.label} signal`,
+                priceScaleId: ownPriceScaleId,
+              },
+              manualPaneIndex,
+            );
+            const histSeries = chart.addSeries(
+              HistogramSeries,
+              {
+                priceLineVisible: false,
+                lastValueVisible: false,
+                title: `${manualIndicator.label} hist`,
+                priceScaleId: ownPriceScaleId,
+              },
+              manualPaneIndex,
+            );
             macdSeries.setData(macdLine);
             signalSeries.setData(signalLine);
             histSeries.setData(histogram);
@@ -559,14 +679,18 @@ export function useIndicators(params: UseIndicatorsParams) {
               [middle, 0.6],
               [lower, 1],
             ] as const) {
-              const series = chart.addSeries(LineSeries, {
-                color: hexToRgba(manualIndicator.color, opacity),
-                lineWidth: lineWidthVal,
-                lineStyle: lineStyleVal,
-                priceLineVisible: false,
-                lastValueVisible: false,
-                title: manualIndicator.label,
-              });
+              const series = chart.addSeries(
+                LineSeries,
+                {
+                  color: hexToRgba(manualIndicator.color, opacity),
+                  lineWidth: lineWidthVal,
+                  lineStyle: lineStyleVal,
+                  priceLineVisible: false,
+                  lastValueVisible: false,
+                  title: manualIndicator.label,
+                },
+                manualPaneIndex,
+              );
               series.setData(data);
               indicatorSeriesRef.current.push(series);
             }
@@ -862,6 +986,27 @@ export function useIndicators(params: UseIndicatorsParams) {
                 );
               }
             });
+            break;
+          }
+          case 'volume_profile': {
+            // Horizontal volume-by-price histogram overlaid on the main
+            // price pane — a custom series primitive (not a line/histogram
+            // series), attached to the candle series. See
+            // volumeProfilePrimitive.ts.
+            const lookback = Math.max(10, manualIndicator.period > 0 ? manualIndicator.period * 20 : candles.length);
+            const profileCandles =
+              candles.length > lookback ? candles.slice(candles.length - lookback) : candles;
+            const bucketCount = manualIndicator.bucketCount ?? Math.max(5, manualIndicator.period || 24);
+            const primitive = new VolumeProfilePrimitive({
+              candles: profileCandles,
+              bucketCount,
+              side: manualIndicator.side ?? 'right',
+              color: manualIndicator.color,
+            });
+            if (candleSeries) {
+              candleSeries.attachPrimitive(primitive);
+              volumeProfilePrimitivesRef.current.push(primitive);
+            }
             break;
           }
           case 'patterns': {
