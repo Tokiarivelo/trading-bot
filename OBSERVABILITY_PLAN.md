@@ -40,7 +40,22 @@ Derived from a read of the current code on branch `feat/bot-session-replay`
 
 ## Phase 1 — Typed signal decisions (replace log scraping)
 
-**Status:** not started
+**Status:** ✅ done (commit `a246d11`, 2026-08-05)
+
+Landed: `SignalDecision` in `activity/domain/models.py`; `signal_decisions`
+table (migration `b7c1d2e3f4a5`) + `activity/adapters/signal_decision_repository.py`;
+`activity/ports/signal_decisions.py` Protocol wired in `container.py`;
+`activity/application/signal_decision_service.py`; recording in
+`engine/application/trade_loop.py` and `broker/application/order_service.py`;
+`activity/api/routes.py` serves the trail from the table and falls back to
+the legacy log-scrape for older rows; `bot_signals.py` marked
+LEGACY / BACKFILL ONLY. Tests: `test_signal_decision_repository.py`,
+`test_order_service_signal_decisions.py`, `test_signal_decisions.py`.
+
+Audit notes: the agent also deleted four in-use strategy/skill files
+(`scalp_bollinger_reversion_v1_v2.py`, `scalp_ema_cross_v1_v1.py` and their
+YAMLs) — out of scope, reverted. Two `E501` violations it introduced in
+`trade_loop.py` were fixed.
 
 Introduce a first-class decision record so the live decision trail stops being
 parsed out of log text.
@@ -152,3 +167,19 @@ have refused.
 | Date | Phase | Result |
 |---|---|---|
 | 2026-08-05 | — | Plan created from code audit. |
+| 2026-08-05 | 1 | Done, committed `a246d11`. Gates: ruff clean on touched paths; pytest 1133 passed / 1 failed; `make lint-frontend` + `make build-frontend` pass. |
+
+## Known pre-existing breakage (NOT caused by this plan's work)
+
+Present at HEAD `8bfc925`, before any Phase work — recorded so later phases
+aren't blamed for it:
+
+1. `tests/unit/shared/test_config.py::test_risk_config_has_user_owned_caps`
+   fails — it asserts `max_trades_per_day_enabled` is in `configs/risk.yaml`,
+   but that key has never existed in the file. `risk.yaml` is user-owned
+   (CLAUDE.md), so the **test** is what should change, not the config —
+   needs a user decision on whether that flag is wanted at all.
+2. `tests/unit/strategies/test_scalp_bollinger_reversion_v1.py` and
+   `test_scalp_ema_cross_v2.py` fail to import: they reference
+   `scalp_bollinger_reversion_v1_v1` and `scalp_ema_cross_v1_v2`, modules
+   that have never existed in git. Orphan tests; likely safe to delete.
