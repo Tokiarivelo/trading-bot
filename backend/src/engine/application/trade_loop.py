@@ -334,10 +334,18 @@ class TradeEngine:
             return balance
 
         first_signal = signals[0]
+        # Reference price for the signal as a whole: the side's tradable price
+        # (ask to buy, bid to sell) off the SymbolInfo already fetched for this
+        # candle. Logged so the decision trail — and the chart overlay built
+        # from it — can place every signal, not only the ones that filled.
+        signal_price = (
+            info.ask if Side(first_signal.direction.value) is Side.BUY else info.bid
+        )
         logger.info(
-            "SIGNAL: %s %s (%d target position(s)) via strategy=%s skill=%s — %s",
+            "SIGNAL: %s %s @ %.5f (%d target position(s)) via strategy=%s skill=%s — %s",
             symbol,
             first_signal.direction.value,
+            signal_price,
             len(signals),
             strategy.spec.name,
             decision.skill_name,
@@ -380,7 +388,15 @@ class TradeEngine:
             return balance
 
         if balance is None:
-            logger.info("ENTRY SKIPPED (no account connected): %s", symbol)
+            # Carries the skill token and a " — <reason>" tail like every other
+            # outcome line, so the per-bot signal-trail parsers can attribute it.
+            logger.info(
+                "ENTRY SKIPPED (no account connected): %s %s [%s] — no account balance "
+                "available, cannot size the entry",
+                symbol,
+                first_signal.direction.value,
+                decision.skill_name,
+            )
             return balance
 
         # Volatility guard (bot-agnostic, engine-level): classified off this
@@ -439,7 +455,17 @@ class TradeEngine:
 
         for idx, signal in enumerate(signals):
             if len(open_positions) + idx >= self._risk_manager._caps.max_open_positions:
-                logger.info("ENTRY BLOCKED (max open positions cap reached): %s on TP%d", symbol, idx + 1)
+                logger.info(
+                    "ENTRY BLOCKED (max open positions cap reached): %s %s [%s] — TP%d of "
+                    "%d skipped, %d open position(s) at cap %d",
+                    symbol,
+                    signal.direction.value,
+                    decision.skill_name,
+                    idx + 1,
+                    len(signals),
+                    len(open_positions) + idx,
+                    self._risk_manager._caps.max_open_positions,
+                )
                 break
 
             side = Side(signal.direction.value)
@@ -459,12 +485,15 @@ class TradeEngine:
             )
             if not sizing.approved:
                 logger.info(
-                    "ENTRY REJECTED (risk sizing for TP%d): %s %s [%s] — %s (balance=%.2f, sl_distance=%.5f, "
-                    "risk_multiplier=%.2f)",
-                    idx + 1,
+                    # The TP index lives in the message body, not the prefix:
+                    # both signal-trail parsers match the literal
+                    # "ENTRY REJECTED (risk sizing):" prefix.
+                    "ENTRY REJECTED (risk sizing): %s %s [%s] — TP%d: %s (balance=%.2f, "
+                    "sl_distance=%.5f, risk_multiplier=%.2f)",
                     symbol,
                     side.value,
                     decision.skill_name,
+                    idx + 1,
                     sizing.reason,
                     balance,
                     abs(reference_price - sl_price),

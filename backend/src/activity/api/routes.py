@@ -105,7 +105,11 @@ async def get_bot_signals(
     )
     return [
         BotSignalOut(
-            time=int(s.time.timestamp()), direction=s.direction, outcome=s.outcome, reason=s.reason
+            time=int(s.time.timestamp()),
+            direction=s.direction,
+            outcome=s.outcome,
+            reason=s.reason,
+            price=s.price,
         )
         for s in signals
     ]

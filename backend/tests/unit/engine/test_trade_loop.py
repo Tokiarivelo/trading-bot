@@ -1114,3 +1114,133 @@ async def test_disabled_volatility_guard_does_not_block_extreme_entry():
     assert order["sl"] == 2400.30 - 1 * BUY_SIGNAL.sl_points
     assert order["tp"] == 2400.30 + 1 * BUY_SIGNAL.tp_points
 
+
+
+# --- decision-trail log format (consumed by the signal-trail parsers) -------
+#
+# The `SIGNAL:`/`ENTRY ...` lines this engine emits are the *only* source the
+# live bot signal trail (`activity/application/bot_signals.py`) and the
+# backtest report (`backtest/application/signals.py`) have. These tests feed
+# the real emitted lines through the real parser so a reword here fails loudly
+# instead of silently emptying the chart overlay.
+
+
+def _trail(caplog, skill: str = "normal/xauusd/fake"):
+    from src.activity.application.bot_signals import extract_bot_signals
+    from src.activity.domain.models import LogEntry
+
+    entries = [
+        LogEntry(
+            id=None,
+            created_at=datetime.now(UTC),
+            level=record.levelname,
+            logger=record.name,
+            message=record.getMessage(),
+        )
+        for record in caplog.records
+    ]
+    return extract_bot_signals(entries, skill=skill)
+
+
+async def test_signal_line_carries_the_side_reference_price(caplog):
+    caplog.set_level("INFO")
+    engine, *_ = make_engine()
+
+    await engine.on_candle_closed(CandleClosed(symbol="XAUUSD", timeframe="M5"))
+
+    signal_lines = [m for m in caplog.messages if m.startswith("SIGNAL:")]
+    assert len(signal_lines) == 1
+    # BUY -> ask, not bid.
+    assert "buy @ 2400.30000" in signal_lines[0]
+
+    # `ENTRY OPENED:` is emitted by the real OrderService (faked out here), so
+    # the parsed outcome stays "skipped" — what matters is that the current
+    # SIGNAL line parses at all and carries its price.
+    signals = _trail(caplog)
+    assert len(signals) == 1
+    assert signals[0].price == 2400.30
+    assert signals[0].direction == "buy"
+
+
+async def test_sell_signal_line_uses_the_bid(caplog):
+    caplog.set_level("INFO")
+    sell_signal = Signal(
+        direction=Direction.SELL, sl_points=10.0, tp_points=15.0, reason="test sell"
+    )
+    engine, *_ = make_engine(
+        market_data=FakeMarketData(bar_count=60, downtrend=True),
+        context_bars=60,
+        strategy=FakeStrategy(sell_signal),
+        strategy_source=FakeStrategySource({"fake": FakeStrategy(sell_signal)}),
+    )
+
+    await engine.on_candle_closed(CandleClosed(symbol="XAUUSD", timeframe="M5"))
+
+    signal_lines = [m for m in caplog.messages if m.startswith("SIGNAL:")]
+    assert len(signal_lines) == 1
+    assert "sell @ 2400.00000" in signal_lines[0]
+    assert _trail(caplog)[0].price == 2400.00
+
+
+async def test_no_account_connected_line_is_skill_scoped_and_parses(caplog):
+    caplog.set_level("INFO")
+    engine, order_service, *_ = make_engine(account=FakeAccountService(balance=None))
+
+    await engine.on_candle_closed(CandleClosed(symbol="XAUUSD", timeframe="M5"))
+
+    assert order_service.opened == []
+    line = next(m for m in caplog.messages if m.startswith("ENTRY SKIPPED (no account connected)"))
+    assert "[normal/xauusd/fake]" in line
+    assert " — " in line
+
+    signals = _trail(caplog)
+    assert len(signals) == 1
+    assert signals[0].outcome == "skipped"
+    assert "no account balance available" in signals[0].reason
+
+
+async def test_max_open_positions_line_is_skill_scoped_and_parses(caplog):
+    caplog.set_level("INFO")
+    caps = RiskCaps(
+        risk_per_trade_pct=1.0,
+        daily_loss_limit_pct=5.0,
+        max_open_positions=1,
+        max_trades_per_day_enabled=False,
+        consecutive_loss_pause=5,
+    )
+    two_targets = (
+        Signal(direction=Direction.BUY, sl_points=10.0, tp_points=15.0, reason="tp1"),
+        Signal(direction=Direction.BUY, sl_points=10.0, tp_points=30.0, reason="tp2"),
+    )
+    strategy = FakeStrategy(two_targets)
+    engine, order_service, *_ = make_engine(
+        risk_manager=RiskManager(caps=caps, timezone="UTC"),
+        strategy=strategy,
+        strategy_source=FakeStrategySource({"fake": strategy}),
+    )
+
+    await engine.on_candle_closed(CandleClosed(symbol="XAUUSD", timeframe="M5"))
+
+    assert len(order_service.opened) == 1  # second target hits the cap
+    line = next(
+        m for m in caplog.messages if m.startswith("ENTRY BLOCKED (max open positions cap reached)")
+    )
+    assert "[normal/xauusd/fake]" in line
+    assert " — " in line
+
+
+async def test_risk_sizing_rejection_prefix_has_no_tp_index(caplog):
+    caplog.set_level("INFO")
+    # A zero balance makes sizing fail for every target.
+    engine, order_service, *_ = make_engine(account=FakeAccountService(balance=0.0))
+
+    await engine.on_candle_closed(CandleClosed(symbol="XAUUSD", timeframe="M5"))
+
+    assert order_service.opened == []
+    line = next(m for m in caplog.messages if m.startswith("ENTRY REJECTED (risk sizing)"))
+    assert line.startswith("ENTRY REJECTED (risk sizing): ")
+    assert " — TP1: " in line
+
+    signals = _trail(caplog)
+    assert len(signals) == 1
+    assert signals[0].outcome == "risk_rejected"

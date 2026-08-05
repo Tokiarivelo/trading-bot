@@ -19,6 +19,12 @@ The line prefixes matched here are owned by `TradeEngine._try_enter`/
 (`ENTRY OPENED:`, `ENTRY REJECTED (spread/RR gate):`,
 `ENTRY REJECTED (broker):`) — if those messages are ever reworded, update
 this module in the same change.
+
+Only *entry* decisions are modelled here. The `PositionManager`'s exit-side
+lines (breakeven/trailing SL modifications, EXTREME-regime forced closes,
+time-stops) describe what happened to an already-open position, not what the
+engine did with a signal — they have no place in the entry-outcome vocabulary
+and are deliberately left unmatched.
 """
 
 from __future__ import annotations
@@ -28,12 +34,19 @@ from collections.abc import Sequence
 
 from src.activity.domain.models import BotSignal, LogEntry
 
-# "SIGNAL: XAUUSD buy via strategy=breakout_v1 skill=normal/xauusd/breakout_v1 — <reason>"
+# Current format (multi-target engine, bdab6e1 onward):
+#   "SIGNAL: XAUUSD buy @ 2412.35000 (2 target position(s)) via
+#    strategy=breakout_v1 skill=normal/xauusd/breakout_v1 — <reason>"
+# Both the "@ <price>" and the "(N target position(s))" segments are optional
+# so legacy lines already persisted in `activity_logs` still parse.
 # Symbol and skill both may contain spaces ("Volatility 75 Index",
 # "normal/volatility 75 index/..."), so neither can be matched with \S+ —
 # anchor on the literal " via strategy=" / " — " delimiters instead.
 _SIGNAL_RE = re.compile(
-    r"^SIGNAL: .+? (?P<direction>buy|sell) via strategy=.+? skill=.+? — (?P<reason>.*)$"
+    r"^SIGNAL: .+? (?P<direction>buy|sell)"
+    r"(?: @ (?P<price>-?\d+(?:\.\d+)?))?"
+    r"(?: \(\d+ target position\(s\)\))?"
+    r" via strategy=.+? skill=.+? — (?P<reason>.*)$"
 )
 
 # The token after the skill value is " — <reason>" on trade_loop/order_service
@@ -41,13 +54,36 @@ _SIGNAL_RE = re.compile(
 _SKILL_EQUALS_RE = re.compile(r"skill=(.+?)(?= magic=| — |$)")
 _SKILL_BRACKET_RE = re.compile(r"\[([^\]]+)\]")
 
+# Outcome values are a CLOSED vocabulary: the chart indexes
+# `SIGNAL_OUTCOME_META[outcome]` unguarded, so a new value would crash it.
+# New guard lines must map onto one of the existing six.
 _OUTCOME_PREFIXES: tuple[tuple[str, str], ...] = (
     ("ENTRY OPENED:", "opened"),
     ("ENTRY BLOCKED (HTF veto):", "htf_veto"),
+    ("ENTRY BLOCKED (risk gate):", "risk_rejected"),
+    ("ENTRY BLOCKED (volatility guard):", "risk_rejected"),
+    ("ENTRY BLOCKED (max open positions cap reached):", "risk_rejected"),
     ("ENTRY REJECTED (risk sizing):", "risk_rejected"),
     ("ENTRY REJECTED (spread/RR gate):", "spread_veto"),
     ("ENTRY REJECTED (broker):", "broker_rejected"),
+    ("ENTRY SKIPPED (no account connected):", "skipped"),
 )
+
+_EXPLANATION_SEP = " — "
+
+
+def _outcome_explanation(message: str) -> str | None:
+    """The ` — <explanation>` tail an outcome line carries (veto reason, sizing
+    failure, cap detail). `ENTRY OPENED:` lines have none."""
+    _, sep, tail = message.partition(_EXPLANATION_SEP)
+    return tail.strip() if sep and tail.strip() else None
+
+
+def _merge_reason(reason: str, message: str) -> str:
+    explanation = _outcome_explanation(message)
+    if explanation is None or explanation in reason:
+        return reason
+    return f"{reason}{_EXPLANATION_SEP}{explanation}"
 
 
 def _line_skill(message: str) -> str | None:
@@ -81,11 +117,13 @@ def extract_bot_signals(entries: Sequence[LogEntry], skill: str) -> list[BotSign
         match = _SIGNAL_RE.match(entry.message)
         if match is not None:
             flush()
+            price = match.group("price")
             pending = BotSignal(
                 time=entry.created_at,
                 direction=match.group("direction"),
                 outcome="skipped",
                 reason=match.group("reason"),
+                price=float(price) if price is not None else None,
             )
             continue
         if pending is None:
@@ -97,7 +135,8 @@ def extract_bot_signals(entries: Sequence[LogEntry], skill: str) -> list[BotSign
                         time=pending.time,
                         direction=pending.direction,
                         outcome=outcome,
-                        reason=pending.reason,
+                        reason=_merge_reason(pending.reason, entry.message),
+                        price=pending.price,
                     )
                 )
                 pending = None

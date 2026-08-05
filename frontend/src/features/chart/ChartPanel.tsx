@@ -21,7 +21,7 @@ import {
 } from 'lucide-react';
 import dynamic from 'next/dynamic';
 import Link from 'next/link';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   getTradeMarkers,
   type Candle,
@@ -43,8 +43,10 @@ import { DrawingsList } from './DrawingsList';
 import { IndicatorsDock } from './IndicatorsDock';
 import { PositionEditPopover } from './PositionEditPopover';
 import { ReplayControls } from './ReplayControls';
+import { ReplayRevealOverlay } from './ReplayRevealOverlay';
 import { ZoneInfoPopover } from './ZoneInfoPopover';
-import type { ZoneTooltipState } from './types';
+import { SignalInfoPopover } from './SignalInfoPopover';
+import type { SignalTooltipState, ZoneTooltipState } from './types';
 import { SessionReplayPicker } from './SessionReplayPicker';
 import { SignalsDock } from './SignalsDock';
 import { useBacktestData } from './useBacktestData';
@@ -57,8 +59,10 @@ import { useDrawingTools } from './useDrawingTools';
 import { useIndicators } from './useIndicators';
 import { useOrderPopovers } from './useOrderPopovers';
 import { useReplayEngine } from './useReplayEngine';
+import { useReplayReveal } from './useReplayReveal';
 import { useStrategyEditor } from './useStrategyEditor';
 import type {
+  BotReplayControls,
   DrawingToolType,
   EntryLineSpec,
   OrderLineDash,
@@ -556,6 +560,12 @@ export function ChartPanel({
   // against `chartController.getZoneMetaMap()`.
   const [zoneTooltip, setZoneTooltip] = useState<ZoneTooltipState | null>(null);
 
+  // Read-only info popover for a clicked rejected/vetoed signal marker — see
+  // the signal-click effect below.
+  const [signalTooltip, setSignalTooltip] = useState<SignalTooltipState | null>(
+    null,
+  );
+
   // Stable references for symbol and symbol-switching state to avoid stale
   // closures inside the chart-creation useEffect.
   const symbolRef = useRef(symbol);
@@ -671,6 +681,18 @@ export function ChartPanel({
     zoneColorStyle,
   });
 
+  // Transient blinking "BUY HERE"/"SELL HERE"/exit flashes emitted as the
+  // replay cursor crosses each trade/signal — see useReplayReveal.ts. Inert
+  // (and returns a stable empty array) whenever replay is off, so it costs
+  // nothing in the normal live view.
+  const replayRevealEvents = useReplayReveal({
+    replayActive,
+    replayCursorTime,
+    signals: backtestSignals,
+    trades: backtestTrades,
+    candlesRef,
+  });
+
   // Multi-chart layout: mirror this window's replay session (active + picked
   // period) outward so secondary chart windows can follow along — see this
   // component's onReplaySessionChange doc comment. A saved backtest report's
@@ -722,6 +744,12 @@ export function ChartPanel({
     setShowSignalsDock,
     zoneColorStyle,
   });
+
+  // Latest signal list for the signal-marker click hit-test effect above —
+  // a ref so that click subscription isn't torn down and re-added on every
+  // 5s live-bot signals poll.
+  const backtestSignalsRef = useRef(backtestSignals);
+  backtestSignalsRef.current = backtestSignals;
 
   // Stable indirection so useCandleData (below, called before
   // useReplayEngine can exist — it needs useCandleData's own return value)
@@ -1000,6 +1028,7 @@ export function ChartPanel({
     handleEnterReplay,
     handleExitReplay,
     handleStartSessionReplay,
+    startSessionReplayForRange,
     handleExitSessionReplay,
     handleRecenterReplay,
     handleToggleTrade,
@@ -1020,6 +1049,59 @@ export function ChartPanel({
     // equivalent ref of its own (useReplayEngine.ts is out of scope for
     // this phase, so its copy stays declared there, unused).
   } = replayEngine;
+
+  // --- Bot dock "Replay" tab (BOT_SESSION_REPLAY_PLAN phase 2) --------------
+  // The eyed bot's own session replay, driven by the very same
+  // `useReplayEngine` session-replay path the chart toolbar's picker uses —
+  // only the period comes from the bot's signals/trades instead of the
+  // picker's inputs. Built only for the live-bot eye view; a saved backtest
+  // report already has the toolbar's replay controls, and its period isn't
+  // user-picked.
+  //
+  // Every handler goes through a ref reassigned on each render, so the memo
+  // below can depend on plain values (and keep `BotSessionReplayTab` from
+  // re-rendering on every parent render) without ever calling a stale
+  // closure over the replay engine.
+  const replayHandlersRef = useRef({
+    startSessionReplayForRange,
+    handleExitSessionReplay,
+    setReplayPlaying,
+    setReplaySpeed,
+  });
+  replayHandlersRef.current = {
+    startSessionReplayForRange,
+    handleExitSessionReplay,
+    setReplayPlaying,
+    setReplaySpeed,
+  };
+
+  const botReplayControls = useMemo<BotReplayControls | undefined>(() => {
+    if (!liveBotSkill || backtestReportId) return undefined;
+    return {
+      active: Boolean(sessionReplayPeriod && replayActive),
+      playing: replayPlaying,
+      speed: replaySpeed,
+      cursorTime: replayCursorTime,
+      loading: sessionReplayLoadingPage,
+      onStart: (from, to) =>
+        replayHandlersRef.current.startSessionReplayForRange(from, to),
+      onPlayPause: () => replayHandlersRef.current.setReplayPlaying((p) => !p),
+      onSpeedChange: (speed) => replayHandlersRef.current.setReplaySpeed(speed),
+      onExit: () => {
+        replayHandlersRef.current.setReplayPlaying(false);
+        replayHandlersRef.current.handleExitSessionReplay();
+      },
+    };
+  }, [
+    liveBotSkill,
+    backtestReportId,
+    sessionReplayPeriod,
+    replayActive,
+    replayPlaying,
+    replaySpeed,
+    replayCursorTime,
+    sessionReplayLoadingPage,
+  ]);
 
   // Spread/symbol-info poll now lives in useCandleData.ts (its
   // `symbolInfo`/`spreadPoints` are destructured from `chartRenderController`
@@ -1204,6 +1286,87 @@ export function ChartPanel({
     return () => chart.unsubscribeClick(handler);
     // chartRef/containerRef are stable ref objects returned from
     // useChartEngine; chartController only changes identity on mount/unmount.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [chartController]);
+
+  // Signal click-to-inspect: clicking a rejected/vetoed signal's square
+  // marker (from `toSignalSeriesMarkers`) opens a popover with the
+  // strategy's own reason text. The series-markers plugin exposes no hit
+  // API, so the hit test is done here: resolve the clicked x to the nearest
+  // candle, keep that bar's non-`opened` signals, then require the click y
+  // to be near the bar on the side the marker is drawn (belowBar for buy,
+  // aboveBar for sell). Zone rectangles keep priority — a click that lands
+  // on a zone drawing is left to the zone effect above. Works identically
+  // during replay (only signals at/before the cursor bar are drawn, and the
+  // same cutoff is applied here) and in the normal live/eye view.
+  useEffect(() => {
+    const chart = chartRef.current;
+    const series = candleSeriesRef.current;
+    const container = containerRef.current;
+    if (!chart || !series || !container || !chartController) return;
+    const handler = (param: MouseEventParams) => {
+      if (!param.point) return;
+      const signals = backtestSignalsRef.current;
+      if (!signals || signals.length === 0) return;
+      // A zone rectangle under the cursor wins — same click, one popover.
+      const manager = chartController.getDrawingManager();
+      const hit = manager?.hitTest(param.point);
+      if (hit && chartController.getZoneMetaMap().has(hit.id)) return;
+
+      const candles = candlesRef.current;
+      const time =
+        (param.time as number | undefined) ??
+        (chart.timeScale().coordinateToTime(param.point.x) as number | null) ??
+        null;
+      if (time === null) return;
+      const barTime = nearestCandleTime(candles, time);
+      if (barTime === null) return;
+      const candle = candles.find((c) => c.time === barTime);
+      if (!candle) return;
+      // "No lookahead": while replaying, bars past the cursor aren't drawn.
+      const cursorTime = replayActiveRef.current
+        ? ((candlesRef.current[replayCursorIndexRef.current]?.time as
+            | number
+            | undefined) ?? 0)
+        : Infinity;
+      if ((barTime as number) > cursorTime) return;
+
+      const hits = signals.filter(
+        (s) =>
+          s.outcome !== 'opened' &&
+          nearestCandleTime(candles, s.time) === barTime,
+      );
+      if (hits.length === 0) return;
+
+      const lowY = series.priceToCoordinate(candle.low);
+      const highY = series.priceToCoordinate(candle.high);
+      if (lowY === null || highY === null) return;
+      const y = param.point.y;
+      // Marker band: a buy signal's square sits below the bar's low, a sell
+      // signal's above its high. Allow a little slack into the bar itself so
+      // clicking the marker's edge still counts.
+      const BAND = 44;
+      const SLACK = 6;
+      const matched = hits.filter((s) =>
+        s.direction === 'buy'
+          ? y >= lowY - SLACK && y <= lowY + BAND
+          : y <= highY + SLACK && y >= highY - BAND,
+      );
+      if (matched.length === 0) return;
+
+      setSignalTooltip({
+        x: param.point.x,
+        y,
+        signals: matched,
+        containerWidth: container.clientWidth,
+        containerHeight: container.clientHeight,
+      });
+    };
+    chart.subscribeClick(handler);
+    return () => chart.unsubscribeClick(handler);
+    // chartRef/candleSeriesRef/containerRef/candlesRef and the replay refs are
+    // stable ref objects; chartController only changes identity on
+    // mount/unmount.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [chartController]);
 
@@ -2641,6 +2804,21 @@ export function ChartPanel({
             onWidthChange={drawingTools.handleModifyDrawingWidth}
           />
         )}
+        <ReplayRevealOverlay
+          events={replayRevealEvents}
+          chartRef={chartRef}
+          candleSeriesRef={candleSeriesRef}
+        />
+        {signalTooltip && (
+          <SignalInfoPopover
+            x={signalTooltip.x}
+            y={signalTooltip.y}
+            signals={signalTooltip.signals}
+            containerWidth={signalTooltip.containerWidth}
+            containerHeight={signalTooltip.containerHeight}
+            onClose={() => setSignalTooltip(null)}
+          />
+        )}
         {zoneTooltip && (
           <ZoneInfoPopover
             x={zoneTooltip.x}
@@ -3225,6 +3403,7 @@ export function ChartPanel({
             selectedSignalIndex={selectedSignalIndex}
             onSelectSignal={handleToggleSignal}
             replayCursorTime={backtestReportId ? replayCursorTime : null}
+            replay={botReplayControls}
           />
         )}
       </div>

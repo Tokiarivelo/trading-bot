@@ -35,3 +35,7 @@ class BotSignal:
     """"opened" | "htf_veto" | "risk_rejected" | "spread_veto" | "broker_rejected"
     | "skipped" (no outcome line followed within the queried window)."""
     reason: str  # the strategy's own Signal.reason (pattern, zone, entry/sl/tp lines)
+    price: float | None = None
+    """Reference price the engine saw when the signal fired — ask for a buy,
+    bid for a sell. `None` for legacy log lines logged before the price was
+    added to the `SIGNAL:` line, so the chart must treat it as optional."""

@@ -6,7 +6,12 @@ import type {
   Time,
 } from 'lightweight-charts';
 import type { DrawingManager } from 'lightweight-charts-drawing';
-import { type Candle, type PositionOut, type SymbolInfo } from '@/shared/api/client';
+import {
+  type BacktestSignal,
+  type Candle,
+  type PositionOut,
+  type SymbolInfo,
+} from '@/shared/api/client';
 
 /** Manually added indicator (via IndicatorsDock), independent of whatever
  * the active strategy's spec auto-draws — see `recomputeIndicators` below,
@@ -106,6 +111,18 @@ export interface ZoneTooltipState {
   containerHeight: number;
 }
 
+/** Floating read-only popover state for a clicked rejected/vetoed signal
+ * marker — opened by ChartPanel's signal-click effect. The markers plugin
+ * exposes no hit API, so that effect resolves the clicked bar via
+ * `nearestCandleTime` and keeps every non-`opened` signal on it. */
+export interface SignalTooltipState {
+  x: number;
+  y: number;
+  signals: BacktestSignal[];
+  containerWidth: number;
+  containerHeight: number;
+}
+
 /** Multi-chart layout (split-window §): the primary ChartPanel's replay
  * session/cursor, mirrored into secondary MiniChartPanel windows so they
  * follow the same replayed period at their own timeframe. `sessionPeriod` is
@@ -160,6 +177,37 @@ export interface ReplayUIState {
     following: boolean;
     onRecenter: () => void;
   } | null;
+}
+
+/** Everything the bot dock's "Replay" tab (`BotSessionReplayTab`) needs to
+ * drive the existing session-replay engine for the bot currently under the
+ * eye. Built in ChartPanel.tsx (only when a bot's eye is on and no saved
+ * backtest report is loaded) and threaded through `SignalsDock`'s optional
+ * `replay` prop; every handler is a thin wrapper over `useReplayEngine` —
+ * the tab never owns replay state of its own. */
+export interface BotReplayControls {
+  /** True once the picked period's candles landed and the player entered
+   * replay — the tab then swaps its From/To form for playback status. */
+  active: boolean;
+  /** Autoplay is currently ticking (drives Pause vs. Resume). */
+  playing: boolean;
+  /** Playback speed multiplier (`useReplayEngine`'s `replaySpeed`). */
+  speed: number;
+  /** Cursor bar's epoch seconds while replaying, null otherwise. Also what
+   * the tab counts "revealed" signals/trades against. */
+  cursorTime: number | null;
+  /** Chunked-fetch progress between pressing Play and replay going active;
+   * null when not loading. */
+  loading: { page: number; loaded: number } | null;
+  /** Hand a period (epoch seconds) to the replay engine — same guard and
+   * same path as the toolbar's session-replay picker. */
+  onStart: (fromSec: number, toSec: number) => void;
+  /** Toggle autoplay pause/resume. */
+  onPlayPause: () => void;
+  /** Change the speed multiplier. */
+  onSpeedChange: (speed: number) => void;
+  /** Leave replay entirely and return the chart to live candles. */
+  onExit: () => void;
 }
 
 export interface NewsBand {
@@ -298,4 +346,26 @@ export interface ChartRenderController {
   loadingMore: boolean;
   switchingChart: boolean;
   newsBands: NewsBand[];
+}
+
+/** One transient "here's what the bot just did" flash emitted by
+ * `useReplayReveal` as the replay cursor crosses a trade's open/close time or
+ * a rejected signal's time, and rendered by `ReplayRevealOverlay`. Purely
+ * ephemeral: every event self-expires a couple of seconds after it appears,
+ * and none are ever produced while replay is inactive. */
+export interface ReplayRevealEvent {
+  /** Unique per emission (a bar can legitimately produce two identical-looking
+   * flashes), used as the React key and the expiry-timer handle. */
+  id: string;
+  /** Epoch seconds of the bar the flash anchors to — `timeToCoordinate`. */
+  time: number;
+  /** Price the flash anchors to — `priceToCoordinate`. Null when it could not
+   * be resolved (no loaded candle at that time), in which case the overlay
+   * skips the event rather than guessing a position. */
+  price: number | null;
+  /** 'buy'/'sell' = a position opened, 'exit' = a position closed,
+   * 'rejected' = a signal the engine vetoed/refused. Drives the colour. */
+  kind: 'buy' | 'sell' | 'exit' | 'rejected';
+  /** Short all-caps text, e.g. "BUY HERE". */
+  label: string;
 }

@@ -93,6 +93,93 @@ def test_signal_regex_matches_the_skill_tagged_format() -> None:
     assert signals[0].outcome == "opened"
 
 
+def test_signal_regex_matches_the_current_multi_target_format() -> None:
+    # Regression guard: bdab6e1 added "@ <price>" and "(N target position(s))"
+    # to the engine's SIGNAL line, which the previous \S+-based regex could not
+    # match — every backtest report's `signals` list came back empty.
+    signals = extract_signals(
+        [
+            _entry(
+                0,
+                "SIGNAL: XAUUSD sell @ 4020.03000 (2 target position(s)) via "
+                "strategy=pob_snd_zones_xauusd skill=backtest — DBD-retest(30m)",
+            ),
+            _entry(0, "ENTRY OPENED: ticket=1 sell XAUUSD 0.01 lots @ 4020.00"),
+        ]
+    )
+    assert len(signals) == 1
+    assert signals[0].direction == "sell"
+    assert signals[0].outcome == "opened"
+    assert signals[0].reason == "DBD-retest(30m)"
+
+
+def test_symbol_with_spaces_parses() -> None:
+    signals = extract_signals(
+        [
+            _entry(
+                0,
+                "SIGNAL: Volatility 75 Index buy @ 48923.94500 (1 target position(s)) via "
+                "strategy=rbr_dbd_zones_scalp_vix75 skill=backtest — RBR-retest",
+            ),
+        ]
+    )
+    assert [(s.direction, s.outcome) for s in signals] == [("buy", "skipped")]
+
+
+def test_newly_covered_guard_lines_map_to_known_outcomes() -> None:
+    signals = extract_signals(
+        [
+            _entry(0, SIGNAL_BUY),
+            _entry(
+                0,
+                "ENTRY BLOCKED (max open positions cap reached): XAUUSD buy [backtest] — "
+                "TP2 of 2 skipped, 3 open position(s) at cap 3",
+            ),
+            _entry(10, SIGNAL_BUY),
+            _entry(10, "ENTRY BLOCKED (risk gate): XAUUSD [backtest] — daily loss limit hit"),
+            _entry(20, SIGNAL_BUY),
+            _entry(
+                20,
+                "ENTRY SKIPPED (no account connected): XAUUSD buy [backtest] — no account "
+                "balance available, cannot size the entry",
+            ),
+        ]
+    )
+    assert [s.outcome for s in signals] == ["risk_rejected", "risk_rejected", "skipped"]
+
+
+def test_risk_sizing_line_with_tp_index_in_the_body_matches() -> None:
+    signals = extract_signals(
+        [
+            _entry(0, SIGNAL_BUY),
+            _entry(
+                0,
+                "ENTRY REJECTED (risk sizing): XAUUSD buy [backtest] — TP1: computed "
+                "volume 0.0000 (balance=1000.00, sl_distance=0.00100, risk_multiplier=0.50)",
+            ),
+        ]
+    )
+    assert [s.outcome for s in signals] == ["risk_rejected"]
+    assert "TP1: computed volume 0.0000" in signals[0].reason
+
+
+def test_outcome_explanation_is_appended_to_the_reason() -> None:
+    signals = extract_signals(
+        [
+            _entry(0, SIGNAL_BUY),
+            _entry(0, "ENTRY BLOCKED (HTF veto): XAUUSD buy — H1 trend (down) opposes buy"),
+        ]
+    )
+    assert signals[0].reason == "RBR-retest(30m) — H1 trend (down) opposes buy"
+
+
+def test_outcome_vocabulary_stays_closed() -> None:
+    from src.backtest.application.signals import _OUTCOME_PREFIXES
+
+    known = {"opened", "htf_veto", "risk_rejected", "spread_veto", "broker_rejected", "skipped"}
+    assert {outcome for _prefix, outcome in _OUTCOME_PREFIXES} <= known
+
+
 def test_unrelated_lines_are_ignored() -> None:
     signals = extract_signals(
         [

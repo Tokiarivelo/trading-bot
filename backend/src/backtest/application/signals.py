@@ -27,17 +27,45 @@ from collections.abc import Sequence
 
 from src.backtest.domain.models import ActivityLogEntry, BacktestSignal
 
-# "SIGNAL: XAUUSD sell via strategy=pob_snd_zones_xauusd skill=backtest — <reason>"
+# Current format (multi-target engine, bdab6e1 onward):
+#   "SIGNAL: XAUUSD sell @ 2412.35000 (2 target position(s)) via
+#    strategy=pob_snd_zones_xauusd skill=backtest — <reason>"
+# The "@ <price>" and "(N target position(s))" segments are both optional so
+# legacy lines still parse. Symbols may contain spaces ("Volatility 75
+# Index"), so anchor on the literal " via strategy=" / " — " delimiters
+# rather than \S+.
 _SIGNAL_RE = re.compile(
-    r"^SIGNAL: \S+ (?P<direction>buy|sell) via strategy=\S+ skill=\S+ — (?P<reason>.*)$"
+    r"^SIGNAL: .+? (?P<direction>buy|sell)"
+    r"(?: @ (?P<price>-?\d+(?:\.\d+)?))?"
+    r"(?: \(\d+ target position\(s\)\))?"
+    r" via strategy=.+? skill=.+? — (?P<reason>.*)$"
 )
 
+# Closed vocabulary — the chart indexes `SIGNAL_OUTCOME_META[outcome]`
+# unguarded, so new guard lines map onto an existing value.
 _OUTCOME_PREFIXES: tuple[tuple[str, str], ...] = (
     ("ENTRY OPENED:", "opened"),
     ("ENTRY BLOCKED (HTF veto):", "htf_veto"),
+    ("ENTRY BLOCKED (risk gate):", "risk_rejected"),
+    ("ENTRY BLOCKED (volatility guard):", "risk_rejected"),
+    ("ENTRY BLOCKED (max open positions cap reached):", "risk_rejected"),
     ("ENTRY REJECTED (risk sizing):", "risk_rejected"),
     ("ENTRY REJECTED (spread/RR gate):", "spread_veto"),
+    ("ENTRY REJECTED (broker):", "broker_rejected"),
+    ("ENTRY SKIPPED (no account connected):", "skipped"),
 )
+
+_EXPLANATION_SEP = " — "
+
+
+def _merge_reason(reason: str, message: str) -> str:
+    """Append the outcome line's own ` — <explanation>` tail (veto reason,
+    sizing failure) onto the signal's reason. `ENTRY OPENED:` lines have none."""
+    _, sep, tail = message.partition(_EXPLANATION_SEP)
+    explanation = tail.strip()
+    if not sep or not explanation or explanation in reason:
+        return reason
+    return f"{reason}{_EXPLANATION_SEP}{explanation}"
 
 
 def extract_signals(entries: Sequence[ActivityLogEntry]) -> tuple[BacktestSignal, ...]:
@@ -75,7 +103,7 @@ def extract_signals(entries: Sequence[ActivityLogEntry]) -> tuple[BacktestSignal
                         time=pending.time,
                         direction=pending.direction,
                         outcome=outcome,
-                        reason=pending.reason,
+                        reason=_merge_reason(pending.reason, entry.message),
                     )
                 )
                 pending = None

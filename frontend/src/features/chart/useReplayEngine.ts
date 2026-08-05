@@ -409,6 +409,24 @@ export function useReplayEngine(params: UseReplayEngineParams) {
     setSessionReplayPeriod({ from: sessionReplayFromSec, to: sessionReplayToSec });
   }
 
+  // Same as `handleStartSessionReplay`, but for a caller that already knows
+  // the period it wants (the bot dock's "Replay" tab derives it from the
+  // eyed bot's own signals/trades) instead of the picker's input strings.
+  // Deliberately a *sibling* rather than an optional-arg overload of
+  // `handleStartSessionReplay`: that one is wired straight to a button's
+  // `onClick` and would receive a MouseEvent as its first argument.
+  // Applies the identical max-candles guard and goes through the same
+  // `setSessionReplayPeriod` path, so useCandleData fetches the range
+  // (chunked if needed) and auto-enters replay once it lands.
+  function startSessionReplayForRange(fromSec: number, toSec: number) {
+    if (!Number.isFinite(fromSec) || !Number.isFinite(toSec)) return;
+    if (toSec <= fromSec) return;
+    const candles = Math.ceil((toSec - fromSec) / TIMEFRAME_SECONDS[timeframe]);
+    if (candles > SESSION_REPLAY_MAX_CANDLES) return;
+    setShowSessionReplayPicker(false);
+    setSessionReplayPeriod({ from: Math.floor(fromSec), to: Math.floor(toSec) });
+  }
+
   // Leaves session replay entirely (not just pausing the player) — clearing
   // `sessionReplayPeriod` re-triggers useCandleData's fetch effect, which
   // reloads live "now" candles and resubscribes to WS updates.
@@ -618,6 +636,7 @@ export function useReplayEngine(params: UseReplayEngineParams) {
     handleEnterReplay,
     handleExitReplay,
     handleStartSessionReplay,
+    startSessionReplayForRange,
     handleExitSessionReplay,
     handleRecenterReplay,
     handleToggleTrade,

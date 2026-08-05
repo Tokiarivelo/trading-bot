@@ -12,6 +12,8 @@ import { useState } from "react";
 import { Clock, Search, MapPin, HelpCircle } from "lucide-react";
 import { SIGNAL_OUTCOME_META } from "@/features/backtest/signalOutcome";
 import { TradeDecisionModal } from "@/shared/ui/TradeDecisionModal";
+import { BotSessionReplayTab } from "./BotSessionReplayTab";
+import type { BotReplayControls } from "./types";
 import type {
   BacktestSignal,
   BacktestTrade,
@@ -68,6 +70,7 @@ export function SignalsDock({
   selectedSignalIndex = null,
   onSelectSignal,
   replayCursorTime = null,
+  replay,
 }: {
   signals: BacktestSignal[];
   trades: BacktestTrade[];
@@ -103,9 +106,15 @@ export function SignalsDock({
    * Active Orders panel, and hides trades not yet opened — the same
    * "no lookahead" contract the chart's own markers already enforce. */
   replayCursorTime?: number | null;
+  /** Session-replay wiring for the bot currently under the eye — undefined
+   * hides the Replay tab entirely (saved-backtest views, which have the
+   * chart toolbar's own replay controls instead). See `BotReplayControls`. */
+  replay?: BotReplayControls;
 }) {
   const [whyTrade, setWhyTrade] = useState<TradeHistoryItem | null>(null);
-  const [activeTab, setActiveTab] = useState<"signals" | "trades" | "indicators">("signals");
+  const [activeTab, setActiveTab] = useState<
+    "signals" | "trades" | "indicators" | "replay"
+  >("signals");
   
   // Search & Filter state
   const [searchText, setSearchText] = useState("");
@@ -205,10 +214,27 @@ export function SignalsDock({
             Indicators ({indicators.length})
           </button>
         )}
+        {replay && (
+          <button
+            type="button"
+            onClick={() => {
+              setActiveTab("replay");
+              setSearchText("");
+            }}
+            className={`flex-1 py-2 px-3 text-xs font-semibold border-b-2 text-center transition-colors cursor-pointer ${
+              activeTab === "replay"
+                ? "border-accent text-accent bg-accent/5"
+                : "border-transparent text-ink-muted hover:text-ink hover:bg-panel-dark/20"
+            }`}
+          >
+            Replay
+          </button>
+        )}
       </div>
 
-      {/* Filters Area — indicators tab has too few rows to need search/filter */}
-      {activeTab !== "indicators" && (
+      {/* Filters Area — the indicators and replay tabs are forms/lists with
+          too few rows to need search/filter */}
+      {activeTab !== "indicators" && activeTab !== "replay" && (
       <div className="p-2 border-b border-line flex flex-col gap-1.5 bg-panel-dark/20 shrink-0">
         {/* Search */}
         <div className="relative">
@@ -265,7 +291,15 @@ export function SignalsDock({
 
       {/* List Container */}
       <div className="flex-1 overflow-y-auto min-h-0 divide-y divide-line">
-        {activeTab === "indicators" ? (
+        {activeTab === "replay" ? (
+          replay ? (
+            <BotSessionReplayTab
+              signals={signals}
+              trades={trades}
+              replay={replay}
+            />
+          ) : null
+        ) : activeTab === "indicators" ? (
           !indicators || indicators.length === 0 ? (
             <p className="px-3 py-4 text-xs text-ink-muted text-center">
               No indicators recorded for this bot&apos;s strategy spec.

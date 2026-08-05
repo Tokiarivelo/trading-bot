@@ -80,5 +80,12 @@ class BotSignalOut(BaseModel):
     )
     reason: str = Field(
         description="The strategy's own reason string — pattern matched, zone rectangle, "
-        "entry/SL/TP lines, confirmations."
+        "entry/SL/TP lines, confirmations — with the outcome line's own explanation "
+        "(veto reason, sizing failure) appended after an em dash when there is one."
+    )
+    price: float | None = Field(
+        default=None,
+        description="Reference price the engine saw when the signal fired (ask for a buy, "
+        "bid for a sell), so the chart can place the marker at the signal's own level. "
+        "Null for log lines written before the price was recorded.",
     )
