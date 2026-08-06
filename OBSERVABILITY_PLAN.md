@@ -167,7 +167,7 @@ retcode histogram, and MFE/MAE ratios (are TPs too far? SLs too tight?).
 
 ## Phase 4 — Backtest realism & live/backtest divergence
 
-**Status:** not started
+**Status:** ✅ done (`5660aca`)
 
 - Simulate broker constraints in the backtest engine: `stops_level`, min lot,
   lot step, spread widening, and a slippage distribution sampled from the
@@ -178,6 +178,51 @@ retcode histogram, and MFE/MAE ratios (are TPs too far? SLs too tight?).
 
 **Done when:** an M1 scalp backtest no longer reports trades the broker would
 have refused.
+
+**What landed:**
+
+- `broker/domain/broker_constraints.py` — pure `stops_level` / volume-grid
+  rules carrying the real MT5 retcodes (10016 invalid stops, 10014 invalid
+  volume). The VIX75 case from the project notes (minimum stop distance
+  107.70 price units vs M1 scalp stops of 30–70) has a direct regression test.
+- `broker/domain/slippage.py` — slippage calibrated from the real
+  `TradeRecord.slippage` values Phase 3 began recording, with a documented
+  pessimistic fallback below `MIN_CALIBRATION_SAMPLES` (20) and an explicitly
+  seeded RNG, so identical inputs still produce identical trades.
+- `broker/ports/execution_simulator.py` — the behaviour is *injected* into
+  `PaperBroker`, not baked into it; `execution_simulator=None` keeps the old
+  frictionless fills for live paper trading and plumbing tests.
+- `backtest/adapters/constraint_simulator.py` — counts every rejection by
+  reason, reported as `broker_realism` on the report and rendered by
+  `BrokerRealismPanel.tsx`.
+- `backtest/domain/divergence.py` + `GET /backtest/reports/{id}/divergence` —
+  separates "the simulator is lying" from "the edge decayed" by *which*
+  metrics diverge, rather than averaging both into one score.
+- `backtest/adapters/decision_sink.py` — backtests now record signals through
+  `SignalDecisionSinkPort` in the Phase 2 split vocabulary instead of
+  regex-scraping their own logs, so live and backtest funnels are finally
+  comparable. `extract_signals()` remains only as a fallback for old reports.
+
+**Note:** `simulate_broker_constraints` defaults to **True**, so every
+existing backtest changes. Reports predating this carry `enabled: false`,
+which correctly describes them — they filled every order at the bar's closing
+quote and may list entries a live broker would have refused.
+
+**Bug found and fixed while verifying this phase:** `run_backtest` passed the
+simulated clock to the bookkeeper, trade engine and activity capture but
+*not* to `OrderService`. Phase 3's execution-latency measurement therefore
+subtracted a historical candle timestamp from wall-clock time, recording a
+~1.6-year latency on every backtest trade (`latency=50291226875ms` observed)
+and poisoning the Phase 3 latency analytics. Now reads `0ms`.
+
+`test_phase5_backtest_flow` pins the *nominal* R multiples `breakout_v1`'s
+`TP_RR` defines, so it runs frictionless; slippage's effect on realized R is
+covered by the Phase 4 suites instead.
+
+**Not measured:** the before/after profit-factor impact on a real M1 scalp.
+The A/B harness ran ~10 min per side and was cut short; the deliverable
+itself is test-verified, but the size of the PF drop on the live fleet is
+still unquantified. Worth doing before trusting any existing PF number.
 
 ## Phase 5 — Metrics, correlation IDs, log hygiene
 
@@ -221,6 +266,7 @@ have refused.
 | 2026-08-05 | 1 | Done, committed `a246d11`. Gates: ruff clean on touched paths; pytest 1133 passed / 1 failed; `make lint-frontend` + `make build-frontend` pass. |
 | 2026-08-05 | 3 | Done, left uncommitted for review. Gates: ruff clean on every touched path (repo-wide `src tests` still reports the same ~298 pre-existing errors, all in `strategies/generated/xauusd_snd_qm_structure_*` + `test_position_manager.py`/`test_ws.py`); pytest passes apart from the three known pre-existing failures; `make lint-frontend` + `make build-frontend` pass. Note: `alembic upgrade head` had to be run on the dev DB — Phase 1/2's migrations had never been applied either, which is what `tests/unit/test_health.py` was failing on. |
 | 2026-08-05 | 2 | Done, left uncommitted for review. Gates: ruff clean on touched paths (repo-wide ruff has ~300 pre-existing errors, all in `strategies/generated/` + two unrelated test files); pytest passes apart from the three known pre-existing failures below; `make lint-frontend` + `make build-frontend` pass. |
+| 2026-08-06 | 4 | Done, committed `5660aca`. The phase's subagent was killed by a session limit, so the work was audited, finished and gated by the orchestrator instead. Gates: ruff clean on every Phase 4 path (repo-wide `src tests` still reports the same 295 pre-existing errors in `strategies/generated/xauusd_snd_qm_structure_*`, unmodified vs HEAD); pytest 1333 passed, 1 failed — the known `risk.yaml` assertion, down from 2 because this phase fixed the `r_multiple` regression it had introduced; `make lint-frontend` + `make build-frontend` pass. Audit caught the recurring scope creep for the third time: `scalp_bollinger_reversion_v1.yaml` and `scalp_ema_cross_v1.yaml` deleted again, both restored. Committed by explicit path — a concurrent session's in-flight market-data/chart work shares `shared/api/client.ts`, so only this phase's three hunks were staged from it. |
 
 ## Known pre-existing breakage (NOT caused by this plan's work)
 
