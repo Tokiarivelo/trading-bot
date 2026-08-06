@@ -8,7 +8,7 @@ from pathlib import Path
 
 from src.ai.domain.models import RefinementConfig
 from src.ai.ports.llm import ProviderSpec
-from src.alerting.domain.models import AlertEventFlags, AlertingConfig
+from src.alerting.domain.models import AlertEventFlags, AlertingConfig, SilenceConfig
 from src.broker.domain.account import AccountConfig
 from src.broker.domain.symbol_config import SymbolTradingConfig
 from src.engine.domain.models import RiskCaps
@@ -140,6 +140,7 @@ def load_alerting_config(configs_dir: Path) -> AlertingConfig:
     telegram = data.get("telegram", {})
     email = data.get("email", {})
     events = data.get("events", {})
+    silence = data.get("silence", {})
     return AlertingConfig(
         telegram_enabled=telegram.get("enabled", False),
         email_enabled=email.get("enabled", False),
@@ -152,6 +153,13 @@ def load_alerting_config(configs_dir: Path) -> AlertingConfig:
             circuit_breaker=events.get("circuit_breaker", True),
             refinements=events.get("refinements", True),
             gateway_disconnect=events.get("gateway_disconnect", True),
+            bot_silence=events.get("bot_silence", True),
+        ),
+        silence=SilenceConfig(
+            poll_interval_s=silence.get("poll_interval_minutes", 15.0) * 60.0,
+            lookback_days=silence.get("lookback_days", 30),
+            multiplier=silence.get("multiplier", 5.0),
+            min_signals=silence.get("min_signals", 5),
         ),
     )
 

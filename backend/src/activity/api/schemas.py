@@ -17,6 +17,13 @@ class LogEntryOut(BaseModel):
         "identifies which module made the decision."
     )
     message: str = Field(description="The formatted log message, e.g. why a signal was vetoed.")
+    signal_id: str | None = Field(
+        default=None,
+        description="Correlation id (OBSERVABILITY_PLAN.md Phase 5) joining every line from "
+        "signal -> sizing -> order -> fill -> journal for one signal. `None` for lines emitted "
+        "outside any signal's processing window (health checks, candle polling, ...). Filter "
+        "`GET /activity/history?signal_id=...` by one to read that signal's whole life in order.",
+    )
 
 
 class LogHistoryPage(BaseModel):

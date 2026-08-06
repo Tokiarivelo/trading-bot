@@ -49,6 +49,13 @@ class Settings(BaseSettings):
     # session when this is set; unset means "bare local dev", no login.
     app_password: str = ""
 
+    # Log output format (OBSERVABILITY_PLAN.md Phase 5): "human" (default,
+    # the existing plain printf-style line) or "json" (one JSON object per
+    # line — timestamp/level/logger/message plus account_id/signal_id
+    # correlation fields, for log aggregation). Selectable, not a
+    # replacement — see `shared/logging/setup.py: configure_logging`.
+    log_format: str = "human"
+
     # Alerting (§12 Phase 9) — secrets only; non-secret settings (which
     # channels are on, per-event-type flags) live in configs/alerting.yaml.
     telegram_bot_token: str = ""

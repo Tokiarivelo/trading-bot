@@ -29,6 +29,7 @@ from src.broker.ports.trading import BrokerPort
 from src.market_data.ports.market_data import MarketDataPort
 from src.shared.events.bus import EventBus
 from src.shared.events.definitions import PositionClosed, PositionOpened
+from src.shared.metrics.registry import record_signal_outcome
 
 logger = logging.getLogger(__name__)
 
@@ -350,8 +351,17 @@ class OrderService:
         No-op unless this order came from a recorded signal and a sink is
         wired. `explanation` (veto/reject text) is appended to the strategy's
         own reason exactly as the legacy log-scraper merged it; a fill has
-        none, so its reason is left untouched."""
-        if signal_id is None or self._signal_decisions is None:
+        none, so its reason is left untouched.
+
+        Also increments `tradingbot_signal_outcomes_total` (OBSERVABILITY_PLAN.md
+        Phase 5) whenever this order came from a recorded signal — manual/API
+        orders (`signal_id is None`) have no signal to attribute an outcome
+        to, so they're intentionally excluded from this metric, same as they
+        already are from the decision trail itself."""
+        if signal_id is None:
+            return
+        record_signal_outcome(outcome)
+        if self._signal_decisions is None:
             return
         reason = None
         if explanation is not None and explanation not in base_reason:

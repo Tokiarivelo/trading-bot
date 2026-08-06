@@ -35,6 +35,7 @@ def _log_out(entry: LogEntry) -> LogEntryOut:
         level=entry.level,
         logger=entry.logger,
         message=entry.message,
+        signal_id=entry.signal_id,
     )
 
 
@@ -46,7 +47,9 @@ def _log_out(entry: LogEntry) -> LogEntryOut:
         "Returns a filtered, paginated page of persisted log lines from every backend "
         "module (engine decisions, broker fills, skill routing, risk vetoes, spread gate, "
         "circuit breaker) — the durable answer to 'what is the bot doing and why', beyond "
-        "what scrolls past in stdout. Newest first by default."
+        "what scrolls past in stdout. Newest first by default. Filtering by `signal_id` "
+        "(OBSERVABILITY_PLAN.md Phase 5) reads one signal's whole life in order: signal -> "
+        "sizing -> order -> fill -> journal."
     ),
 )
 async def get_history(
@@ -69,6 +72,11 @@ async def get_history(
     ),
     limit: int = Query(default=100, ge=1, le=1000, description="Page size."),
     offset: int = Query(default=0, ge=0, description="Number of matching entries to skip."),
+    signal_id: str | None = Query(
+        default=None,
+        description="Exact match on the correlation id (OBSERVABILITY_PLAN.md Phase 5) — "
+        "every log line from one signal's life, in one call.",
+    ),
 ) -> LogHistoryPage:
     entries, total = await _service(account).search(
         level=level,
@@ -78,6 +86,7 @@ async def get_history(
         created_to=created_to,
         limit=limit,
         offset=offset,
+        signal_id=signal_id,
     )
     return LogHistoryPage(items=[_log_out(e) for e in entries], total=total)
 

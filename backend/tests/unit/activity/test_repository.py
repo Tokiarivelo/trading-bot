@@ -195,3 +195,43 @@ def test_delete_by_filter_scopes_to_account_id(repository):
     assert repository.search(account_id="ftmo-1") == ([], 0)
     _, total = repository.search(account_id="ftmo-2")
     assert total == 1
+
+
+def test_search_filters_by_signal_id(repository):
+    # OBSERVABILITY_PLAN.md Phase 5: the correlation id joining every line
+    # from one signal's life — signal -> sizing -> order -> fill -> journal.
+    repository.save(
+        created_at=100,
+        level="INFO",
+        logger="src.engine.application.trade_loop",
+        message="SIGNAL: XAUUSD buy",
+        signal_id="sig-abc",
+    )
+    repository.save(
+        created_at=101,
+        level="INFO",
+        logger="src.broker.application.order_service",
+        message="ENTRY OPENED: ticket=1",
+        signal_id="sig-abc",
+    )
+    repository.save(
+        created_at=105,
+        level="INFO",
+        logger="src.engine.application.trade_loop",
+        message="SIGNAL: EURUSD sell",
+        signal_id="sig-xyz",
+    )
+
+    entries, total = repository.search(signal_id="sig-abc")
+
+    assert total == 2
+    assert {e.message for e in entries} == {"SIGNAL: XAUUSD buy", "ENTRY OPENED: ticket=1"}
+    assert all(e.signal_id == "sig-abc" for e in entries)
+
+
+def test_save_without_signal_id_leaves_it_none(repository):
+    repository.save(created_at=100, level="INFO", logger="src.engine", message="no signal here")
+
+    entries, _total = repository.search()
+
+    assert entries[0].signal_id is None

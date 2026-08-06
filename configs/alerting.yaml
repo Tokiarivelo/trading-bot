@@ -18,3 +18,15 @@ events:
   circuit_breaker: true    # engine paused (consecutive losses, daily loss limit, kill switch)
   refinements: true        # 10-trade AI review completed
   gateway_disconnect: true # MT5 gateway/terminal connectivity changes
+  bot_silence: true        # a bot fired no signal for `silence.multiplier` x its own median gap
+
+# Dead-bot detection (OBSERVABILITY_PLAN.md Phase 5): a bot that has quietly
+# stopped firing altogether otherwise looks identical to "the market's quiet
+# right now". Compares each bot's gap since its last signal against its own
+# median inter-signal interval over `lookback_days`, so a scalp bot's normal
+# cadence is never compared against a swing bot's.
+silence:
+  poll_interval_minutes: 15
+  lookback_days: 30
+  multiplier: 5.0   # gap > multiplier x median interval = "silent"
+  min_signals: 5    # fewer recorded signals than this = no baseline yet, never flagged

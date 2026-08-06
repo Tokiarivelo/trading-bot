@@ -20,8 +20,10 @@ from __future__ import annotations
 
 import os
 import shutil
+import time
 from collections.abc import Sequence
 from dataclasses import dataclass, field
+from datetime import timedelta
 from pathlib import Path
 
 import httpx
@@ -33,6 +35,7 @@ from src.activity.adapters.signal_decision_repository import SignalDecisionRepos
 from src.activity.application.activity_log_service import ActivityLogService
 from src.activity.application.retention_service import ActivityLogRetentionService
 from src.activity.application.signal_decision_service import SignalDecisionService
+from src.activity.application.silence_monitor import SilenceMonitor
 from src.ai.adapters.claude import ClaudeAdapter
 from src.ai.adapters.claude_code import ClaudeCodeAdapter
 from src.ai.adapters.gemini import GeminiAdapter
@@ -54,6 +57,7 @@ from src.alerting.adapters.email import EmailAlertAdapter
 from src.alerting.adapters.noop import NoopAlertAdapter
 from src.alerting.adapters.telegram import TelegramAlertAdapter
 from src.alerting.application.alert_service import AlertService
+from src.alerting.domain.models import SilenceConfig
 from src.alerting.ports.alert import AlertPort
 from src.broker.adapters.credential_store import FernetCredentialStore, credentials_path_for
 from src.broker.adapters.mt5_gateway import GatewayAccount, GatewayBroker
@@ -107,6 +111,7 @@ from src.shared.db.base import make_session_factory
 from src.shared.db.checkpoint import WalCheckpointService
 from src.shared.events.bus import EventBus
 from src.shared.events.definitions import (
+    BotWentSilent,
     CandleClosed,
     CircuitBreakerTripped,
     Event,
@@ -117,6 +122,7 @@ from src.shared.events.definitions import (
     RefinementCompleted,
     TenTradesCompleted,
 )
+from src.shared.metrics.registry import observe_gateway_rtt, position_closed, position_opened
 from src.skills.adapters.normal_skill_repository import NormalSkillRepository
 from src.skills.application.news_skill_selector import NewsSkillSelector
 from src.skills.application.skill_assignment import SkillAssignmentService
@@ -160,6 +166,40 @@ class _FanOutEventBus:
     async def publish(self, event: Event) -> None:
         for bus in self._buses:
             await bus.publish(event)
+
+
+def _gateway_rtt_hooks(
+    account_id: str,
+) -> dict[str, list]:
+    """`httpx.AsyncClient(event_hooks=...)` pair that times every request to
+    this account's own gateway (OBSERVABILITY_PLAN.md Phase 5's "gateway
+    RTT" metric). `account_id` is bound at construction time (closure)
+    rather than read from `current_account_id` at call time, because
+    `gateway_client` is also reachable from request-handling tasks that
+    never set that ContextVar (e.g. a manual order placed via
+    `/accounts/{account_id}/broker/orders`) — binding it here is strictly
+    more accurate than the ContextVar fallback other Phase 5 metrics use.
+    Uses `request.extensions` (httpx's documented per-request scratch dict)
+    rather than `response.elapsed`, since `elapsed` is only guaranteed set
+    once the response body is closed/read, which is later than this hook
+    needs to be correct for a streamed response.
+    """
+
+    async def on_request(request: httpx.Request) -> None:
+        request.extensions["tb_metrics_start"] = time.monotonic()
+
+    async def on_response(response: httpx.Response) -> None:
+        start = response.request.extensions.get("tb_metrics_start")
+        if start is None:
+            return
+        observe_gateway_rtt(
+            account_id=account_id,
+            method=response.request.method,
+            path=response.request.url.path,
+            seconds=time.monotonic() - start,
+        )
+
+    return {"request": [on_request], "response": [on_response]}
 
 
 def _resolve_gateway_secret(env_var: str) -> str:
@@ -231,6 +271,7 @@ class AccountRuntime:
     reconciliation: ReconciliationService
     reconciliation_poller: ReconciliationPoller
     health_monitor: GatewayHealthMonitor
+    silence_monitor: SilenceMonitor
     position_manager: PositionManager
     trade_journal: TradeJournalService
     activity_log: ActivityLogService
@@ -246,6 +287,7 @@ class AccountRuntime:
         await self.candle_stream.stop()
         await self.live_candle.stop()
         await self.health_monitor.stop()
+        await self.silence_monitor.stop()
         await self.reconciliation_poller.stop()
         await self.gateway_client.aclose()
 
@@ -566,6 +608,7 @@ def build_container(settings: Settings | None = None) -> Container:
             report_repository=report_repository,
             proposal_repository=proposal_repository,
             refinement_config=refinement_config,
+            silence_config=alerting_config.silence,
         )
         accounts[account_cfg.id] = runtime
 
@@ -576,6 +619,7 @@ def build_container(settings: Settings | None = None) -> Container:
         event_bus.subscribe(CircuitBreakerTripped, alert_service.on_circuit_breaker_tripped)
         event_bus.subscribe(RefinementCompleted, alert_service.on_refinement_completed)
         event_bus.subscribe(GatewayHealthChanged, alert_service.on_gateway_health_changed)
+        event_bus.subscribe(BotWentSilent, alert_service.on_bot_went_silent)
         event_bus.subscribe(NewsWindowEntered, runtime.trade_engine.on_news_window_entered)
 
     skill_assignment = SkillAssignmentService(
@@ -631,6 +675,7 @@ def build_account_runtime(
     report_repository: AnalysisReportRepository,
     proposal_repository: RefinementProposalRepository,
     refinement_config,
+    silence_config: SilenceConfig,
 ) -> AccountRuntime:
     """Builds one account's full, isolated trading runtime — its own gateway
     connection, event bus, journal, and strategy registry — mirroring what
@@ -644,6 +689,7 @@ def build_account_runtime(
         # 30 s: the Wine-hosted gateway can take 15-25 s on the first
         # mt5.initialize() call while the terminal completes its IPC handshake.
         timeout=30.0,
+        event_hooks=_gateway_rtt_hooks(account_id),
     )
 
     market_data = GatewayMarketData(gateway_client)
@@ -704,6 +750,18 @@ def build_account_runtime(
     # Accumulates MFE/MAE on open trades bar by bar (OBSERVABILITY_PLAN.md
     # Phase 3); the handler ignores every timeframe but M5 itself.
     event_bus.subscribe(CandleClosed, trade_journal.on_candle_closed)
+    # `tradingbot_open_positions` gauge (OBSERVABILITY_PLAN.md Phase 5) — driven
+    # off the event bus, not counted at scrape time, so it also picks up
+    # broker-side closes/opens `ReconciliationService` republishes for
+    # tickets the app didn't see change directly (see reconciliation.py).
+    async def _on_position_opened_metric(_event: PositionOpened) -> None:
+        position_opened(account_id=account_id)
+
+    async def _on_position_closed_metric(_event: PositionClosed) -> None:
+        position_closed(account_id=account_id)
+
+    event_bus.subscribe(PositionOpened, _on_position_opened_metric)
+    event_bus.subscribe(PositionClosed, _on_position_closed_metric)
 
     activity_log = ActivityLogService(
         activity_log_repository,
@@ -724,6 +782,18 @@ def build_account_runtime(
     )
     health_monitor = GatewayHealthMonitor(
         account=account, reconciliation=reconciliation, event_bus=event_bus, account_id=account_id
+    )
+    # Dead-bot silence alerting (OBSERVABILITY_PLAN.md Phase 5) — reads the
+    # same `signal_decision_repository` the decision trail/veto funnel do,
+    # scoped to this account.
+    silence_monitor = SilenceMonitor(
+        signal_decision_repository,
+        event_bus,
+        account_id=account_id,
+        poll_interval_s=silence_config.poll_interval_s,
+        lookback=timedelta(days=silence_config.lookback_days),
+        multiplier=silence_config.multiplier,
+        min_signals=silence_config.min_signals,
     )
     position_manager = PositionManager(
         order_service=order_service,
@@ -807,6 +877,7 @@ def build_account_runtime(
         reconciliation=reconciliation,
         reconciliation_poller=reconciliation_poller,
         health_monitor=health_monitor,
+        silence_monitor=silence_monitor,
         position_manager=position_manager,
         trade_journal=trade_journal,
         activity_log=activity_log,

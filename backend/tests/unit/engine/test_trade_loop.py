@@ -13,6 +13,7 @@ from src.shared.events.definitions import (
     NewsWindowEntered,
     PositionClosed,
 )
+from src.shared.logging.account_context import current_signal_id
 from src.skills.ports.skill_selector import SkillDecision
 from src.strategies.domain.models import Direction, MarketContext, Signal, StrategySpec
 
@@ -162,6 +163,11 @@ class FakeOrderService:
         self.closed: list[int] = []
         self.signal_ids: list[str | None] = []
         self.signal_emit_times: list = []
+        # What `current_signal_id.get()` reads *inside* this call — proves
+        # the correlation id (OBSERVABILITY_PLAN.md Phase 5) is actually
+        # bound by the time the engine reaches the order service, not just
+        # passed as the `signal_id=` parameter alongside it.
+        self.signal_id_in_context: list[str | None] = []
         self._raise_on_open = raise_on_open
 
     async def get_positions(self, symbol=None):
@@ -195,6 +201,7 @@ class FakeOrderService:
     ):
         self.signal_ids.append(signal_id)
         self.signal_emit_times.append(signal_emitted_at)
+        self.signal_id_in_context.append(current_signal_id.get())
         if self._raise_on_open:
             raise self._raise_on_open
         ticket = len(self.opened) + 1

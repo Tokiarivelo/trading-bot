@@ -137,3 +137,18 @@ class GatewayHealthChanged(Event):
 
     gateway_up: bool
     terminal_connected: bool
+
+
+@dataclass(frozen=True, kw_only=True)
+class BotWentSilent(Event):
+    """Emitted by `SilenceMonitor` (OBSERVABILITY_PLAN.md Phase 5) when a
+    bot's gap since its last signal exceeds `multiplier` times its own
+    median inter-signal interval — a dead bot otherwise looks identical to a
+    quiet market. Alerting subscribes to this."""
+
+    bot: str
+    """Full skill id, e.g. 'normal/xauusd/breakout_v1'."""
+    elapsed_s: float
+    median_interval_s: float
+    threshold_s: float
+    last_signal_at: datetime | None

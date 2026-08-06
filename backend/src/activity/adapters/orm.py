@@ -18,6 +18,13 @@ class LogRow(Base):
     level: Mapped[str] = mapped_column(String(10), index=True)
     logger: Mapped[str] = mapped_column(String(128), index=True)
     message: Mapped[str] = mapped_column(Text)
+    signal_id: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    """Correlation id (OBSERVABILITY_PLAN.md Phase 5) — set on every log line
+    emitted while `shared.logging.account_context.current_signal_id` is bound
+    (see `TradeEngine._try_enter`), `None` for lines outside a signal's
+    processing window (most of them: health checks, candle polling, ...).
+    `GET /activity/history?signal_id=...` filters on this to read one
+    signal's whole life in order."""
 
 
 class SignalDecisionRow(Base):

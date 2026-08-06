@@ -51,6 +51,12 @@ from src.shared.events.definitions import (
     NewsWindowEntered,
     PositionClosed,
 )
+from src.shared.logging.account_context import bind_signal_id, current_account_id
+from src.shared.metrics.registry import (
+    ENGINE_LOOP_DURATION,
+    observe_signal_fired,
+    record_signal_outcome,
+)
 from src.skills.ports.skill_selector import SkillDecision, SkillSelectorPort
 from src.strategies.domain.models import Direction, MarketContext, Signal, Strategy
 
@@ -203,11 +209,19 @@ class TradeEngine:
         logger.info("trade engine: volatility guard enabled=%s", enabled)
 
     async def on_candle_closed(self, event: CandleClosed) -> None:
-        if event.timeframe == self._entry_timeframe:
-            await self._position_manager.on_candle_closed(event.symbol)
-        if not self._enabled:
-            return
-        await self._try_enter(event.symbol, event.timeframe)
+        # Engine-loop-duration metric (OBSERVABILITY_PLAN.md Phase 5): the
+        # whole per-candle pass, position management included, since that's
+        # what "is the engine keeping up with candles" actually needs to
+        # measure. Labeled from the ContextVar rather than a constructor
+        # param — this method always runs inside the account's own
+        # `CandleStreamService._run` task, which sets it (see
+        # `shared/logging/account_context.py`).
+        with ENGINE_LOOP_DURATION.labels(account_id=current_account_id.get()).time():
+            if event.timeframe == self._entry_timeframe:
+                await self._position_manager.on_candle_closed(event.symbol)
+            if not self._enabled:
+                return
+            await self._try_enter(event.symbol, event.timeframe)
 
     async def on_position_closed(self, event: PositionClosed) -> None:
         balance = await self._current_balance()
@@ -270,7 +284,14 @@ class TradeEngine:
         decisions = self._skill_selector.select_all(symbol, now)
         if not decisions:
             if timeframe == self._entry_timeframe:
-                logger.info("ENTRY BLOCKED (skill routing): %s — no active bots", symbol)
+                # DEBUG, not INFO (OBSERVABILITY_PLAN.md Phase 5 log hygiene):
+                # this is structural ("nothing is configured to trade this
+                # symbol at all"), not a decision — it repeats every single
+                # entry-timeframe candle close for as long as the symbol has
+                # no bot, which for an idle symbol is forever. Contrast the
+                # `decision.allowed is False` branch below, which is a real
+                # per-attempt veto (news window, paused skill) and stays INFO.
+                logger.debug("ENTRY SKIPPED (skill routing): %s — no active bots", symbol)
             return
 
         candidates: list[tuple[SkillDecision, Strategy]] = []
@@ -355,7 +376,20 @@ class TradeEngine:
 
         ctx = self._context_builder(symbol, candles_by_tf, info.spread_points)
         for decision, strategy in candidates:
-            balance = await self._enter_for_bot(symbol, decision, strategy, ctx, info, now, balance)
+            # Minted per candidate, before `_enter_for_bot` knows whether it
+            # will actually emit a signal (OBSERVABILITY_PLAN.md Phase 5):
+            # `bind_signal_id` has to be active before the `SIGNAL:` log line
+            # inside `_enter_for_bot` runs, or that line wouldn't carry it.
+            # Harmless when the candidate emits nothing — the id is simply
+            # never referenced or persisted. Scoped to exactly this call (not
+            # the whole `_try_enter` pass) so it can never leak onto the next
+            # candidate or, via `on_candle_closed`'s outer span, the next
+            # candle's position-management pass.
+            signal_id = uuid.uuid4().hex
+            with bind_signal_id(signal_id):
+                balance = await self._enter_for_bot(
+                    symbol, decision, strategy, ctx, info, now, balance, signal_id
+                )
 
     async def _record_decision(
         self,
@@ -397,7 +431,15 @@ class TradeEngine:
         log-scraper did (` — <explanation>`), so the chart's tooltip text is
         unchanged by the move off log parsing. `checks` are the structured
         numbers the failing gate saw (Phase 2), appended to whatever earlier
-        gates already recorded."""
+        gates already recorded.
+
+        Also increments the `tradingbot_signal_outcomes_total` metric
+        (OBSERVABILITY_PLAN.md Phase 5) in the same closed vocabulary the
+        veto funnel uses (`SIGNAL_OUTCOMES`), independent of whether a
+        decision-trail sink is wired — a unit test building a bare
+        `TradeEngine` still gets accurate metrics even with
+        `signal_decisions=None`."""
+        record_signal_outcome(outcome)
         if self._signal_decisions is None:
             return
         reason = base_reason if explanation in base_reason else f"{base_reason} — {explanation}"
@@ -422,6 +464,7 @@ class TradeEngine:
         info: SymbolInfo,
         now: datetime,
         balance: float | None,
+        signal_id: str,
     ) -> float | None:
         # Fetched fresh per bot (not hoisted above the candidates loop) so a
         # bot later in this same candle sees the position(s) an earlier bot
@@ -458,10 +501,12 @@ class TradeEngine:
             decision.skill_name,
             first_signal.reason,
         )
+        observe_signal_fired(bot=decision.skill_name, symbol=symbol)
         # Recorded before any gate runs, so a signal that is immediately
         # vetoed still exists in the trail with outcome="skipped" until its
-        # terminal outcome lands below.
-        signal_id = uuid.uuid4().hex
+        # terminal outcome lands below. `signal_id` was minted by the caller
+        # (`_try_enter`), before this method ran, so `bind_signal_id` there
+        # is already active and this log line above carries it too.
         await self._record_decision(
             signal_id=signal_id,
             decision=decision,

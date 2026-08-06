@@ -20,7 +20,8 @@ import logging
 from contextlib import asynccontextmanager
 
 import socketio
-from fastapi import Depends, FastAPI
+from fastapi import Depends, FastAPI, Response
+from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from pydantic import BaseModel, Field
 
 from src.activity.api.routes import router as activity_router
@@ -47,6 +48,7 @@ from src.shared.auth.api.routes import router as auth_router
 from src.shared.auth.dependencies import require_session
 from src.shared.config.settings import Settings, load_yaml_config
 from src.shared.logging.setup import configure_logging
+from src.shared.metrics.registry import REGISTRY, set_open_positions, set_ws_client_source
 from src.skills.api.routes import router as skills_router
 from src.strategies.api.routes import router as strategies_router
 from src.strategies.api.routes import sandbox_router as strategies_sandbox_router
@@ -191,13 +193,22 @@ OPENAPI_TAGS = [
         "matched news skill's `pre_event.close_all` requests it "
         "(`backend/src/skills/news/*.yaml`); this API only reports that state for the UI.",
     },
+    {
+        "name": "observability",
+        "description": "`GET /metrics` — Prometheus exposition of engine loop duration, gateway "
+        "RTT, signals/min, veto counts by reason, open positions, and WS client count "
+        "(OBSERVABILITY_PLAN.md Phase 5). Process-wide like `/health`, not per-account, and "
+        "unauthenticated for the same reason `/health` is: a scraper has no session token.",
+    },
 ]
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = Settings()
-    log_listener = configure_logging(database_url=settings.database_url)
+    log_listener = configure_logging(
+        database_url=settings.database_url, log_format=settings.log_format
+    )
     container = build_container(settings)
     app.state.container = container
     # One candle-stream/live-candle binding per enabled account (Phase 8 of
@@ -208,6 +219,10 @@ async def lifespan(app: FastAPI):
         bind_candle_stream(account_id, runtime.candle_stream)
         bind_live_candle(account_id, runtime.live_candle)
     bind_auth(container.session_issuer, lambda: container.settings.app_password)
+    # `tradingbot_ws_clients_connected` (OBSERVABILITY_PLAN.md Phase 5):
+    # sampled at scrape time from the underlying engine.io transport socket
+    # count, read-only — see src.shared.metrics.registry.set_ws_client_source.
+    set_ws_client_source(lambda: len(sio.eio.sockets))
     for runtime in container.accounts.values():
         # Reconnect with stored credentials if the gateway is already up,
         # then start the candle streams — they idle harmlessly until login
@@ -239,9 +254,19 @@ async def lifespan(app: FastAPI):
             logger.info(
                 "account=%s: startup gap reconciliation backfilled: %s", runtime.id, reconciled
             )
+        # Seeds `tradingbot_open_positions` from the ground truth right after
+        # startup reconciliation above, so a backend restart doesn't report
+        # zero open positions until the next fill/close event — best-effort,
+        # since the gateway may still be down for this account.
+        try:
+            open_positions = await runtime.order_service.get_positions()
+            set_open_positions(account_id=runtime.id, count=len(open_positions))
+        except Exception:
+            logger.warning("account=%s: could not seed open-positions gauge at startup", runtime.id)
         runtime.candle_stream.start()
         runtime.live_candle.start()
         runtime.health_monitor.start()
+        runtime.silence_monitor.start()
         runtime.reconciliation_poller.start()
     container.news_window_service.start()
     container.activity_log_retention_service.start()
@@ -311,6 +336,44 @@ class AppConfigOut(BaseModel):
 )
 async def health() -> HealthOut:
     return HealthOut(status="ok")
+
+
+@app.get(
+    "/metrics",
+    tags=["observability"],
+    summary="Prometheus metrics",
+    description=(
+        "Prometheus text-exposition-format scrape endpoint (OBSERVABILITY_PLAN.md Phase 5): "
+        "`tradingbot_engine_loop_duration_seconds`, `tradingbot_gateway_request_duration_seconds`, "
+        "`tradingbot_signals_total` (rate this for signals/min), "
+        "`tradingbot_signal_outcomes_total` (labeled `outcome`, the same closed vocabulary as `GET "
+        "/accounts/{account_id}/activity/signals/funnel`), `tradingbot_open_positions`, and "
+        "`tradingbot_ws_clients_connected`. Unauthenticated, like `/health` — a Prometheus "
+        "scraper has no session token to send, and this endpoint carries no secrets or "
+        "trading data, only counts/durations."
+    ),
+    # `response_model=None`: Prometheus's text exposition format
+    # (`prometheus_client.CONTENT_TYPE_LATEST`, currently `text/plain;
+    # version=1.0.0`) is a line-oriented metrics format, not JSON — a
+    # Pydantic model can't describe it, so this returns a plain `Response`
+    # with the exposition media type and documents the shape in prose above
+    # instead. `response_class=Response` matters here too, separately from
+    # `response_model`: FastAPI's OpenAPI generator derives its *default*
+    # 200 content-type from the route's `response_class` (defaulting to
+    # `JSONResponse` if left unset), regardless of the function's return
+    # annotation — leaving it unset would silently merge a spurious
+    # empty-schema `application/json` entry alongside the real one below.
+    response_model=None,
+    response_class=Response,
+    responses={
+        200: {
+            "description": "Prometheus text exposition format.",
+            "content": {CONTENT_TYPE_LATEST: {"schema": {"type": "string"}}},
+        }
+    },
+)
+async def metrics() -> Response:
+    return Response(content=generate_latest(REGISTRY), media_type=CONTENT_TYPE_LATEST)
 
 
 @app.get(

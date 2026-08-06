@@ -21,6 +21,7 @@ def _build_filters(
     q: str | None,
     created_from: int | None,
     created_to: int | None,
+    signal_id: str | None = None,
 ) -> list[ColumnElement]:
     filters: list[ColumnElement] = [LogRow.account_id == account_id]
     if level is not None:
@@ -33,6 +34,8 @@ def _build_filters(
         filters.append(LogRow.created_at >= created_from)
     if created_to is not None:
         filters.append(LogRow.created_at <= created_to)
+    if signal_id is not None:
+        filters.append(LogRow.signal_id == signal_id)
     return filters
 
 
@@ -48,6 +51,7 @@ class ActivityLogRepository:
         logger: str,
         message: str,
         account_id: str = "default",
+        signal_id: str | None = None,
     ) -> None:
         with self._session_factory() as session:
             session.add(
@@ -57,6 +61,7 @@ class ActivityLogRepository:
                     level=level,
                     logger=logger,
                     message=message,
+                    signal_id=signal_id,
                 )
             )
             session.commit()
@@ -72,8 +77,12 @@ class ActivityLogRepository:
         limit: int = 100,
         offset: int = 0,
         account_id: str = "default",
+        signal_id: str | None = None,
     ) -> tuple[list[LogEntry], int]:
-        """Filterable, paginated log history query — backs `GET /activity/history`."""
+        """Filterable, paginated log history query — backs `GET /activity/history`.
+        `signal_id` (OBSERVABILITY_PLAN.md Phase 5) narrows to one signal's
+        whole life — signal -> sizing -> order -> fill -> journal — the
+        concrete way to read what the correlation id joins up."""
         filters = _build_filters(
             account_id=account_id,
             level=level,
@@ -81,6 +90,7 @@ class ActivityLogRepository:
             q=q,
             created_from=created_from,
             created_to=created_to,
+            signal_id=signal_id,
         )
 
         count_query = select(func.count()).select_from(LogRow).where(*filters)
@@ -151,4 +161,5 @@ def _to_domain(row: LogRow) -> LogEntry:
         level=row.level,
         logger=row.logger,
         message=row.message,
+        signal_id=row.signal_id,
     )

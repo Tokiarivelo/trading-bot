@@ -140,6 +140,7 @@ class ActivityLogService:
         created_to: int | None = None,
         limit: int = 100,
         offset: int = 0,
+        signal_id: str | None = None,
     ) -> tuple[list[LogEntry], int]:
         return await asyncio.to_thread(
             self._repository.search,
@@ -151,6 +152,7 @@ class ActivityLogService:
             limit=limit,
             offset=offset,
             account_id=self._account_id,
+            signal_id=signal_id,
         )
 
     async def delete_by_ids(self, ids: list[int]) -> int:

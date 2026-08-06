@@ -2,6 +2,7 @@ from src.alerting.adapters.composite import CompositeAlertAdapter
 from src.alerting.application.alert_service import AlertService
 from src.alerting.domain.models import AlertEventFlags, AlertingConfig, AlertMessage
 from src.shared.events.definitions import (
+    BotWentSilent,
     CircuitBreakerTripped,
     GatewayHealthChanged,
     PositionClosed,
@@ -91,6 +92,42 @@ async def test_gateway_health_changed_sends_alert_on_disconnect():
 
     assert len(port.sent) == 1
     assert port.sent[0].level.value == "critical"
+
+
+async def test_bot_went_silent_sends_warning_alert_when_enabled():
+    port = FakeAlertPort()
+    service = AlertService(port=port, config=_config(bot_silence=True))
+
+    await service.on_bot_went_silent(
+        BotWentSilent(
+            bot="normal/xauusd/breakout_v1",
+            elapsed_s=3600.0,
+            median_interval_s=600.0,
+            threshold_s=3000.0,
+            last_signal_at=None,
+        )
+    )
+
+    assert len(port.sent) == 1
+    assert "normal/xauusd/breakout_v1" in port.sent[0].title
+    assert port.sent[0].level.value == "warning"
+
+
+async def test_bot_went_silent_skipped_when_disabled():
+    port = FakeAlertPort()
+    service = AlertService(port=port, config=_config(bot_silence=False))
+
+    await service.on_bot_went_silent(
+        BotWentSilent(
+            bot="normal/xauusd/breakout_v1",
+            elapsed_s=3600.0,
+            median_interval_s=600.0,
+            threshold_s=3000.0,
+            last_signal_at=None,
+        )
+    )
+
+    assert port.sent == []
 
 
 async def test_composite_adapter_isolates_one_failing_channel_from_another():

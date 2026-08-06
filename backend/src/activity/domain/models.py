@@ -18,6 +18,10 @@ class LogEntry:
     level: str
     logger: str
     message: str
+    signal_id: str | None = None
+    """Correlation id (OBSERVABILITY_PLAN.md Phase 5) — the signal this line
+    was emitted while processing, `None` for lines outside any signal's
+    processing window. See `shared/logging/account_context.py`."""
 
 
 @dataclass(frozen=True, kw_only=True)

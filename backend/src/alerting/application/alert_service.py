@@ -8,6 +8,7 @@ from __future__ import annotations
 from src.alerting.domain.models import AlertingConfig, AlertLevel, AlertMessage
 from src.alerting.ports.alert import AlertPort
 from src.shared.events.definitions import (
+    BotWentSilent,
     CircuitBreakerTripped,
     GatewayHealthChanged,
     PositionClosed,
@@ -75,3 +76,18 @@ class AlertService:
             await self._port.send(
                 AlertMessage(title="Gateway disconnected", body=body, level=AlertLevel.CRITICAL)
             )
+
+    async def on_bot_went_silent(self, event: BotWentSilent) -> None:
+        if not self._config.events.bot_silence:
+            return
+        await self._port.send(
+            AlertMessage(
+                title=f"Bot silent: {event.bot}",
+                body=(
+                    f"No signal for {event.elapsed_s / 60:.0f} min "
+                    f"(median interval {event.median_interval_s / 60:.0f} min, "
+                    f"threshold {event.threshold_s / 60:.0f} min)"
+                ),
+                level=AlertLevel.WARNING,
+            )
+        )

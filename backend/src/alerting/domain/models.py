@@ -30,6 +30,22 @@ class AlertEventFlags:
     circuit_breaker: bool = True
     refinements: bool = True
     gateway_disconnect: bool = True
+    bot_silence: bool = True
+    """A bot fired no signal for N times its own median inter-signal
+    interval (OBSERVABILITY_PLAN.md Phase 5) — see `SilenceConfig` below."""
+
+
+@dataclass(frozen=True, kw_only=True)
+class SilenceConfig:
+    """Tuning for `activity.application.silence_monitor.SilenceMonitor`
+    (OBSERVABILITY_PLAN.md Phase 5) — how aggressively "no signal in a
+    while" is treated as "this bot is dead" rather than "the market's quiet
+    right now"."""
+
+    poll_interval_s: float = 900.0
+    lookback_days: int = 30
+    multiplier: float = 5.0
+    min_signals: int = 5
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -41,3 +57,4 @@ class AlertingConfig:
     from_address: str = ""
     to_address: str = ""
     events: AlertEventFlags = AlertEventFlags()
+    silence: SilenceConfig = SilenceConfig()

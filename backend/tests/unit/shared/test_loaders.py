@@ -1,7 +1,9 @@
+from src.alerting.domain.models import AlertingConfig
 from src.broker.domain.account import AccountConfig
 from src.engine.domain.volatility import VolatilityConfig
 from src.shared.config.loaders import (
     load_accounts_config,
+    load_alerting_config,
     load_maintenance_config,
     load_volatility_config,
 )
@@ -55,3 +57,15 @@ def test_load_volatility_config_returns_typed_config_with_expected_defaults():
     assert config.extreme_profit_lock_r_mult == 0.5
     assert config.chandelier_atr_mult == 2.0
     assert config.chandelier_min_profit_r == 1.0
+
+
+def test_load_alerting_config_includes_silence_tuning():
+    # OBSERVABILITY_PLAN.md Phase 5: configs/alerting.yaml's `silence:`
+    # section, alongside the existing `events.bot_silence` flag.
+    config = load_alerting_config(CONFIGS_DIR)
+    assert isinstance(config, AlertingConfig)
+    assert config.events.bot_silence is True
+    assert config.silence.poll_interval_s == 15 * 60.0
+    assert config.silence.lookback_days == 30
+    assert config.silence.multiplier == 5.0
+    assert config.silence.min_signals == 5

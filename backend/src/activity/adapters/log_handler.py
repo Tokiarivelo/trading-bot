@@ -14,7 +14,7 @@ import logging.handlers
 import queue
 
 from src.activity.adapters.repository import ActivityLogRepository
-from src.shared.logging.account_context import current_account_id
+from src.shared.logging.context_filter import ContextFilter
 
 
 class _DBLogHandler(logging.Handler):
@@ -29,7 +29,17 @@ class _DBLogHandler(logging.Handler):
                 level=record.levelname,
                 logger=record.name,
                 message=self.format(record),
-                account_id=current_account_id.get(),
+                # `account_id`/`signal_id` are read off the record, not the
+                # ContextVars directly: this handler's `emit` runs on
+                # `QueueListener`'s own background thread (see module
+                # docstring below on `attach_activity_log_handler`), which
+                # does not inherit the producing asyncio task's
+                # `contextvars.Context` — the values have to be captured
+                # upstream, on the producing thread, by `ContextFilter`
+                # (attached to `queue_handler` below) before the record is
+                # enqueued, and ride along on the record itself from there.
+                account_id=getattr(record, "account_id", "default"),
+                signal_id=getattr(record, "signal_id", None),
             )
         except Exception:
             self.handleError(record)
@@ -40,10 +50,22 @@ def attach_activity_log_handler(
 ) -> logging.handlers.QueueListener:
     """Attaches a queued DB-backed handler to the `"src"` logger and starts its
     listener thread. Returns the listener so the caller can `.stop()` it on
-    shutdown."""
+    shutdown.
+
+    `ContextFilter` is attached to `queue_handler`, not `db_handler`: filters
+    on a `Handler` run when that handler's `.handle()` is called, and
+    `queue_handler.handle()` runs synchronously on the thread/task that made
+    the `logger.info(...)` call, before the record is queued — exactly where
+    `current_account_id`/`current_signal_id` (`shared/logging/
+    account_context.py`) hold the right values. A filter on `db_handler`
+    instead would run too late, on the listener thread, where those
+    ContextVars have already reset to their defaults (see
+    `shared/logging/context_filter.py`'s docstring for why).
+    """
     log_queue: queue.SimpleQueue = queue.SimpleQueue()
     queue_handler = logging.handlers.QueueHandler(log_queue)
     queue_handler.setLevel(level)
+    queue_handler.addFilter(ContextFilter())
 
     db_handler = _DBLogHandler(repository)
     db_handler.setLevel(level)
