@@ -684,6 +684,48 @@ export const getSignalFunnel = (
   );
 };
 
+/** How many entries the simulated broker refused for one reason. A rejection
+ * is a signal the strategy produced, the risk manager sized and the spread
+ * gate cleared — that a real broker would then have thrown away. */
+export interface BacktestRejection {
+  /** 'stops_level' (SL/TP closer to price than the symbol's minimum
+   * distance), 'volume_below_min' or 'volume_above_max'. */
+  reason: string;
+  count: number;
+  /** The MT5 code a live server would have returned — 10016 invalid stops,
+   * 10014 invalid volume. */
+  retcode: number;
+  /** The first refusal's message, with the concrete distances/lot sizes. */
+  example: string;
+}
+
+/** Which broker constraints a backtest run simulated, and what they cost
+ * (OBSERVABILITY_PLAN.md Phase 4). Reports written before this existed report
+ * `enabled: false`, which correctly describes them: they filled every order
+ * at the bar's closing quote, so their trade list may include entries a live
+ * broker would have refused. */
+export interface BrokerRealism {
+  enabled: boolean;
+  stops_level_enforced: boolean;
+  volume_grid_enforced: boolean;
+  /** Research mode: a too-close SL/TP was widened to the broker minimum
+   * rather than the entry being refused, so those trades risked more than
+   * the risk manager sized them for. */
+  clamp_stops: boolean;
+  spread_widening_factor: number;
+  /** Price units, positive = the fill cost the trader. */
+  slippage_mean: number;
+  slippage_stddev: number;
+  /** 'live' — calibrated from real measured fills; 'fallback' — not enough
+   * live fills yet, so these numbers are a documented guess; 'none'. */
+  slippage_source: "live" | "fallback" | "none" | string;
+  slippage_sample_count: number;
+  accepted_count: number;
+  clamped_count: number;
+  rejected_count: number;
+  rejections: BacktestRejection[];
+}
+
 export interface BacktestReportSummary {
   id: string;
   strategy: string;
@@ -716,6 +758,9 @@ export interface BacktestReportSummary {
   consecutive_loss_pause: number;
   min_lot_fallback_enabled: boolean;
   max_risk_per_trade_pct: number | null;
+  /** Broker constraints simulated for this run and how many entries they
+   * refused. Reports predating it report `enabled: false`. */
+  broker_realism: BrokerRealism;
 }
 
 export interface BacktestReportDetail extends BacktestReportSummary {
@@ -749,6 +794,54 @@ export const deleteBacktestReport = (id: string) =>
  * overwrites an existing report. */
 export const importBacktestReport = (body: BacktestReportDetail) =>
   api.post<BacktestReportSummary>("/backtest/reports/import", body);
+
+/** One measurement compared between live trading and a backtest. */
+export interface DivergenceMetric {
+  /** 'fill_rate' | 'avg_slippage' | 'win_rate' | 'avg_profit' | 'avg_r' | 'avg_volume' */
+  name: string;
+  /** 'execution' — how the order was filled; 'outcome' — what it then earned.
+   * Execution metrics diverging points at the simulator, outcome metrics
+   * alone at the strategy. */
+  kind: "execution" | "outcome" | string;
+  live_value: number | null;
+  backtest_value: number | null;
+  /** live_value - backtest_value. */
+  delta: number | null;
+  /** delta / |backtest_value|. Null when the backtest value is 0 or missing. */
+  relative_delta: number | null;
+  significant: boolean;
+  live_sample_count: number;
+  backtest_sample_count: number;
+  note: string;
+}
+
+/** Live-vs-backtest comparison for one strategy on one symbol — is the
+ * simulator lying about fills, or has the edge decayed? */
+export interface DivergenceReport {
+  strategy: string;
+  symbol: string;
+  report_id: string;
+  live_trade_count: number;
+  backtest_trade_count: number;
+  /** False when either side has too few trades for the comparison to mean
+   * anything; the metrics are still returned, but draw no conclusion. */
+  comparable: boolean;
+  verdict:
+    | "aligned"
+    | "simulator_optimistic"
+    | "edge_decayed"
+    | "both"
+    | "insufficient_data"
+    | string;
+  summary: string;
+  metrics: DivergenceMetric[];
+}
+
+/** Compares every closed live trade journalled for this report's strategy and
+ * symbol against the report's own trades. Read-only, computed on demand. */
+export const getBacktestDivergence = (id: string) =>
+  api.get<DivergenceReport>(`/backtest/reports/${encodeURIComponent(id)}/divergence`);
+
 
 // ── Backtest bots + on-demand run ─────────────────────────────────────────────
 

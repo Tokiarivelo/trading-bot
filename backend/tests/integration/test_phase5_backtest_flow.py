@@ -109,8 +109,18 @@ async def test_backtest_closes_one_trade_via_tp_and_one_via_sl(database_url, mon
         "src.backtest.application.run_backtest.load_volatility_config",
         lambda configs_dir: VolatilityConfig(atr_period=999),
     )
+    # Frictionless fills: this test pins the *nominal* R multiples (2.2 / -1.0)
+    # that breakout_v1's TP_RR and stop define. Broker-constraint simulation
+    # (OBSERVABILITY_PLAN.md Phase 4, on by default) slips the entry off the
+    # requested price, so realized R lands near but not on those numbers —
+    # correct behaviour, covered by tests/unit/backtest/ and
+    # tests/integration/test_phase4_backtest_realism.py rather than here.
     report = await run_backtest(
-        "breakout_v1", "XAUUSD", "2025-01:2025-01", database_url=database_url
+        "breakout_v1",
+        "XAUUSD",
+        "2025-01:2025-01",
+        database_url=database_url,
+        simulate_broker_constraints=False,
     )
 
     assert len(report.trades) == 2

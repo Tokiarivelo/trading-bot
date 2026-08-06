@@ -6,6 +6,8 @@ import { ActivityLogTable } from "@/features/logs/ActivityLogTable";
 import { getBacktestReport, type BacktestReportDetail as ReportDetail } from "@/shared/api/client";
 import { downloadJson } from "@/shared/utils/download";
 import { BacktestStrategyEditor } from "./BacktestStrategyEditor";
+import { BrokerRealismPanel } from "./BrokerRealismPanel";
+import { DivergencePanel } from "./DivergencePanel";
 import { EquityChart } from "./EquityChart";
 import { SIGNAL_OUTCOME_META } from "./signalOutcome";
 import { StatTile } from "./StatTile";
@@ -78,6 +80,10 @@ export function BacktestReportDetail({ reportId }: { reportId: string }) {
         </header>
         <EquityChart points={report.equity_curve} />
       </section>
+
+      <BrokerRealismPanel realism={report.broker_realism} />
+
+      <DivergencePanel reportId={report.id} />
 
       <BacktestStrategyEditor
         strategyName={report.strategy}

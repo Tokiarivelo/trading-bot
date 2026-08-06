@@ -114,13 +114,119 @@ class BacktestSignalOut(BaseModel):
     )
     direction: str = Field(description="'buy' or 'sell'.")
     outcome: str = Field(
-        description="What the engine did with it: 'opened' (became a trade), "
-        "'htf_veto' (higher-timeframe trend opposed it), 'risk_rejected' (position "
-        "sizing failed the risk caps), 'spread_veto' (spread/RR gate), or 'skipped'."
+        description="What the engine did with it, from the same closed vocabulary the "
+        "live decision trail uses: 'opened' (became a trade), 'htf_veto' (higher-timeframe "
+        "trend opposed it), 'volatility_guard', 'max_positions', 'risk_sizing', "
+        "'spread_veto', 'rr_gate', 'broker_rejected' (the broker refused the order — e.g. "
+        "stops closer than the symbol's stops_level), 'daily_loss_breaker', or 'skipped'. "
+        "Reports written before backtests recorded structured decisions instead collapse "
+        "every risk block into the legacy 'risk_rejected' value."
     )
     reason: str = Field(
         description="The strategy's own reason string — pattern matched, zone rectangle, "
         "entry/SL/TP lines, confirmations."
+    )
+    price: float | None = Field(
+        default=None,
+        description="Reference price the engine saw when the signal fired — ask for a buy, "
+        "bid for a sell. Null in reports produced before the backtest recorded structured "
+        "decisions, which never captured it.",
+    )
+
+
+class BacktestRejectionOut(BaseModel):
+    """How many entries the simulated broker refused for one reason, and why.
+
+    A rejection is a signal the strategy produced, the risk manager sized and
+    the spread gate cleared — that a real broker would then have thrown away.
+    A large count here means the backtest's headline numbers describe trades
+    that could never have been placed."""
+
+    reason: str = Field(
+        description="Which broker rule refused it: 'stops_level' (SL or TP closer to price "
+        "than the symbol's minimum distance), 'volume_below_min' or 'volume_above_max' "
+        "(lot size off the broker's volume grid)."
+    )
+    count: int = Field(description="Number of entries refused for this reason during the run.")
+    retcode: int = Field(
+        description="The MT5 return code a live server would have produced — 10016 for "
+        "invalid stops, 10014 for an invalid volume."
+    )
+    example: str = Field(
+        description="The first refusal's own message, including the concrete distances or "
+        "lot sizes involved, so the count is actionable."
+    )
+
+
+class BrokerRealismOut(BaseModel):
+    """Which broker constraints the run simulated, and what they cost.
+
+    Backtests before this existed filled every order at the bar's closing
+    quote in exactly the requested lot size, which is why an M1 scalp whose
+    stops sat inside the symbol's `stops_level` could report a profitable
+    equity curve while every live order was refused with retcode 10016."""
+
+    enabled: bool = Field(
+        default=False,
+        description="Whether broker constraints were simulated at all. False for reports "
+        "written before this feature existed and for runs that explicitly disabled it — "
+        "their trade lists may include entries a live broker would have refused.",
+    )
+    stops_level_enforced: bool = Field(
+        default=False,
+        description="Whether entries with an SL/TP closer to price than the symbol's "
+        "stops_level were refused.",
+    )
+    volume_grid_enforced: bool = Field(
+        default=False,
+        description="Whether lot sizes were rounded down to volume_step and refused when "
+        "outside volume_min..volume_max.",
+    )
+    clamp_stops: bool = Field(
+        default=False,
+        description="Research mode: a too-close SL/TP was widened to the broker minimum "
+        "instead of the entry being refused. True means the reported trades risked more "
+        "than the risk manager sized them for, so their R multiples are not comparable "
+        "with a normal run's.",
+    )
+    spread_widening_factor: float = Field(
+        default=1.0,
+        description="Multiplier applied to each bar's recorded closing spread, since real "
+        "entries do not happen at the close. 1.0 means the historical spread was used "
+        "as-is.",
+    )
+    slippage_mean: float = Field(
+        default=0.0,
+        description="Mean slippage applied per fill, in price units, positive = it cost "
+        "the trader.",
+    )
+    slippage_stddev: float = Field(
+        default=0.0, description="Standard deviation of the slippage distribution, in price units."
+    )
+    slippage_source: str = Field(
+        default="none",
+        description="'live' — calibrated from real measured fills on this symbol; "
+        "'fallback' — not enough live fills yet, so a documented pessimistic default was "
+        "used and these numbers are a guess; 'none' — no slippage was simulated.",
+    )
+    slippage_sample_count: int = Field(
+        default=0,
+        description="How many real measured fills the slippage model was calibrated from.",
+    )
+    accepted_count: int = Field(
+        default=0, description="Entries the simulated broker filled."
+    )
+    clamped_count: int = Field(
+        default=0,
+        description="Entries whose SL/TP was widened to the broker minimum rather than "
+        "refused. Always 0 unless clamp_stops is true.",
+    )
+    rejected_count: int = Field(
+        default=0, description="Entries the simulated broker refused, across all reasons."
+    )
+    rejections: list[BacktestRejectionOut] = Field(
+        default_factory=list,
+        description="Per-reason breakdown of the refusals, most frequent first.",
     )
 
 
@@ -190,6 +296,13 @@ class BacktestReportSummaryOut(BaseModel):
         "run. Only matters when min_lot_fallback_enabled is true. Null means the fallback "
         "(when enabled) used risk_per_trade_pct itself as the ceiling.",
     )
+    broker_realism: BrokerRealismOut = Field(
+        default_factory=BrokerRealismOut,
+        description="Which broker constraints (stops_level, lot grid, spread widening, "
+        "slippage) this run simulated and how many entries they refused. Reports predating "
+        "this field report enabled=false, which correctly describes them: they simulated "
+        "nothing and may show trades a live broker would have refused.",
+    )
 
 
 class BacktestReportDetailOut(BacktestReportSummaryOut):
@@ -247,3 +360,66 @@ class BacktestReportListOut(BaseModel):
     total: int = Field(description="Total number of saved report files, across all pages.")
     limit: int = Field(description="Page size that was applied.")
     offset: int = Field(description="Number of newest reports skipped before this page.")
+
+
+class DivergenceMetricOut(BaseModel):
+    """One measurement compared between live trading and a backtest."""
+
+    name: str = Field(
+        description="Metric id: 'fill_rate', 'avg_slippage', 'win_rate', 'avg_profit', "
+        "'avg_r', or 'avg_volume'."
+    )
+    kind: str = Field(
+        description="'execution' — how the order was filled (fill rate, slippage, lot "
+        "size); or 'outcome' — what the trade then earned (win rate, profit, R). Execution "
+        "metrics diverging points at the simulator, outcome metrics alone at the edge."
+    )
+    live_value: float | None = Field(
+        description="Value measured from live journalled trades. Null when no live sample "
+        "carries this metric (e.g. slippage on trades journalled before it was recorded)."
+    )
+    backtest_value: float | None = Field(
+        description="Same metric measured from the backtest report. Null when unavailable."
+    )
+    delta: float | None = Field(
+        description="live_value - backtest_value. Null when either side is null."
+    )
+    relative_delta: float | None = Field(
+        description="delta divided by the absolute backtest value — the size of the gap "
+        "relative to what was predicted. Null when the backtest value is zero or missing."
+    )
+    significant: bool = Field(
+        description="True when the relative gap exceeds the report's tolerance and both "
+        "sides have enough samples for that to mean something."
+    )
+    live_sample_count: int = Field(description="Live observations behind live_value.")
+    backtest_sample_count: int = Field(description="Backtest observations behind backtest_value.")
+    note: str = Field(description="What a gap in this particular metric implies.")
+
+
+class DivergenceReportOut(BaseModel):
+    """Live-vs-backtest comparison for one strategy on one symbol.
+
+    Answers the question a profitable backtest and a losing account raise:
+    is the simulator lying about fills, or has the edge decayed?"""
+
+    strategy: str = Field(description="Strategy name compared, as reported by the backtest.")
+    symbol: str
+    report_id: str = Field(description="Backtest report the live trades were compared against.")
+    live_trade_count: int = Field(description="Closed live trades matched for this comparison.")
+    backtest_trade_count: int = Field(description="Trades in the backtest report.")
+    comparable: bool = Field(
+        description="False when either side has too few trades for a comparison to mean "
+        "anything. The metrics are still returned so the UI can show what exists, but no "
+        "conclusion should be drawn from them."
+    )
+    verdict: str = Field(
+        description="'aligned' — live matches the backtest; 'simulator_optimistic' — fills "
+        "are worse live than simulated, so the backtest's numbers are not achievable; "
+        "'edge_decayed' — fills agree but results do not; 'both' — both diverge, so the "
+        "outcome gap cannot yet be attributed; 'insufficient_data'."
+    )
+    summary: str = Field(description="One-paragraph plain-language reading of the verdict.")
+    metrics: list[DivergenceMetricOut] = Field(
+        description="Every metric compared, execution metrics first."
+    )

@@ -27,6 +27,8 @@ from src.backtest.api.schemas import (
     BacktestReportDetailOut,
     BacktestReportListOut,
     BacktestReportSummaryOut,
+    DivergenceMetricOut,
+    DivergenceReportOut,
     ImportBacktestReportIn,
 )
 from src.backtest.application.period import parse_period
@@ -37,6 +39,7 @@ from src.backtest.application.run_backtest import (
     NoSymbolSpecError,
     run_backtest,
 )
+from src.backtest.domain.divergence import FillSample, compute_divergence
 from src.backtest.reports.writer import REPORTS_DIR, write_report
 from src.market_data.application.history import CandleHistoryService
 from src.market_data.domain.models import MarketDataUnavailable, Timeframe
@@ -633,6 +636,7 @@ async def import_report(body: ImportBacktestReportIn) -> BacktestReportSummaryOu
         "consecutive_loss_pause": body.consecutive_loss_pause,
         "min_lot_fallback_enabled": body.min_lot_fallback_enabled,
         "max_risk_per_trade_pct": body.max_risk_per_trade_pct,
+        "broker_realism": body.broker_realism.model_dump(),
         "trades": [_trade_in(t) for t in body.trades],
         "equity_curve": [
             {"time": _iso(p.time), "balance": p.balance} for p in body.equity_curve
@@ -652,6 +656,7 @@ async def import_report(body: ImportBacktestReportIn) -> BacktestReportSummaryOu
                 "direction": s.direction,
                 "outcome": s.outcome,
                 "reason": s.reason,
+                "price": s.price,
             }
             for s in body.signals
         ],
@@ -725,6 +730,10 @@ def _summary(data: dict[str, Any], report_id: str) -> BacktestReportSummaryOut:
         consecutive_loss_pause=data.get("consecutive_loss_pause", 10),
         min_lot_fallback_enabled=data.get("min_lot_fallback_enabled", False),
         max_risk_per_trade_pct=data.get("max_risk_per_trade_pct"),
+        # Absent in reports written before broker constraints were simulated;
+        # the schema's own default (enabled=false) is the truthful description
+        # of those runs, so an empty dict is exactly right here.
+        broker_realism=data.get("broker_realism") or {},
     )
 
 
@@ -779,3 +788,141 @@ def _equity_curve_out(points: list[dict[str, Any]]) -> list[dict[str, Any]]:
         else:
             out.append({"time": epoch, "balance": p["balance"]})
     return out
+
+
+# ── Live vs backtest divergence (OBSERVABILITY_PLAN.md Phase 4) ───────────────
+
+def _live_fill_samples(
+    strategy: str, symbol: str, contract_size: float
+) -> list[FillSample]:
+    """Closed live trades for `strategy` on `symbol`, as comparison samples.
+
+    Matched on `TradeRecord.strategy_version`'s family part — the journal
+    stores `"breakout_v1:v3"` while a report stores `"breakout_v1"`, and the
+    comparison is about the strategy, not a specific version. Open trades are
+    excluded (no realized profit to compare) and so are trades with no
+    `strategy_version` at all (manual/API orders).
+
+    `r_multiple` is reconstructed from the trade's own stop distance, because
+    the journal stores the trade, not the R it was sized for: risk in account
+    currency is `|open_price - sl| * volume * contract_size`, the same
+    arithmetic the backtest bookkeeper uses. `None` when the trade had no SL,
+    which is exactly when R is undefined."""
+    from src.journal.adapters.repository import JournalRepository
+    from src.shared.db.base import make_session_factory
+
+    repo = JournalRepository(make_session_factory(Settings().database_url))
+    samples: list[FillSample] = []
+    for trade in repo.get_all():
+        if trade.symbol != symbol or trade.is_open or trade.profit is None:
+            continue
+        if trade.strategy_version is None:
+            continue
+        if trade.strategy_version.split(":", 1)[0] != strategy:
+            continue
+        risk = (
+            abs(trade.open_price - trade.sl) * trade.volume * contract_size
+            if trade.sl is not None
+            else 0.0
+        )
+        samples.append(
+            FillSample(
+                profit=trade.profit,
+                volume=trade.volume,
+                slippage=trade.slippage,
+                r_multiple=trade.profit / risk if risk > 0 else None,
+            )
+        )
+    return samples
+
+
+def _contract_size(symbol: str) -> float:
+    """The symbol's contract size, for reconstructing live R multiples.
+    Falls back to 1.0 when the symbol has no spec row — R is then wrong by a
+    constant factor for every live trade alike, so the *divergence* in avg_r
+    still reads correctly even though its absolute value does not."""
+    from src.market_data.adapters.symbol_spec_repository import SymbolSpecRepository
+    from src.shared.db.base import make_session_factory
+
+    spec = SymbolSpecRepository(make_session_factory(Settings().database_url)).get(symbol)
+    return spec.contract_size if spec is not None else 1.0
+
+
+@router.get(
+    "/reports/{report_id}/divergence",
+    response_model=DivergenceReportOut,
+    summary="Compare live trading against a backtest report",
+    description=(
+        "Answers the question a profitable backtest and a losing account raise: is the "
+        "**simulator lying** about fills, or has the **edge decayed**? Every closed live "
+        "trade journalled for the report's strategy and symbol is compared against the "
+        "report's own trades on execution metrics (fill rate, slippage, lot size) and "
+        "outcome metrics (win rate, profit, R). Execution metrics diverging points at the "
+        "fill model; outcome metrics diverging alone points at the strategy.\n\n"
+        "Read-only — computes on demand from the journal and the report file, writes "
+        "nothing. Live trades are matched on the strategy family, so `breakout_v1:v3` in "
+        "the journal matches a `breakout_v1` report."
+    ),
+    responses={
+        404: {"description": "No report file with that id."},
+    },
+)
+async def get_report_divergence(
+    report_id: str = PathParam(description="Report id, as returned by GET /backtest/reports."),
+) -> DivergenceReportOut:
+    if not _VALID_ID.match(report_id):
+        raise HTTPException(status_code=404, detail="report not found")
+    path = REPORTS_DIR / f"{report_id}.json"
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="report not found")
+    data = _load(path)
+    strategy, symbol = data["strategy"], data["symbol"]
+
+    backtest_samples = [
+        FillSample(
+            profit=t["profit"],
+            volume=t["volume"],
+            # The backtest's own modelled slippage is not stored per trade;
+            # the run-level mean from broker_realism is the comparable figure
+            # and is applied to every simulated fill alike.
+            slippage=data.get("broker_realism", {}).get("slippage_mean") or None,
+            r_multiple=t.get("r_multiple"),
+        )
+        for t in data["trades"]
+    ]
+    signals = data.get("signals", [])
+    report = compute_divergence(
+        strategy=strategy,
+        symbol=symbol,
+        live=_live_fill_samples(strategy, symbol, _contract_size(symbol)),
+        backtest=backtest_samples,
+        backtest_signal_count=len(signals) or None,
+        backtest_opened_count=(
+            sum(1 for s in signals if s["outcome"] == "opened") if signals else None
+        ),
+    )
+    return DivergenceReportOut(
+        strategy=report.strategy,
+        symbol=report.symbol,
+        report_id=report_id,
+        live_trade_count=report.live_trade_count,
+        backtest_trade_count=report.backtest_trade_count,
+        comparable=report.comparable,
+        verdict=report.verdict,
+        summary=report.summary,
+        metrics=[
+            DivergenceMetricOut(
+                name=m.name,
+                kind=m.kind,
+                live_value=m.live_value,
+                backtest_value=m.backtest_value,
+                delta=m.delta,
+                relative_delta=m.relative_delta,
+                significant=m.significant,
+                live_sample_count=m.live_sample_count,
+                backtest_sample_count=m.backtest_sample_count,
+                note=m.note,
+            )
+            for m in report.metrics
+        ],
+    )

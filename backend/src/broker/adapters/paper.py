@@ -19,6 +19,7 @@ from src.broker.domain.trading import (
     Position,
     Side,
 )
+from src.broker.ports.execution_simulator import ExecutionSimulatorPort
 from src.market_data.ports.market_data import MarketDataPort
 
 logger = logging.getLogger(__name__)
@@ -39,8 +40,20 @@ class _OpenPosition:
 
 
 class PaperBroker:
-    def __init__(self, market_data: MarketDataPort) -> None:
+    def __init__(
+        self,
+        market_data: MarketDataPort,
+        execution_simulator: ExecutionSimulatorPort | None = None,
+    ) -> None:
+        """`execution_simulator`, when given, models the broker constraints a
+        real server enforces before filling — `stops_level`, the lot grid,
+        spread widening and slippage (OBSERVABILITY_PLAN.md Phase 4). `None`
+        (the default) keeps the original frictionless fill: every order
+        accepted, at the current ask/bid, in exactly the requested lot size.
+        The backtest runner injects one; live paper trading and unit tests
+        that only need the plumbing leave it unset."""
         self._market_data = market_data
+        self._execution_simulator = execution_simulator
         self._positions: dict[int, _OpenPosition] = {}
         self._pending: dict[int, PendingOrder] = {}
         self._tickets = itertools.count(1)
@@ -48,16 +61,39 @@ class PaperBroker:
     async def open_position(self, order: OrderRequest) -> ExecutionResult:
         info = await self._market_data.get_symbol_info(order.symbol)
         fill_price = info.ask if order.side is Side.BUY else info.bid
+        volume = order.volume
+        sl, tp = order.sl, order.tp
+        spread_points = info.spread_points
+        if self._execution_simulator is not None:
+            # May raise OrderRejected (with an MT5 retcode) — deliberately not
+            # caught here: a refused order must propagate exactly the way a
+            # live gateway refusal does, so OrderService logs it and stamps
+            # `broker_rejected` on the signal's decision trail.
+            simulated = self._execution_simulator.simulate_entry(
+                symbol=order.symbol,
+                side=order.side,
+                volume=order.volume,
+                sl=order.sl,
+                tp=order.tp,
+                info=info,
+            )
+            volume = simulated.volume
+            fill_price = simulated.fill_price
+            # The simulator may have widened a too-close stop rather than
+            # rejecting the order; the position must then really carry the
+            # wider stop, or the backtest's P&L is computed against a level
+            # the broker never held.
+            sl, tp = simulated.sl, simulated.tp
         ticket = next(self._tickets)
         now = datetime.now(UTC)
         self._positions[ticket] = _OpenPosition(
             ticket=ticket,
             symbol=order.symbol,
             side=order.side,
-            volume=order.volume,
+            volume=volume,
             open_price=fill_price,
-            sl=order.sl,
-            tp=order.tp,
+            sl=sl,
+            tp=tp,
             open_time=now,
             comment=order.comment,
             magic=order.magic,
@@ -66,22 +102,22 @@ class PaperBroker:
             "paper fill: %s %s %.2f lots @ %.5f sl=%s tp=%s spread=%dpts",
             order.side.value,
             order.symbol,
-            order.volume,
+            volume,
             fill_price,
-            order.sl,
-            order.tp,
-            info.spread_points,
+            sl,
+            tp,
+            spread_points,
         )
         return ExecutionResult(
             ticket=ticket,
             symbol=order.symbol,
             side=order.side,
-            volume=order.volume,
+            volume=volume,
             price=fill_price,
-            sl=order.sl,
-            tp=order.tp,
+            sl=sl,
+            tp=tp,
             time=now,
-            spread_points=info.spread_points,
+            spread_points=spread_points,
             comment=order.comment,
             magic=order.magic,
         )
