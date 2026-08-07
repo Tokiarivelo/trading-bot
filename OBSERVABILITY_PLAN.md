@@ -226,7 +226,7 @@ still unquantified. Worth doing before trusting any existing PF number.
 
 ## Phase 5 — Metrics, correlation IDs, log hygiene
 
-**Status:** not started
+**Status:** done (2026-08-07, `2d3c92b`)
 
 - Prometheus metrics endpoint: engine loop duration, gateway RTT, signals/min,
   veto counts by reason, open positions, WS client count.
@@ -240,6 +240,26 @@ still unquantified. Worth doing before trusting any existing PF number.
   interval (a dead bot currently looks like a quiet market).
 
 **Done when:** `/metrics` scrapes clean and INFO is readable end to end.
+
+**Outcome:** `GET /metrics` (unauthenticated, like `/health`) exposes all
+six planned families via `shared/metrics/registry.py`, wired at the event
+bus (`PositionOpened`/`PositionClosed` → `tradingbot_open_positions`) and via
+an `httpx` event-hook pair scoped per account for gateway RTT. `signal_id` is
+minted in `trade_loop._try_enter` before the `SIGNAL:` log line, carried
+through `ContextFilter` across the `QueueHandler` thread boundary (the
+existing ContextVars don't survive that hop), stored on `activity_logs`, and
+filterable via `GET .../activity/history?signal_id=`. `configs/alerting.yaml`
+gained a `silence:` block (poll interval, lookback, multiplier, min-signals
+floor) driving `SilenceMonitor`, which publishes `BotWentSilent` per account,
+alerted through the existing `AlertService`. Verified: full suite (excluding
+two pre-existing, unrelated collection failures in
+`tests/unit/strategies/test_scalp_bollinger_reversion_v1.py` /
+`test_scalp_ema_cross_v2.py` that import strategy modules absent from
+`src/strategies/generated/` at HEAD) — 1501 passed, 1 failed
+(`test_risk_config_has_user_owned_caps`, the known pre-existing
+`risk.yaml`/`max_trades_per_day_enabled` gap, unrelated to this phase);
+`ruff check` clean on all 40 touched files; `/metrics` scrape and OpenAPI
+schema spot-checked directly.
 
 ## Phase 6 — Regime tagging & walk-forward research
 
