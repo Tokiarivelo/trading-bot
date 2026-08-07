@@ -263,18 +263,62 @@ schema spot-checked directly.
 
 ## Phase 6 — Regime tagging & walk-forward research
 
-**Status:** not started
+**Status:** Pass A done (`831136a`); Pass B (walk-forward harness) not started
 
 - Tag every trade and decision with the market regime at entry: ATR
-  percentile bucket, trading session, trend/range classification.
-- Regime-split analytics — PF and expectancy per regime, per bot.
+  percentile bucket, trading session, trend/range classification. **[Pass A]**
+- Regime-split analytics — PF and expectancy per regime, per bot. **[Pass A]**
 - Walk-forward backtesting harness (rolling in-sample/out-of-sample) to
   replace single-window PF numbers, which are very likely overfit
-  (e.g. `pob_snd_zones_xauusd` PF 3.70 on one window).
+  (e.g. `pob_snd_zones_xauusd` PF 3.70 on one window). **[Pass B]**
 - Cost-as-%-of-gross-edge metric per bot — expected to show M1 scalps
-  spending their entire edge on spread + slippage.
+  spending their entire edge on spread + slippage. **[Pass A]**
 
 **Done when:** each bot's edge is reported per regime, out-of-sample.
+
+**Pass A outcome (2026-08-07, `831136a`):** New `engine/domain/regime.py`
+classifies trend/range via ADX against a fixed threshold (not
+percentile-ranked like ATR — ADX is already a normalized 0-100 score) and
+trading session via UTC hour; reuses the existing ATR-percentile volatility
+classifier as-is. `trade_loop.py` computes one regime snapshot per signal,
+always on, independent of the existing gated volatility guard, so every
+decision is tagged, not only the ones that reach that gate. `order_service.py`
+computes `transaction_cost` per fill. `compute_regime_analytics()` slices
+win-rate/PF/expectancy by one regime dimension at a time (volatility, trend,
+session) rather than the full sparse cross-product; `BotAnalytics` gains
+`cost_pct_of_gross_edge`. New `GET .../journal/analytics/regimes` route;
+frontend regime panel (tabbed by dimension) plus a "Cost % of edge" column on
+the bot performance table. Migration adds nullable `regime_*`/
+`transaction_cost` columns to `trades` and `signal_decisions` — `None`
+throughout for pre-Phase-6 rows or signals whose entry timeframe had no
+candles, never fabricated.
+
+Gates: ruff clean on every Pass A file, verified in an **isolated git
+worktree** (not just the shared working tree) since several touched files
+(`journal/domain/models.py`, `repository.py`, `trade_journal.py`,
+`journal/api/{schemas,routes}.py`, `client.ts`, `test_analytics.py`,
+`test_repository.py`) had unrelated concurrent-session work interleaved line-
+by-line — staged by reconstructed content, not by path, to exclude a
+substring-search/`total_profit` search feature, an MFE/MAE-timestamp
+excursion feature, and `client.ts`'s CandleGap additions, none of which are
+this phase's. Full suite in that isolated worktree: only the one known
+pre-existing failure (`test_risk_config_has_user_owned_caps`); `make
+lint-frontend` clean (frontend build itself couldn't be verified in the
+isolated worktree — Turbopack rejects a symlinked `node_modules` outside the
+repo root — so the three new frontend files were verified by manual
+line-by-line review against the live `useAnalytics.ts`/`BotPerformanceTable.tsx`
+patterns instead).
+
+Two things the audit caught beyond the diff itself: (1) a subagent pass had
+added one unrequested line to `trade_loop.py` changing empty-`strategy.spec.
+symbols`-list routing semantics (unrelated to regime tagging, in a
+money-touching path) — reverted before staging; (2) `backend/src/backtest/
+reports/writer.py` (and `__init__.py`) turned out to have never been
+committed at all — `.gitignore`'s blanket `reports/*` rule (meant to keep
+generated report JSON out of git) had no carve-out for source files sharing
+that directory, so HEAD has been fresh-checkout-broken since Phase 4,
+invisible only because every session shares one long-lived working tree.
+Fixed separately in `28f4402`, ahead of the Pass A commit.
 
 ---
 
