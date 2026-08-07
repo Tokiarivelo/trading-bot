@@ -82,6 +82,34 @@ def test_roundtrip_preserves_decision_context(repository):
     assert repository.get("1") == record
 
 
+def test_roundtrip_preserves_regime_and_transaction_cost(repository):
+    """Regime tagging + transaction cost (OBSERVABILITY_PLAN.md Phase 6)."""
+    record = make_record(
+        "1",
+        regime_volatility="high",
+        regime_volatility_percentile=82.5,
+        regime_trend="trending",
+        regime_adx=27.3,
+        regime_session="london",
+        transaction_cost=1.85,
+    )
+    repository.save(record)
+    assert repository.get("1") == record
+
+
+def test_regime_fields_default_to_none(repository):
+    """Trades journaled before Phase 6 (or via `make_record`'s defaults)
+    carry no regime tag — must round-trip as None, not a fabricated bucket."""
+    repository.save(make_record("1"))
+    stored = repository.get("1")
+    assert stored.regime_volatility is None
+    assert stored.regime_volatility_percentile is None
+    assert stored.regime_trend is None
+    assert stored.regime_adx is None
+    assert stored.regime_session is None
+    assert stored.transaction_cost is None
+
+
 def test_get_returns_none_for_unknown_id(repository):
     assert repository.get("missing") is None
 
@@ -348,6 +376,10 @@ def test_get_all_for_analytics_matches_get_all_core_fields(repository):
             m5_entry_snapshot=snapshot,
             h1_entry_snapshot=snapshot,
             structure=(("HL", 2397.2, utc(2026, 7, 10, 13, 30)),),
+            regime_volatility="high",
+            regime_trend="trending",
+            regime_session="london",
+            transaction_cost=1.85,
         )
     )
     repository.save(make_record("2", symbol="EURUSD"))  # still open
@@ -366,6 +398,10 @@ def test_get_all_for_analytics_matches_get_all_core_fields(repository):
         assert slim_record.skill == full_record.skill
         assert slim_record.strategy_version == full_record.strategy_version
         assert slim_record.is_open == full_record.is_open
+        assert slim_record.regime_volatility == full_record.regime_volatility
+        assert slim_record.regime_trend == full_record.regime_trend
+        assert slim_record.regime_session == full_record.regime_session
+        assert slim_record.transaction_cost == full_record.transaction_cost
 
 
 def test_get_all_for_analytics_omits_json_snapshot_and_structure_fields(repository):

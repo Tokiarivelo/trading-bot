@@ -134,6 +134,38 @@ class TradeRecordOut(BaseModel):
             "from bots that don't report confluence data."
         ),
     )
+    regime_volatility: str | None = Field(
+        default=None,
+        description=(
+            "Volatility regime at entry — 'low'/'normal'/'high'/'extreme' — from the "
+            "ATR-percentile classifier (OBSERVABILITY_PLAN.md Phase 6). Null for trades "
+            "journaled before Phase 6, or whose entry timeframe had no candles to classify."
+        ),
+    )
+    regime_volatility_percentile: float | None = Field(
+        default=None, description="ATR percentile rank (0-100) behind `regime_volatility`."
+    )
+    regime_trend: str | None = Field(
+        default=None,
+        description="Trend/range regime at entry — 'trending' or 'ranging' — from the "
+        "fixed-threshold ADX classifier. Null under the same conditions as `regime_volatility`.",
+    )
+    regime_adx: float | None = Field(
+        default=None, description="Raw ADX reading (0-100) behind `regime_trend`."
+    )
+    regime_session: str | None = Field(
+        default=None,
+        description="Trading session at entry — 'asian'/'london'/'overlap'/'new_york'/"
+        "'off_session' — bucketed off the UTC hour the signal fired.",
+    )
+    transaction_cost: float | None = Field(
+        default=None,
+        description=(
+            "Spread + slippage cost of this fill, in account currency: "
+            "(spread_points * point + slippage) * volume * contract_size. Null for trades "
+            "journaled before Phase 6."
+        ),
+    )
 
 
 class CandleOut(BaseModel):
@@ -393,4 +425,64 @@ class BotAnalyticsOut(BaseModel):
             "typically took. Approaching the bot's stop distance means stops are as tight as "
             "they can get before winners start being stopped out. Null if no measured winners."
         )
+    )
+    total_transaction_cost: float | None = Field(
+        description=(
+            "Sum of spread + slippage cost (account currency) across this bot's closed, "
+            "measured trades. Null when none of this bot's trades carry the measurement."
+        )
+    )
+    avg_transaction_cost_per_trade: float | None = Field(
+        description="`total_transaction_cost` divided by how many closed trades it sums. "
+        "Null when unmeasured."
+    )
+    cost_pct_of_gross_edge: float | None = Field(
+        description=(
+            "Fraction of this bot's gross edge (realized profit before costs) spent on "
+            "spread + slippage: total_transaction_cost / (total_profit + "
+            "total_transaction_cost). Near or above 1.0 means the bot is spending its whole "
+            "edge on execution cost — the headline question for M1 scalps. Null when "
+            "unmeasured, or when gross edge isn't positive (undefined, not a divide-by-zero "
+            "artifact — mirrors `profit_factor`'s null convention)."
+        )
+    )
+
+
+class RegimeAnalyticsOut(BaseModel):
+    """One bot's outcome stats within one bucket of one regime dimension —
+    one entry per (bot, dimension, bucket) on `GET
+    /journal/analytics/regimes`. The same win/PF/expectancy shape
+    `BotAnalyticsOut` reports overall, sliced one regime dimension at a
+    time (volatility, trend, or session) so a bot's edge in a specific
+    market condition isn't averaged away by every other condition it also
+    traded through."""
+
+    skill: str = Field(description="Bot's full id, e.g. 'normal/xauusd/breakout_v1'.")
+    bot_name: str = Field(description="This bot's short id — the last segment of `skill`.")
+    dimension: str = Field(
+        description="Which regime axis this bucket is sliced on: 'volatility', 'trend', or "
+        "'session'."
+    )
+    bucket: str = Field(
+        description=(
+            "The bucket value within `dimension` — e.g. 'low'/'normal'/'high'/'extreme' for "
+            "volatility, 'trending'/'ranging' for trend, 'asian'/'london'/'overlap'/"
+            "'new_york'/'off_session' for session."
+        )
+    )
+    trade_count: int = Field(description="Total trades (open + closed) in this bucket.")
+    closed_count: int = Field(description="Closed trades in this bucket.")
+    win_count: int = Field(description="Closed trades with profit > 0.")
+    loss_count: int = Field(description="Closed trades with profit < 0.")
+    win_rate: float = Field(description="win_count / closed_count, 0..1. 0 if no closed trades.")
+    profit_factor: float | None = Field(
+        description="gross_profit / gross_loss within this bucket. Null when there are no "
+        "losing trades yet (undefined rather than infinite)."
+    )
+    expectancy: float = Field(
+        description="total_profit / closed_count within this bucket — average profit per "
+        "closed trade in this regime."
+    )
+    total_profit: float = Field(
+        description="Sum of realized profit across closed trades in this bucket."
     )

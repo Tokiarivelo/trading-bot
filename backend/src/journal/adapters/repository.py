@@ -133,6 +133,10 @@ class JournalRepository:
             TradeRow.broker_retcode,
             TradeRow.mfe,
             TradeRow.mae,
+            TradeRow.regime_volatility,
+            TradeRow.regime_trend,
+            TradeRow.regime_session,
+            TradeRow.transaction_cost,
         ).where(TradeRow.account_id == account_id)
         if open_from is not None:
             query = query.where(TradeRow.open_time >= open_from)
@@ -157,6 +161,10 @@ class JournalRepository:
                 broker_retcode=row.broker_retcode,
                 mfe=row.mfe,
                 mae=row.mae,
+                regime_volatility=row.regime_volatility,
+                regime_trend=row.regime_trend,
+                regime_session=row.regime_session,
+                transaction_cost=row.transaction_cost,
             )
             for row in rows
         ]
@@ -424,6 +432,12 @@ def _to_row(record: TradeRecord, account_id: str) -> TradeRow:
         broker_retcode=record.broker_retcode,
         mfe=record.mfe,
         mae=record.mae,
+        regime_volatility=record.regime_volatility,
+        regime_volatility_percentile=record.regime_volatility_percentile,
+        regime_trend=record.regime_trend,
+        regime_adx=record.regime_adx,
+        regime_session=record.regime_session,
+        transaction_cost=record.transaction_cost,
     )
 
 
@@ -470,4 +484,10 @@ def _to_domain(row: TradeRow) -> TradeRecord:
         broker_retcode=row.broker_retcode,
         mfe=row.mfe,
         mae=row.mae,
+        regime_volatility=row.regime_volatility,
+        regime_volatility_percentile=row.regime_volatility_percentile,
+        regime_trend=row.regime_trend,
+        regime_adx=row.regime_adx,
+        regime_session=row.regime_session,
+        transaction_cost=row.transaction_cost,
     )

@@ -100,6 +100,25 @@ class SignalDecision:
     """Every gate evaluated for this signal, in evaluation order, appended as
     the engine walks them. Empty for decisions recorded before Phase 2 and for
     signals that never reached a gate."""
+    # ── Regime tagging (OBSERVABILITY_PLAN.md Phase 6) ─────────────────────
+    # Snapshotted once, at the same moment the decision itself is recorded
+    # (`TradeEngine._enter_for_bot`, via `engine.domain.regime.
+    # compute_entry_regime`) — every recorded signal is tagged, not only the
+    # ones that fill, so regime-split analytics can answer "what regime were
+    # the *vetoed* signals in" too. None for decisions recorded before Phase
+    # 6 and for signals whose entry timeframe had no candles to classify.
+    regime_volatility: str | None = None
+    """`VolatilityRegime` value at signal time — 'low'/'normal'/'high'/
+    'extreme'."""
+    regime_volatility_percentile: float | None = None
+    """The ATR percentile rank behind `regime_volatility` (0-100)."""
+    regime_trend: str | None = None
+    """`TrendRegime` value at signal time — 'trending'/'ranging'."""
+    regime_adx: float | None = None
+    """Raw ADX reading behind `regime_trend`."""
+    regime_session: str | None = None
+    """`TradingSession` value at signal time — 'asian'/'london'/'overlap'/
+    'new_york'/'off_session'."""
 
 
 @dataclass(frozen=True, kw_only=True)

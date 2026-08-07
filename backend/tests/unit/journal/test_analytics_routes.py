@@ -154,6 +154,83 @@ async def test_analytics_endpoints_empty_when_no_trades(api, repository, tmp_pat
     assert bots.json() == []
 
 
+# ── regime analytics (OBSERVABILITY_PLAN.md Phase 6) ────────────────────────
+
+
+async def test_bot_analytics_includes_cost_fields(api, repository):
+    repository.save(
+        make_record(
+            "10",
+            symbol="XAUUSD",
+            skill="normal/xauusd/breakout_v1",
+            open_time=utc(2026, 7, 10, 18, 0),
+            close_time=utc(2026, 7, 10, 19, 0),
+            profit=10.0,
+            transaction_cost=2.0,
+        )
+    )
+
+    response = await api.get("/accounts/default/journal/analytics/bots")
+
+    assert response.status_code == 200
+    bot = next(b for b in response.json() if b["skill"] == "normal/xauusd/breakout_v1")
+    assert bot["total_transaction_cost"] == 2.0
+    assert bot["avg_transaction_cost_per_trade"] == 2.0
+    # gross_edge = total_profit (6.0 seeded + 10.0 here = 16.0) + cost (2.0) = 18.0
+    assert bot["cost_pct_of_gross_edge"] == pytest.approx(2.0 / 18.0)
+
+
+async def test_regime_analytics_returns_one_entry_per_bot_dimension_bucket(api, repository):
+    repository.save(
+        make_record(
+            "10",
+            symbol="XAUUSD",
+            skill="normal/xauusd/breakout_v1",
+            open_time=utc(2026, 7, 10, 18, 0),
+            close_time=utc(2026, 7, 10, 19, 0),
+            profit=5.0,
+            regime_volatility="high",
+            regime_trend="trending",
+            regime_session="london",
+        )
+    )
+    repository.save(
+        make_record(
+            "11",
+            symbol="XAUUSD",
+            skill="normal/xauusd/breakout_v1",
+            open_time=utc(2026, 7, 10, 19, 0),
+            close_time=utc(2026, 7, 10, 20, 0),
+            profit=-3.0,
+            regime_volatility="low",
+            regime_trend="ranging",
+            regime_session="asian",
+        )
+    )
+
+    response = await api.get("/accounts/default/journal/analytics/regimes")
+
+    assert response.status_code == 200
+    body = response.json()
+    by_key = {(r["dimension"], r["bucket"]): r for r in body}
+    assert by_key[("volatility", "high")]["trade_count"] == 1
+    assert by_key[("volatility", "high")]["total_profit"] == 5.0
+    assert by_key[("volatility", "low")]["trade_count"] == 1
+    assert by_key[("trend", "trending")]["bot_name"] == "breakout_v1"
+    assert by_key[("session", "london")]["skill"] == "normal/xauusd/breakout_v1"
+    # None of the auto-seeded fixture trades carry a regime tag, so they
+    # contribute no bucket at all — only the two trades seeded here do.
+    assert {r["dimension"] for r in body} == {"volatility", "trend", "session"}
+
+
+async def test_regime_analytics_empty_when_no_trades_are_tagged(api):
+    """The three fixture-seeded trades carry no regime tag at all."""
+    response = await api.get("/accounts/default/journal/analytics/regimes")
+
+    assert response.status_code == 200
+    assert response.json() == []
+
+
 async def test_analytics_endpoints_filter_by_open_from_and_open_to(api):
     t_15 = int(utc(2026, 7, 10, 15, 0).timestamp())
 

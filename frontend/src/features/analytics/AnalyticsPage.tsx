@@ -8,10 +8,12 @@ import { BotDrawdownChart } from "./BotDrawdownChart";
 import { BotEquityChart, seriesColor } from "./BotEquityChart";
 import { BotLegend } from "./BotLegend";
 import { BotPerformanceTable } from "./BotPerformanceTable";
+import { RegimeAnalyticsPanel } from "./RegimeAnalyticsPanel";
 import { SignalFunnelPanel } from "./SignalFunnelPanel";
 import { SymbolAnalyticsTable } from "./SymbolAnalyticsTable";
 import { TradePnLHistogram } from "./TradePnLHistogram";
 import { useAnalytics } from "./useAnalytics";
+import { useRegimeAnalytics } from "./useRegimeAnalytics";
 import { useSignalFunnel } from "./useSignalFunnel";
 import { useAnalyticsExport } from "./useAnalyticsExport";
 
@@ -99,6 +101,14 @@ export function AnalyticsPage() {
     loading: funnelLoading,
     error: funnelError,
   } = useSignalFunnel(apiFilters.open_from, apiFilters.open_to);
+  // Same window again, but sliced by market regime at entry rather than by
+  // bot alone (OBSERVABILITY_PLAN.md Phase 6) — a breakdown of the same
+  // underlying trade table `useAnalytics` above already loaded.
+  const {
+    regimes,
+    loading: regimeLoading,
+    error: regimeError,
+  } = useRegimeAnalytics(apiFilters.open_from, apiFilters.open_to);
   const [selected, setSelected] = useState<Set<string> | null>(loadChartSelection);
   const [selectedSymbols, setSelectedSymbols] = useState<Set<string>>(() =>
     loadFilterSet(QUERY_KEY_SYMBOLS, LS_KEY_SYMBOLS),
@@ -385,6 +395,18 @@ export function AnalyticsPage() {
                 atCapacity={chartAtCapacity}
                 maxCharted={MAX_CHARTED_BOTS}
               />
+            </section>
+
+            <section className="rounded-xl border border-line bg-panel/30 shadow-inner overflow-hidden">
+              <header className="border-b border-line px-4 py-2.5">
+                <h2 className="text-sm font-bold text-ink">Performance by market regime</h2>
+                <p className="text-xs text-ink-muted">
+                  Each bot&apos;s win rate, profit factor, and expectancy split by the volatility,
+                  trend, or trading session it traded in at entry — is this bot&apos;s edge
+                  regime-dependent?
+                </p>
+              </header>
+              <RegimeAnalyticsPanel regimes={regimes} loading={regimeLoading} error={regimeError} />
             </section>
 
             <section className="rounded-xl border border-line bg-panel/30 shadow-inner overflow-hidden">

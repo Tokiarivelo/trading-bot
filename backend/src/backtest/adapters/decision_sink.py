@@ -59,6 +59,11 @@ class InMemorySignalDecisionSink:
         created_at: datetime,
         reason: str,
         confidence: float | None,
+        regime_volatility: str | None = None,
+        regime_volatility_percentile: float | None = None,
+        regime_trend: str | None = None,
+        regime_adx: float | None = None,
+        regime_session: str | None = None,
     ) -> None:
         if signal_id in self._decisions:
             return
@@ -76,6 +81,11 @@ class InMemorySignalDecisionSink:
             outcome="skipped",
             reason=reason,
             confidence=confidence,
+            regime_volatility=regime_volatility,
+            regime_volatility_percentile=regime_volatility_percentile,
+            regime_trend=regime_trend,
+            regime_adx=regime_adx,
+            regime_session=regime_session,
         )
 
     async def record_outcome(

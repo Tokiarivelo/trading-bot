@@ -15,8 +15,10 @@ from typing import Literal
 from src.journal.adapters.repository import JournalRepository, OrderField, Outcome
 from src.journal.domain.analytics import (
     BotAnalytics,
+    RegimeAnalytics,
     SymbolAnalytics,
     compute_bot_analytics,
+    compute_regime_analytics,
     compute_symbol_analytics,
 )
 from src.journal.domain.excursion import Excursion, extend_excursion, finalize_excursion
@@ -87,6 +89,12 @@ class TradeJournalService:
             slippage=event.slippage,
             execution_latency_ms=event.execution_latency_ms,
             broker_retcode=event.broker_retcode,
+            transaction_cost=event.transaction_cost,
+            regime_volatility=event.regime_volatility,
+            regime_volatility_percentile=event.regime_volatility_percentile,
+            regime_trend=event.regime_trend,
+            regime_adx=event.regime_adx,
+            regime_session=event.regime_session,
             # Excursion starts at zero, not None: the trade has now been
             # measured (the market simply hasn't moved yet), which is what
             # distinguishes it from a pre-Phase-3 row that never was.
@@ -263,6 +271,17 @@ class TradeJournalService:
             account_id=self._account_id,
         )
         return compute_bot_analytics(trades)
+
+    async def get_regime_analytics(
+        self, open_from: int | None = None, open_to: int | None = None
+    ) -> list[RegimeAnalytics]:
+        trades = await asyncio.to_thread(
+            self._repository.get_all_for_analytics,
+            open_from=open_from,
+            open_to=open_to,
+            account_id=self._account_id,
+        )
+        return compute_regime_analytics(trades)
 
     async def search_trades(
         self,

@@ -220,3 +220,66 @@ async def test_a_rejection_with_no_return_code_records_no_retcode_check():
 
     assert ("sig-1", "broker_rejected") in sink.outcomes
     assert not [c for c in sink.checks if c.name == "broker_retcode"]
+
+
+# ── transaction cost + regime tagging (OBSERVABILITY_PLAN.md Phase 6) ───────
+
+
+async def test_transaction_cost_combines_spread_and_slippage_in_account_currency():
+    service, events, _ = make_service(FillingBroker(fill_price=2400.55))
+
+    await service.open_position("XAUUSD", Side.BUY, 0.1, sl=2390.0, tp=2420.0)
+
+    # spread_points=25 * point=0.01 = 0.25 spread cost in price units; the
+    # fill at 2400.55 vs requested 2400.35 is +0.20 slippage (see
+    # `test_a_buy_filled_worse_than_asked_reports_positive_slippage`).
+    # (0.25 + 0.20) * volume(0.1) * contract_size(100.0) = 4.5.
+    assert events[0].transaction_cost == pytest.approx(4.5)
+
+
+async def test_transaction_cost_with_favorable_slippage_can_be_lower_than_pure_spread():
+    """Negative slippage (a better-than-asked fill) offsets the spread cost —
+    the formula isn't a floor at "spread alone"."""
+    service, events, _ = make_service(FillingBroker(fill_price=2400.25))  # -0.10 slippage
+
+    await service.open_position("XAUUSD", Side.BUY, 0.1, sl=2390.0, tp=2420.0)
+
+    # (0.25 + (-0.10)) * 0.1 * 100 = 1.5
+    assert events[0].transaction_cost == pytest.approx(1.5)
+
+
+async def test_regime_kwargs_pass_through_to_position_opened():
+    service, events, _ = make_service(FillingBroker(fill_price=2400.35))
+
+    await service.open_position(
+        "XAUUSD",
+        Side.BUY,
+        0.1,
+        sl=2390.0,
+        tp=2420.0,
+        regime_volatility="high",
+        regime_volatility_percentile=82.5,
+        regime_trend="trending",
+        regime_adx=27.3,
+        regime_session="london",
+    )
+
+    event = events[0]
+    assert event.regime_volatility == "high"
+    assert event.regime_volatility_percentile == pytest.approx(82.5)
+    assert event.regime_trend == "trending"
+    assert event.regime_adx == pytest.approx(27.3)
+    assert event.regime_session == "london"
+
+
+async def test_regime_kwargs_default_to_none():
+    service, events, _ = make_service(FillingBroker(fill_price=2400.35))
+
+    await service.open_position("XAUUSD", Side.BUY, 0.1, sl=2390.0, tp=2420.0)
+
+    event = events[0]
+    assert event.regime_volatility is None
+    assert event.regime_volatility_percentile is None
+    assert event.regime_trend is None
+    assert event.regime_adx is None
+    assert event.regime_session is None

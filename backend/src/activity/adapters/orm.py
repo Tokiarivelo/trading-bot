@@ -56,3 +56,10 @@ class SignalDecisionRow(Base):
     checks: Mapped[list] = mapped_column(JSON, default=list)
     """`DecisionCheck` tuples as JSON arrays `[name, value, threshold,
     comparison, passed]` — same flat encoding `TradeRow.indicators` uses."""
+    # Regime tagging (OBSERVABILITY_PLAN.md Phase 6). Nullable: every
+    # decision recorded before Phase 6 has no such measurement.
+    regime_volatility: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    regime_volatility_percentile: Mapped[float | None] = mapped_column(Float, nullable=True)
+    regime_trend: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    regime_adx: Mapped[float | None] = mapped_column(Float, nullable=True)
+    regime_session: Mapped[str | None] = mapped_column(String(16), nullable=True)

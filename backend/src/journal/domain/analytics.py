@@ -117,6 +117,24 @@ class BotAnalytics:
     """Mean MAE across *winning* closed trades — "how much heat a winner
     took". Approaching the bot's stop distance means the stops are as tight
     as they can get before winners start being stopped out."""
+    # ── Cost-as-%-of-gross-edge (Phase 6) ───────────────────────────────────
+    # Same "skip unmeasured trades" convention as the Phase 3 fields above —
+    # trades journaled before Phase 6 carry no `transaction_cost` and are
+    # excluded rather than counted as zero cost.
+    total_transaction_cost: float | None
+    """Sum of `transaction_cost` (spread + slippage, in account currency)
+    over this bot's closed, measured trades. None when none are measured."""
+    avg_transaction_cost_per_trade: float | None
+    """`total_transaction_cost` divided by how many closed trades it sums —
+    the per-trade cost drag. None when unmeasured."""
+    cost_pct_of_gross_edge: float | None
+    """`total_transaction_cost / (total_profit + total_transaction_cost)` —
+    the fraction of the bot's gross edge (profit before costs) spent on
+    spread + slippage. This phase's headline finding target: an M1 scalp
+    whose edge per trade is small relative to the spread it pays should show
+    this near or above 1.0. None when unmeasured, or when gross edge isn't
+    positive (mirrors `profit_factor`'s "undefined rather than a divide-by-
+    zero/negative artifact" convention)."""
 
 
 def _closed(trades: list[AnalyticsRecord]) -> list[AnalyticsRecord]:
@@ -260,6 +278,9 @@ def compute_bot_analytics(trades: list[AnalyticsRecord]) -> list[BotAnalytics]:
         slippages = _measured(skill_trades, "slippage")
         avg_mfe = _mean(_measured(closed, "mfe"))
         avg_mae = _mean(_measured(closed, "mae"))
+        costs = _measured(closed, "transaction_cost")
+        total_transaction_cost = sum(costs) if costs else None
+        gross_edge = total_profit + (total_transaction_cost or 0.0)
         results.append(
             BotAnalytics(
                 skill=skill,
@@ -302,6 +323,94 @@ def compute_bot_analytics(trades: list[AnalyticsRecord]) -> list[BotAnalytics]:
                 ),
                 avg_mfe_on_losers=_mean(_measured(losses, "mfe")),
                 avg_mae_on_winners=_mean(_measured(wins, "mae")),
+                total_transaction_cost=total_transaction_cost,
+                avg_transaction_cost_per_trade=_mean(costs),
+                cost_pct_of_gross_edge=(
+                    total_transaction_cost / gross_edge
+                    if total_transaction_cost is not None and gross_edge > 0
+                    else None
+                ),
             )
         )
     return sorted(results, key=lambda b: b.total_profit, reverse=True)
+
+
+@dataclass(frozen=True, kw_only=True)
+class RegimeAnalytics:
+    """One bot's outcome stats within one bucket of one regime dimension —
+    e.g. `pob_snd_zones_xauusd` during `volatility="high"`. Backs the
+    regime-split breakdown (OBSERVABILITY_PLAN.md Phase 6): the same
+    win/PF/expectancy numbers `BotAnalytics` reports overall, sliced one
+    regime dimension at a time so a bot's edge (or lack of one) in a
+    specific market condition doesn't get averaged away by every other
+    condition it also traded through."""
+
+    skill: str
+    bot_name: str
+    dimension: str
+    """Which regime axis this bucket is sliced on — one of 'volatility',
+    'trend', 'session'."""
+    bucket: str
+    """The bucket value within `dimension`, e.g. 'high' (volatility),
+    'trending' (trend), 'london' (session)."""
+    trade_count: int
+    closed_count: int
+    win_count: int
+    loss_count: int
+    win_rate: float
+    profit_factor: float | None
+    expectancy: float
+    total_profit: float
+
+
+# The three regime dimensions this breakdown reports, each read off the
+# matching `regime_<dimension>` attribute `TradeRecord`/`TradeAnalyticsRecord`
+# both carry. Deliberately one dimension at a time rather than the full 3-way
+# cross product (4 volatility buckets x 2 trend x 5 session = 40 sparse
+# per-bot cells would be unreadable) — three one-dimensional breakdowns is
+# the intended, narrower scope here.
+_REGIME_DIMENSIONS: tuple[str, ...] = ("volatility", "trend", "session")
+
+
+def compute_regime_analytics(trades: list[AnalyticsRecord]) -> list[RegimeAnalytics]:
+    """One entry per (bot, dimension, bucket) with at least one attributable
+    trade. Trades with no `skill` (manual/API-placed, same exclusion
+    `compute_bot_analytics` applies) or whose `regime_<dimension>` is `None`
+    (untagged — journaled before Phase 6, or the entry timeframe had no
+    candles to classify) are skipped for that dimension rather than
+    fabricating a synthetic "unknown" bucket. Sorted by
+    `(bot_name, dimension, bucket)`."""
+    by_bucket: dict[tuple[str, str, str], list[AnalyticsRecord]] = defaultdict(list)
+    for dimension in _REGIME_DIMENSIONS:
+        attr = f"regime_{dimension}"
+        for t in trades:
+            skill = t.skill
+            bucket = getattr(t, attr, None)
+            if not skill or bucket is None:
+                continue
+            by_bucket[(skill, dimension, bucket)].append(t)
+
+    results = []
+    for (skill, dimension, bucket), bucket_trades in by_bucket.items():
+        closed = _closed(bucket_trades)
+        wins, losses, _breakeven = _wins_losses_breakeven(closed)
+        gross_profit = sum(t.profit or 0.0 for t in wins)
+        gross_loss = -sum(t.profit or 0.0 for t in losses)
+        total_profit = sum(t.profit or 0.0 for t in closed)
+        results.append(
+            RegimeAnalytics(
+                skill=skill,
+                bot_name=skill.rsplit("/", 1)[-1],
+                dimension=dimension,
+                bucket=bucket,
+                trade_count=len(bucket_trades),
+                closed_count=len(closed),
+                win_count=len(wins),
+                loss_count=len(losses),
+                win_rate=len(wins) / len(closed) if closed else 0.0,
+                profit_factor=_profit_factor(gross_profit, gross_loss),
+                expectancy=total_profit / len(closed) if closed else 0.0,
+                total_profit=total_profit,
+            )
+        )
+    return sorted(results, key=lambda r: (r.bot_name, r.dimension, r.bucket))

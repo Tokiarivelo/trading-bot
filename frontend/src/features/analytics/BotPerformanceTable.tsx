@@ -4,6 +4,7 @@ import type { BotAnalytics } from "@/shared/api/client";
 import { useSortableRows } from "@/shared/hooks/useSortableRows";
 import { SortTh } from "@/shared/ui/SortTh";
 import {
+  costPctTone,
   duration,
   millis,
   money,
@@ -32,7 +33,8 @@ type SortKey =
   | "last_trade_time"
   | "avg_slippage"
   | "avg_execution_latency_ms"
-  | "mfe_mae_ratio";
+  | "mfe_mae_ratio"
+  | "cost_pct_of_gross_edge";
 
 function sortValue(row: BotAnalytics, key: SortKey): string | number | null {
   return row[key];
@@ -112,6 +114,15 @@ export function BotPerformanceTable({
               label="MFE / MAE"
               title="Average maximum favorable vs adverse excursion, in price units — how far trades run for this bot before they turn."
               sortKey="mfe_mae_ratio"
+              sort={sort}
+              onSort={toggle}
+              align="right"
+            />
+            <SortTh
+              className="px-3 py-2 font-medium"
+              label="Cost % of edge"
+              title="Total transaction cost (spread + slippage) as a fraction of gross edge (realized profit before costs). Near or above 100% means this bot is spending its whole edge on execution cost."
+              sortKey="cost_pct_of_gross_edge"
               sort={sort}
               onSort={toggle}
               align="right"
@@ -198,6 +209,17 @@ export function BotPerformanceTable({
               <Td align="right">{millis(b.avg_execution_latency_ms)}</Td>
               <Td align="right">
                 <ExcursionCell bot={b} />
+              </Td>
+              <Td align="right" className={costPctTone(b.cost_pct_of_gross_edge)}>
+                <span
+                  title={
+                    b.cost_pct_of_gross_edge === null
+                      ? "No measured transaction cost yet, or gross edge isn't positive."
+                      : `Total transaction cost ${money(b.total_transaction_cost ?? 0)} vs gross edge (profit before costs).`
+                  }
+                >
+                  {b.cost_pct_of_gross_edge === null ? "—" : pct(b.cost_pct_of_gross_edge)}
+                </span>
               </Td>
               <Td>
                 <RetcodeBadges codes={b.retcode_histogram} />

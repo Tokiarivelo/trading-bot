@@ -39,6 +39,11 @@ class SignalDecisionRepository:
                     reason=decision.reason,
                     confidence=decision.confidence,
                     checks=_encode_checks(decision.checks),
+                    regime_volatility=decision.regime_volatility,
+                    regime_volatility_percentile=decision.regime_volatility_percentile,
+                    regime_trend=decision.regime_trend,
+                    regime_adx=decision.regime_adx,
+                    regime_session=decision.regime_session,
                 )
             )
             session.commit()
@@ -221,4 +226,9 @@ def _to_domain(row: SignalDecisionRow) -> SignalDecision:
         reason=row.reason,
         confidence=row.confidence,
         checks=_decode_checks(row.checks),
+        regime_volatility=row.regime_volatility,
+        regime_volatility_percentile=row.regime_volatility_percentile,
+        regime_trend=row.regime_trend,
+        regime_adx=row.regime_adx,
+        regime_session=row.regime_session,
     )

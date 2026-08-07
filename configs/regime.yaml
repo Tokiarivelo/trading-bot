@@ -1,0 +1,42 @@
+# MARKET-REGIME CONFIG.
+# Drives `engine.domain.regime` — the trend (ADX) classifier and the UTC
+# trading-session boundaries used to tag every signal/trade with the market
+# regime it fired in (OBSERVABILITY_PLAN.md Phase 6: volatility bucket comes
+# from `configs/volatility.yaml`'s own ATR-percentile classifier and is
+# reused as-is, not duplicated here). Read by `TradeEngine` on every entry
+# decision to tag `SignalDecision`/`TradeRecord` — never a live risk gate by
+# itself (nothing here blocks an entry the way the volatility guard does).
+# Like risk.yaml/volatility.yaml, this is trading-behavior config, not a
+# secret — safe to hand-edit, but generated/AI refinement code must not
+# modify it.
+
+# Lookback period (in bars) for the ADX (Average Directional Index) trend
+# classifier — same meaning as any other ADX period, e.g. Wilder's default
+# of 14.
+adx_period: 14
+
+# ADX reading (0-100) at/above which the market is classified TRENDING
+# rather than RANGING. Unlike volatility's percentile thresholds, this is a
+# fixed cutoff, not ranked against trailing history — ADX is already a
+# normalized trend-strength score by construction. 20 is the conventional
+# "trend has started" reading (below ~20 is commonly read as no clear trend,
+# 20-25 as an emerging one); not yet tuned against this project's own bots
+# the way volatility.yaml's percentiles were in Phase D — a first
+# regime-split analytics pass (this phase's own deliverable) is what such a
+# tuning search would need real data from.
+adx_trend_threshold: 20.0
+
+# Trading-session boundaries, UTC hour-of-day (0-23), used to bucket every
+# entry into one of ASIAN / LONDON / OVERLAP / NEW_YORK / OFF_SESSION.
+# OVERLAP is checked first (it sits inside both the London and New York
+# ranges below) so it isn't shadowed by either. Asian wraps past midnight
+# (22 -> 07 UTC); any hour not covered by one of the four named windows
+# falls to OFF_SESSION.
+session_overlap_start_hour: 12
+session_overlap_end_hour: 16
+session_london_start_hour: 7
+session_london_end_hour: 16
+session_new_york_start_hour: 16
+session_new_york_end_hour: 21
+session_asian_start_hour: 22
+session_asian_end_hour: 7

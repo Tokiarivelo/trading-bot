@@ -5,7 +5,11 @@ from __future__ import annotations
 import dataclasses
 from datetime import UTC, datetime
 
-from src.journal.domain.analytics import compute_bot_analytics, compute_symbol_analytics
+from src.journal.domain.analytics import (
+    compute_bot_analytics,
+    compute_regime_analytics,
+    compute_symbol_analytics,
+)
 from src.journal.domain.models import CandleSnapshot, TradeAnalyticsRecord, TradeRecord
 
 
@@ -117,6 +121,10 @@ def _to_analytics_record(record: TradeRecord) -> TradeAnalyticsRecord:
         profit=record.profit,
         skill=record.skill,
         strategy_version=record.strategy_version,
+        regime_volatility=record.regime_volatility,
+        regime_trend=record.regime_trend,
+        regime_session=record.regime_session,
+        transaction_cost=record.transaction_cost,
     )
 
 
@@ -207,6 +215,12 @@ def test_trade_analytics_record_has_no_json_snapshot_or_structure_fields():
         "broker_retcode",
         "mfe",
         "mae",
+        # Regime tagging + transaction cost (OBSERVABILITY_PLAN.md Phase 6) —
+        # bucket strings + cost only, still no JSON.
+        "regime_volatility",
+        "regime_trend",
+        "regime_session",
+        "transaction_cost",
     }
     excluded = {
         "m5_entry_snapshot",
@@ -405,3 +419,123 @@ def test_excursion_is_split_by_outcome_to_answer_tp_and_sl_questions():
 
     assert bots[0].avg_mfe_on_losers == 10.0
     assert bots[0].avg_mae_on_winners == 1.0
+
+
+# ── cost-as-%-of-gross-edge (OBSERVABILITY_PLAN.md Phase 6) ─────────────────
+
+
+def test_bot_analytics_cost_fields_averaged_over_measured_closed_trades():
+    bots = compute_bot_analytics(
+        [
+            telemetry_record("1", profit=10.0, transaction_cost=2.0),
+            telemetry_record("2", profit=10.0, transaction_cost=4.0),
+        ]
+    )
+
+    assert bots[0].total_transaction_cost == 6.0
+    assert bots[0].avg_transaction_cost_per_trade == 3.0
+    # gross_edge = total_profit (20) + total_transaction_cost (6) = 26
+    assert bots[0].cost_pct_of_gross_edge == 6.0 / 26.0
+
+
+def test_bot_analytics_cost_fields_none_when_unmeasured():
+    bots = compute_bot_analytics([telemetry_record("1", profit=10.0)])
+
+    assert bots[0].total_transaction_cost is None
+    assert bots[0].avg_transaction_cost_per_trade is None
+    assert bots[0].cost_pct_of_gross_edge is None
+
+
+def test_cost_pct_of_gross_edge_none_when_gross_edge_not_positive():
+    """A bot that lost more than its cost drag (gross_edge <= 0) reports
+    `cost_pct_of_gross_edge=None` — undefined, like `profit_factor` with no
+    losses, rather than a negative or divide-by-zero artifact."""
+    bots = compute_bot_analytics(
+        [telemetry_record("1", profit=-10.0, transaction_cost=2.0)]
+    )
+
+    # gross_edge = total_profit (-10) + total_transaction_cost (2) = -8 <= 0
+    assert bots[0].total_transaction_cost == 2.0
+    assert bots[0].cost_pct_of_gross_edge is None
+
+
+# ── compute_regime_analytics (OBSERVABILITY_PLAN.md Phase 6) ────────────────
+
+
+def regime_record(id: str, **kw) -> TradeRecord:
+    defaults = dict(
+        skill="normal/xauusd/a",
+        close_time=utc(2026, 7, 10, 15, 0),
+        profit=10.0,
+    )
+    return make_record(id, **{**defaults, **kw})
+
+
+def test_regime_analytics_groups_by_bot_and_bucket_per_dimension():
+    trades = [
+        regime_record("1", profit=10.0, regime_volatility="high", regime_trend="trending",
+                       regime_session="london"),
+        regime_record("2", profit=-4.0, regime_volatility="high", regime_trend="ranging",
+                       regime_session="london"),
+        regime_record("3", profit=6.0, regime_volatility="low", regime_trend="trending",
+                       regime_session="asian"),
+    ]
+
+    results = compute_regime_analytics(trades)
+
+    by_key = {(r.dimension, r.bucket): r for r in results}
+    assert by_key[("volatility", "high")].trade_count == 2
+    assert by_key[("volatility", "high")].total_profit == 6.0
+    assert by_key[("volatility", "low")].trade_count == 1
+    assert by_key[("trend", "trending")].trade_count == 2
+    assert by_key[("trend", "ranging")].trade_count == 1
+    assert by_key[("session", "london")].trade_count == 2
+    assert by_key[("session", "asian")].trade_count == 1
+    # Three dimensions, one bucket-group per dimension present in the trades.
+    assert {r.dimension for r in results} == {"volatility", "trend", "session"}
+
+
+def test_regime_analytics_skips_trades_with_no_skill_or_untagged_dimension():
+    trades = [
+        regime_record("1", skill=None, regime_volatility="high"),  # no skill: excluded entirely
+        regime_record("2", regime_volatility=None, regime_trend="trending"),  # untagged volatility
+    ]
+
+    results = compute_regime_analytics(trades)
+
+    assert all(r.dimension != "volatility" for r in results)
+    assert any(r.dimension == "trend" and r.bucket == "trending" for r in results)
+
+
+def test_regime_analytics_sorted_by_bot_name_dimension_bucket():
+    trades = [
+        regime_record("1", skill="normal/xauusd/b", regime_volatility="low"),
+        regime_record("2", skill="normal/xauusd/a", regime_volatility="high"),
+        regime_record("3", skill="normal/xauusd/a", regime_session="london"),
+    ]
+
+    results = compute_regime_analytics(trades)
+
+    keys = [(r.bot_name, r.dimension, r.bucket) for r in results]
+    assert keys == sorted(keys)
+
+
+def test_regime_analytics_win_rate_and_profit_factor_within_bucket():
+    trades = [
+        regime_record("1", profit=10.0, regime_volatility="high"),
+        regime_record("2", profit=-5.0, regime_volatility="high"),
+    ]
+
+    results = compute_regime_analytics(trades)
+    high = next(r for r in results if r.dimension == "volatility" and r.bucket == "high")
+
+    assert high.win_count == 1
+    assert high.loss_count == 1
+    assert high.win_rate == 0.5
+    assert high.profit_factor == 2.0
+    assert high.expectancy == 2.5
+    assert high.total_profit == 5.0
+
+
+def test_regime_analytics_empty_input_returns_empty_list():
+    assert compute_regime_analytics([]) == []

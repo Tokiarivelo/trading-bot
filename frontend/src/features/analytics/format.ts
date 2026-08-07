@@ -57,3 +57,12 @@ export function slippageTone(value: number | null): string {
   if (value === null) return "text-ink-muted";
   return value > 0 ? "text-err" : "text-ok";
 }
+
+/** Cost-as-%-of-gross-edge (OBSERVABILITY_PLAN.md Phase 6): flags a bot
+ * spending most or all of its edge on spread + slippage — the plan's
+ * headline concern for M1 scalps, whose edge per trade is small relative to
+ * what they pay in cost. */
+export function costPctTone(value: number | null): string {
+  if (value === null) return "text-ink-muted";
+  return value >= 0.75 ? "text-err" : "text-ink";
+}

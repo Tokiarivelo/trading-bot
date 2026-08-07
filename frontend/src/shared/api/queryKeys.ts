@@ -73,6 +73,12 @@ export const queryKeys = {
      * the same date filters as the other analytics queries. */
     signalFunnel: (accountId: string | null, from?: number, to?: number) =>
       ["analytics", "signalFunnel", accountId, from, to] as const,
+    /** `GET /accounts/{id}/journal/analytics/regimes` — per-bot win-rate/PF
+     * breakdown split by market regime (volatility/trend/session)
+     * (OBSERVABILITY_PLAN.md Phase 6). Keyed on the same date filters as the
+     * other analytics queries. */
+    regimes: (accountId: string | null, openFrom?: number, openTo?: number) =>
+      ["analytics", "regimes", accountId, openFrom, openTo] as const,
   },
   history: {
     /** Root key for all trade-history queries for an account — pass to

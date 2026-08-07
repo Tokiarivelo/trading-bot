@@ -36,6 +36,7 @@ from src.engine.application.mtf_confirm import confirm
 from src.engine.application.position_manager import PositionManager
 from src.engine.application.risk_manager import RiskManager
 from src.engine.domain.models import EngineStatus
+from src.engine.domain.regime import EntryRegime, RegimeConfig, compute_entry_regime
 from src.engine.domain.volatility import (
     VolatilityConfig,
     VolatilityRegime,
@@ -107,6 +108,36 @@ def _volatility_check(
     )
 
 
+def _regime_kwargs(regime: EntryRegime | None) -> dict[str, str | float | None]:
+    """Flattens an `EntryRegime` (or `None`) into the five kwargs both
+    `_record_decision` and the `order_service.open_position` call thread
+    through — defined once so the two call sites can never drift apart, and
+    so `nan` (the "insufficient history" sentinel `latest_volatility_regime`/
+    `latest_trend_regime` return, not `None`) is normalized to `None` at this
+    one boundary. Everything downstream of this point — `SignalDecision`,
+    `TradeRecord`, `PositionOpened`, and their JSON serialization — is typed
+    `float | None` and follows this codebase's "unmeasured is None, never
+    NaN" convention throughout; `nan` would otherwise reach a DB column and
+    an API response as an invalid-JSON literal."""
+    if regime is None:
+        return {
+            "regime_volatility": None,
+            "regime_volatility_percentile": None,
+            "regime_trend": None,
+            "regime_adx": None,
+            "regime_session": None,
+        }
+    return {
+        "regime_volatility": regime.volatility.value,
+        "regime_volatility_percentile": (
+            None if math.isnan(regime.volatility_percentile) else regime.volatility_percentile
+        ),
+        "regime_trend": regime.trend.value,
+        "regime_adx": None if math.isnan(regime.adx) else regime.adx,
+        "regime_session": regime.session.value,
+    }
+
+
 def _veto_timeframe(strategy: Strategy) -> str | None:
     """The bot's own HTF veto timeframe: the one immediately above its
     `entry_timeframe`. `None` for a bot already entering on `MN` (nothing to
@@ -151,6 +182,7 @@ class TradeEngine:
         strategy_source: StrategySourcePort,
         entry_timeframe: str,
         volatility_config: VolatilityConfig,
+        regime_config: RegimeConfig | None = None,
         signal_decisions: SignalDecisionSinkPort | None = None,
         event_bus: EventBus | None = None,
         enabled: bool = True,
@@ -169,6 +201,18 @@ class TradeEngine:
         self._strategy_source = strategy_source
         self._entry_timeframe = entry_timeframe
         self._volatility_config = volatility_config
+        # Regime tagging (OBSERVABILITY_PLAN.md Phase 6) — always-on and
+        # unconditional, unlike `volatility_config`'s guard: every signal
+        # gets a regime snapshot for analytics regardless of whether the
+        # volatility guard itself is enabled. Defaulted (unlike
+        # `volatility_config`, which is required) so the many existing tests
+        # constructing a bare `TradeEngine(...)` don't all need updating —
+        # same reasoning `context_bars`/`clock`/`context_builder` above are
+        # defaulted for. `None` (rather than a mutable-default-style
+        # `RegimeConfig()` literal in the signature, which ruff's B008 rule
+        # rejects for a plain function parameter) resolved to a fresh
+        # default instance here.
+        self._regime_config = regime_config if regime_config is not None else RegimeConfig()
         self._volatility_guard_enabled = True
         # Typed decision trail (OBSERVABILITY_PLAN.md Phase 1). Optional so a
         # backtest engine / unit test can run without a database; when absent
@@ -401,6 +445,7 @@ class TradeEngine:
         signal: Signal,
         price: float,
         created_at: datetime,
+        regime: EntryRegime | None,
     ) -> None:
         if self._signal_decisions is None:
             return
@@ -415,6 +460,7 @@ class TradeEngine:
             created_at=created_at,
             reason=signal.reason,
             confidence=signal.confidence,
+            **_regime_kwargs(regime),
         )
 
     async def _record_outcome(
@@ -502,6 +548,29 @@ class TradeEngine:
             first_signal.reason,
         )
         observe_signal_fired(bot=decision.skill_name, symbol=symbol)
+
+        # Regime tagging (OBSERVABILITY_PLAN.md Phase 6) — a new, always-on
+        # snapshot independent of the gated volatility-guard block further
+        # down (which only runs when the guard is enabled and after earlier
+        # gates already passed): every recorded signal needs a regime tag,
+        # not only the ones that reach that gate. Some redundant computation
+        # with the guard below is expected and fine — this is a tagging
+        # concern, not a live risk-management decision, so it's computed
+        # unconditionally here rather than reusing the guard's result. Named
+        # `entry_regime` (not `regime`) to avoid shadowing the volatility
+        # guard's own `regime: VolatilityRegime` local further down.
+        tag_entry_frame = ctx.candles.get(strategy.spec.entry_timeframe)
+        entry_regime = (
+            compute_entry_regime(
+                tag_entry_frame,
+                now=now,
+                volatility_config=self._volatility_config,
+                regime_config=self._regime_config,
+            )
+            if tag_entry_frame is not None and not tag_entry_frame.empty
+            else None
+        )
+
         # Recorded before any gate runs, so a signal that is immediately
         # vetoed still exists in the trail with outcome="skipped" until its
         # terminal outcome lands below. `signal_id` was minted by the caller
@@ -515,6 +584,7 @@ class TradeEngine:
             signal=first_signal,
             price=signal_price,
             created_at=now,
+            regime=entry_regime,
         )
 
         if strategy.spec.close_on_opposite_signal:
@@ -810,6 +880,7 @@ class TradeEngine:
                         (r.name, r.value, r.threshold, r.comparison, r.passed)
                         for r in signal.indicators
                     ),
+                    **_regime_kwargs(entry_regime),
                 )
             except OrderRejected:
                 continue  # spread/RR gate already logged the veto inside order_service

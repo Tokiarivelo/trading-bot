@@ -87,6 +87,11 @@ class OrderService:
         indicators: tuple[tuple[str, float, float, str, bool], ...] = (),
         signal_id: str | None = None,
         signal_emitted_at: datetime | None = None,
+        regime_volatility: str | None = None,
+        regime_volatility_percentile: float | None = None,
+        regime_trend: str | None = None,
+        regime_adx: float | None = None,
+        regime_session: str | None = None,
     ) -> ExecutionResult:
         """`max_spread_points`, when set, overrides the symbol's configured
         cap for this order only — used by news skills to widen (or, in
@@ -111,7 +116,12 @@ class OrderService:
         instant the strategy emitted the signal — passed down explicitly so
         measuring execution latency costs no database read on the order path;
         it is the emit end of the `signal_id` decision's signal→fill span
-        (OBSERVABILITY_PLAN.md Phase 3)."""
+        (OBSERVABILITY_PLAN.md Phase 3). `regime_volatility`/
+        `regime_volatility_percentile`/`regime_trend`/`regime_adx`/
+        `regime_session` are the market-regime snapshot the engine computed
+        at signal time (`engine.domain.regime.compute_entry_regime`,
+        OBSERVABILITY_PLAN.md Phase 6) — passthrough only, like the
+        `zone_*`/`pattern` fields above, straight into `PositionOpened`."""
         info = await self._market_data.get_symbol_info(symbol)
         reference_price = info.ask if side is Side.BUY else info.bid
         sl_distance = abs(reference_price - sl) if sl is not None else None
@@ -231,6 +241,15 @@ class OrderService:
             if signal_emitted_at is not None
             else None
         )
+        # Transaction cost (OBSERVABILITY_PLAN.md Phase 6, cost-as-%-of-edge):
+        # spread paid plus signed slippage, converted from price units to
+        # account currency via the symbol's contract size. `info` (fetched at
+        # the top of this method) is still the same `SymbolInfo` the spread
+        # gate evaluated against, so `spread_points`/`point`/`contract_size`
+        # all describe this exact fill.
+        transaction_cost = (
+            (info.spread_points * info.point + slippage) * volume * info.contract_size
+        )
         logger.info(
             "ENTRY OPENED: ticket=%d %s %s %.2f lots @ %.5f (requested %.5f, slippage %+.5f) "
             "sl=%s tp=%s spread=%dpts latency=%sms retcode=%s "
@@ -281,6 +300,12 @@ class OrderService:
                 slippage=slippage,
                 execution_latency_ms=execution_latency_ms,
                 broker_retcode=result.retcode,
+                transaction_cost=transaction_cost,
+                regime_volatility=regime_volatility,
+                regime_volatility_percentile=regime_volatility_percentile,
+                regime_trend=regime_trend,
+                regime_adx=regime_adx,
+                regime_session=regime_session,
             )
         )
         return result

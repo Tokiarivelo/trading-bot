@@ -92,6 +92,28 @@ class TradeRecord:
     mae: float | None = None
     """Maximum adverse excursion in price units — the furthest the market
     ever moved against the trade from entry. Non-negative."""
+    # ── Regime tagging (OBSERVABILITY_PLAN.md Phase 6) ─────────────────────
+    # Snapshotted by `engine/application/trade_loop.py` at the moment the
+    # signal fired (`engine.domain.regime.compute_entry_regime`) and carried
+    # here on `PositionOpened`. All None for trades journaled before Phase 6,
+    # and for fills whose entry timeframe had no candles to classify.
+    regime_volatility: str | None = None
+    """`VolatilityRegime` value at entry — 'low'/'normal'/'high'/'extreme'."""
+    regime_volatility_percentile: float | None = None
+    """The ATR percentile rank behind `regime_volatility` (0-100)."""
+    regime_trend: str | None = None
+    """`TrendRegime` value at entry — 'trending'/'ranging'."""
+    regime_adx: float | None = None
+    """Raw ADX reading behind `regime_trend`."""
+    regime_session: str | None = None
+    """`TradingSession` value at entry — 'asian'/'london'/'overlap'/
+    'new_york'/'off_session'."""
+    transaction_cost: float | None = None
+    """Spread + slippage cost of this fill, in account currency: `(spread_points
+    * point + slippage) * volume * contract_size`. Computed by
+    `broker/application/order_service.py` around the broker call — the same
+    place execution telemetry (Phase 3) is measured. None for trades
+    journaled before Phase 6."""
 
     @property
     def is_open(self) -> bool:
@@ -117,8 +139,9 @@ class OpenTradeExcursion:
 class TradeAnalyticsRecord:
     """Slim projection of `TradeRecord` carrying only the fields
     `domain/analytics.py`'s aggregation actually reads (id, symbol, volume,
-    open/close time, profit, skill, strategy_version, and the Phase 3
-    execution-telemetry/excursion columns). Backs
+    open/close time, profit, skill, strategy_version, the Phase 3
+    execution-telemetry/excursion columns, and the Phase 6 regime-bucket +
+    transaction-cost columns). Backs
     `JournalRepository.get_all_for_analytics`, which selects just these
     columns so SQLAlchemy never deserializes the four JSON snapshot/structure
     columns (`m5/h1_entry/exit_snapshot`, `structure`) that analytics never
@@ -138,6 +161,14 @@ class TradeAnalyticsRecord:
     broker_retcode: int | None = None
     mfe: float | None = None
     mae: float | None = None
+    # Regime tagging (OBSERVABILITY_PLAN.md Phase 6) — bucket strings + cost
+    # only; the two raw floats (`regime_volatility_percentile`, `regime_adx`)
+    # aren't read by any analytics aggregation, so they're left off this slim
+    # projection the same way the other unused `TradeRecord` fields are.
+    regime_volatility: str | None = None
+    regime_trend: str | None = None
+    regime_session: str | None = None
+    transaction_cost: float | None = None
 
     @property
     def is_open(self) -> bool:

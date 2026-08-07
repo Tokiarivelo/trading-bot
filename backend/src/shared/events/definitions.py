@@ -73,6 +73,26 @@ class PositionOpened(Event):
     broker_retcode: int | None = None
     """Broker return code for the fill (MT5 10009 = done). None for brokers
     with no such concept (paper)."""
+    # ── Regime tagging (Phase 6) ─────────────────────────────────────────
+    # Snapshotted by `engine/application/trade_loop.py` at signal time
+    # (`engine.domain.regime.compute_entry_regime`) and carried to the
+    # journal, which is the only subscriber that stores them.
+    transaction_cost: float | None = None
+    """Spread + slippage cost of this fill, in account currency — see
+    `broker.application.order_service.OrderService.open_position`. None for
+    fills whose caller had no reference price to compute it from."""
+    regime_volatility: str | None = None
+    """`VolatilityRegime` value at signal time — 'low'/'normal'/'high'/
+    'extreme'. None when the entry timeframe had no candles to classify."""
+    regime_volatility_percentile: float | None = None
+    """The ATR percentile rank behind `regime_volatility` (0-100)."""
+    regime_trend: str | None = None
+    """`TrendRegime` value at signal time — 'trending'/'ranging'."""
+    regime_adx: float | None = None
+    """Raw ADX reading behind `regime_trend`."""
+    regime_session: str | None = None
+    """`TradingSession` value at signal time — 'asian'/'london'/'overlap'/
+    'new_york'/'off_session'."""
 
 
 @dataclass(frozen=True, kw_only=True)

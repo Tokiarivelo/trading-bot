@@ -4,6 +4,7 @@ from src.broker.domain.trading import ExecutionResult, OrderRejected, Position, 
 from src.engine.application.risk_manager import RiskManager
 from src.engine.application.trade_loop import TradeEngine, _veto_timeframe
 from src.engine.domain.models import RiskCaps
+from src.engine.domain.regime import RegimeConfig
 from src.engine.domain.volatility import VolatilityConfig
 from src.market_data.domain.models import Candle, SymbolInfo, Timeframe
 from src.shared.events.bus import EventBus
@@ -198,6 +199,11 @@ class FakeOrderService:
         indicators=(),
         signal_id=None,
         signal_emitted_at=None,
+        regime_volatility=None,
+        regime_volatility_percentile=None,
+        regime_trend=None,
+        regime_adx=None,
+        regime_session=None,
     ):
         self.signal_ids.append(signal_id)
         self.signal_emit_times.append(signal_emitted_at)
@@ -228,6 +234,11 @@ class FakeOrderService:
                 pattern=pattern,
                 structure=structure,
                 indicators=indicators,
+                regime_volatility=regime_volatility,
+                regime_volatility_percentile=regime_volatility_percentile,
+                regime_trend=regime_trend,
+                regime_adx=regime_adx,
+                regime_session=regime_session,
             )
         )
         # Reflected in the next get_positions() call, same as a real broker
@@ -369,7 +380,9 @@ def make_engine(
     context_bars=5,
     event_bus=None,
     volatility_config=None,
+    regime_config=None,
     signal_decisions=None,
+    clock=None,
 ):
     market_data = market_data or FakeMarketData(bar_count=context_bars)
     order_service = order_service or FakeOrderService()
@@ -385,6 +398,7 @@ def make_engine(
     # NORMAL/nan — i.e. today's unscaled behavior — unless a test opts into a
     # tuned config via the parameter below.
     volatility_config = volatility_config or VolatilityConfig()
+    regime_config = regime_config or RegimeConfig()
 
     engine = TradeEngine(
         market_data=market_data,
@@ -396,10 +410,12 @@ def make_engine(
         strategy_source=strategy_source,
         entry_timeframe="M5",
         volatility_config=volatility_config,
+        regime_config=regime_config,
         signal_decisions=signal_decisions,
         event_bus=event_bus,
         enabled=enabled,
         context_bars=context_bars,
+        **({"clock": clock} if clock is not None else {}),
     )
     return engine, order_service, risk_manager, position_manager
 
@@ -420,6 +436,70 @@ async def test_successful_entry_opens_position_with_strategy_and_skill():
     assert order["confidence"] == 1.0
     assert risk_manager.status.trades_today == 1
     assert position_manager.calls == ["XAUUSD"]
+
+
+# ── regime tagging (OBSERVABILITY_PLAN.md Phase 6) ──────────────────────────
+
+
+async def test_order_carries_a_regime_tag_computed_from_the_entry_frame():
+    """5 bars is far short of ADX's/ATR's warm-up (needs 14+), so the tag
+    still lands on the classifiers' own "insufficient history" defaults
+    (NORMAL/RANGING, nan normalized to None) — the point here is that the
+    order call receives *a* regime tag at all, sourced from the entry
+    timeframe's own candles, not that this particular fixture trends."""
+    fixed_now = datetime(2026, 8, 7, 13, 0, tzinfo=UTC)  # OVERLAP under default RegimeConfig
+    engine, order_service, *_ = make_engine(clock=lambda: fixed_now)
+
+    await engine.on_candle_closed(CandleClosed(symbol="XAUUSD", timeframe="M5"))
+
+    order = order_service.opened[0]
+    assert order["regime_volatility"] == "normal"
+    assert order["regime_volatility_percentile"] is None
+    assert order["regime_trend"] == "ranging"
+    assert order["regime_adx"] is None
+    assert order["regime_session"] == "overlap"
+
+
+async def test_regime_is_computed_once_and_identical_on_the_decision_and_the_order():
+    """The engine must not recompute the regime independently for the
+    decision record and the order call — both have to read off the exact
+    same `compute_entry_regime` result for one signal."""
+    from tests.unit.engine.test_signal_decisions import FakeSignalDecisionSink
+
+    fixed_now = datetime(2026, 8, 7, 3, 0, tzinfo=UTC)  # ASIAN (midnight-wrap)
+    sink = FakeSignalDecisionSink()
+    engine, order_service, *_ = make_engine(clock=lambda: fixed_now, signal_decisions=sink)
+
+    await engine.on_candle_closed(CandleClosed(symbol="XAUUSD", timeframe="M5"))
+
+    recorded = sink.recorded[0]
+    order = order_service.opened[0]
+    regime_fields = (
+        "regime_volatility",
+        "regime_volatility_percentile",
+        "regime_trend",
+        "regime_adx",
+        "regime_session",
+    )
+    for field in regime_fields:
+        assert recorded[field] == order[field], field
+    assert recorded["regime_session"] == "asian"
+
+
+async def test_no_candles_for_the_entry_timeframe_tags_no_regime():
+    """`compute_entry_regime` returns `None` on an empty/missing frame —
+    this must reach the order call as all-`None` regime kwargs, not a
+    fabricated tag."""
+    engine, order_service, *_ = make_engine(market_data=FakeMarketData(bar_count=0))
+
+    await engine.on_candle_closed(CandleClosed(symbol="XAUUSD", timeframe="M5"))
+
+    order = order_service.opened[0]
+    assert order["regime_volatility"] is None
+    assert order["regime_volatility_percentile"] is None
+    assert order["regime_trend"] is None
+    assert order["regime_adx"] is None
+    assert order["regime_session"] is None
 
 
 async def test_non_entry_timeframe_is_ignored():

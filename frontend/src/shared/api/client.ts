@@ -452,6 +452,31 @@ export interface BotAnalytics {
   mfe_mae_ratio: number | null;
   avg_mfe_on_losers: number | null; // high vs avg_win => take-profits are too far
   avg_mae_on_winners: number | null; // near the stop distance => stops are too tight
+  // Cost-as-%-of-gross-edge (OBSERVABILITY_PLAN.md Phase 6). Null throughout
+  // means "never measured" — same skip-don't-zero convention as the Phase 3
+  // fields above.
+  total_transaction_cost: number | null; // sum of spread+slippage cost, account currency
+  avg_transaction_cost_per_trade: number | null;
+  cost_pct_of_gross_edge: number | null; // near/above 1.0 => spending the whole edge on costs
+}
+
+/** One bot's outcome stats within one bucket of one regime dimension — one
+ * entry per (bot, dimension, bucket) on `GET .../journal/analytics/regimes`
+ * (OBSERVABILITY_PLAN.md Phase 6). The same win/PF/expectancy shape
+ * `BotAnalytics` reports overall, sliced to one regime dimension at a time. */
+export interface RegimeAnalytics {
+  skill: string;
+  bot_name: string;
+  dimension: "volatility" | "trend" | "session";
+  bucket: string; // e.g. "high" (volatility), "trending" (trend), "london" (session)
+  trade_count: number;
+  closed_count: number;
+  win_count: number;
+  loss_count: number;
+  win_rate: number; // 0..1
+  profit_factor: number | null;
+  expectancy: number;
+  total_profit: number;
 }
 
 /** One bucket of a bot's broker-return-code histogram. */
@@ -486,6 +511,19 @@ export const getSymbolAnalytics = (accountId: string, filters?: AnalyticsDateFil
  * descending. Trades with no `skill` (manual/API) are excluded. */
 export const getBotAnalytics = (accountId: string, filters?: AnalyticsDateFilters) =>
   api.get<BotAnalytics[]>(acctPath(accountId, `/journal/analytics/bots${toAnalyticsQs(filters)}`));
+
+/** Per-bot win-rate/PF/expectancy split by market regime (volatility, trend,
+ * session) at entry — one entry per (bot, dimension, bucket) with at least
+ * one attributable trade (OBSERVABILITY_PLAN.md Phase 6). */
+export const getRegimeAnalytics = (
+  accountId: string,
+  filters?: AnalyticsDateFilters,
+  signal?: AbortSignal,
+) =>
+  api.get<RegimeAnalytics[]>(
+    acctPath(accountId, `/journal/analytics/regimes${toAnalyticsQs(filters)}`),
+    signal,
+  );
 
 // ── Activity log (persisted "what is the bot doing and why") ───────────────
 

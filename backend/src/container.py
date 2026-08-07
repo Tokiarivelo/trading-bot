@@ -75,6 +75,7 @@ from src.engine.application.position_manager import PositionManager
 from src.engine.application.risk_manager import RiskManager, apply_risk_override
 from src.engine.application.trade_loop import TradeEngine
 from src.engine.domain.models import RiskCaps
+from src.engine.domain.regime import RegimeConfig
 from src.engine.domain.volatility import VolatilityConfig
 from src.indicators.adapters.repository import IndicatorRepository
 from src.indicators.application.service import IndicatorService
@@ -102,6 +103,7 @@ from src.shared.config.loaders import (
     load_maintenance_config,
     load_news_config,
     load_refinement_config,
+    load_regime_config,
     load_risk_caps,
     load_symbol_trading_config,
     load_volatility_config,
@@ -466,6 +468,7 @@ def build_container(settings: Settings | None = None) -> Container:
 
     global_risk_caps = load_risk_caps(settings.configs_dir)
     volatility_config = load_volatility_config(settings.configs_dir)
+    regime_config = load_regime_config(settings.configs_dir)
     account_risk_caps = {
         cfg.id: _resolve_account_risk_caps(global_risk_caps, cfg, settings.configs_dir)
         for cfg in account_configs
@@ -600,6 +603,7 @@ def build_container(settings: Settings | None = None) -> Container:
             baseline_strategies=baseline_strategies,
             risk_caps=account_risk_caps[account_cfg.id],
             volatility_config=volatility_config,
+            regime_config=regime_config,
             spread_gate=spread_gate,
             review_every_n_trades=review_every_n_trades,
             skill_selector=skill_selector,
@@ -667,6 +671,7 @@ def build_account_runtime(
     baseline_strategies: list[tuple[str, Strategy]],
     risk_caps: RiskCaps,
     volatility_config: VolatilityConfig,
+    regime_config: RegimeConfig,
     spread_gate: SpreadGate,
     review_every_n_trades: int,
     skill_selector: SkillSelectorPort,
@@ -850,6 +855,7 @@ def build_account_runtime(
         strategy_source=strategy_registry,
         entry_timeframe=engine_config.get("entry_timeframe", "M5"),
         volatility_config=volatility_config,
+        regime_config=regime_config,
         signal_decisions=signal_decisions,
         event_bus=event_bus,
         enabled=engine_config.get("enabled", True),

@@ -13,6 +13,7 @@ from src.journal.api.schemas import (
     DecisionContextOut,
     EquityPointOut,
     IndicatorReadingOut,
+    RegimeAnalyticsOut,
     RetcodeCountOut,
     StructurePointOut,
     SymbolAnalyticsOut,
@@ -21,7 +22,7 @@ from src.journal.api.schemas import (
     ZoneOut,
 )
 from src.journal.application.trade_journal import TradeJournalService
-from src.journal.domain.analytics import BotAnalytics, SymbolAnalytics
+from src.journal.domain.analytics import BotAnalytics, RegimeAnalytics, SymbolAnalytics
 from src.journal.domain.models import CandleSnapshot, TradeRecord
 from src.shared.api.dependencies import AccountRuntimeDep
 
@@ -95,6 +96,12 @@ def _trade_out(record: TradeRecord) -> TradeRecordOut:
             IndicatorReadingOut(name=n, value=v, threshold=t, comparison=c, passed=p)
             for n, v, t, c, p in record.indicators
         ],
+        regime_volatility=record.regime_volatility,
+        regime_volatility_percentile=record.regime_volatility_percentile,
+        regime_trend=record.regime_trend,
+        regime_adx=record.regime_adx,
+        regime_session=record.regime_session,
+        transaction_cost=record.transaction_cost,
     )
 
 
@@ -328,6 +335,26 @@ def _bot_analytics_out(a: BotAnalytics) -> BotAnalyticsOut:
         mfe_mae_ratio=a.mfe_mae_ratio,
         avg_mfe_on_losers=a.avg_mfe_on_losers,
         avg_mae_on_winners=a.avg_mae_on_winners,
+        total_transaction_cost=a.total_transaction_cost,
+        avg_transaction_cost_per_trade=a.avg_transaction_cost_per_trade,
+        cost_pct_of_gross_edge=a.cost_pct_of_gross_edge,
+    )
+
+
+def _regime_analytics_out(a: RegimeAnalytics) -> RegimeAnalyticsOut:
+    return RegimeAnalyticsOut(
+        skill=a.skill,
+        bot_name=a.bot_name,
+        dimension=a.dimension,
+        bucket=a.bucket,
+        trade_count=a.trade_count,
+        closed_count=a.closed_count,
+        win_count=a.win_count,
+        loss_count=a.loss_count,
+        win_rate=a.win_rate,
+        profit_factor=a.profit_factor,
+        expectancy=a.expectancy,
+        total_profit=a.total_profit,
     )
 
 
@@ -371,7 +398,9 @@ async def get_symbol_analytics(
         "execution quality per bot — average slippage, average signal-to-fill latency, a "
         "broker-return-code histogram, and MFE/MAE excursion aggregates, which answer whether "
         "a bot's take-profits sit past where price turns and whether its stops are too tight. "
-        "Powers the analytics dashboard's bot comparison and equity-curve charts."
+        "Also reports total/average transaction cost and cost_pct_of_gross_edge — what fraction "
+        "of the bot's edge before costs is spent on spread + slippage. Powers the analytics "
+        "dashboard's bot comparison and equity-curve charts."
     ),
 )
 async def get_bot_analytics(
@@ -387,3 +416,38 @@ async def get_bot_analytics(
         open_from=open_from, open_to=open_to
     )
     return [_bot_analytics_out(a) for a in analytics]
+
+
+@router.get(
+    "/analytics/regimes",
+    response_model=list[RegimeAnalyticsOut],
+    summary="Get per-bot trading analytics split by market regime",
+    description=(
+        "Aggregates every journaled trade grouped by bot (`skill`) and, separately, by each of "
+        "three market-regime dimensions the trade was tagged with at entry "
+        "(OBSERVABILITY_PLAN.md Phase 6): volatility bucket ('low'/'normal'/'high'/'extreme'), "
+        "trend/range ('trending'/'ranging'), and trading session ('asian'/'london'/'overlap'/"
+        "'new_york'/'off_session'). One entry per (bot, dimension, bucket) with at least one "
+        "attributable trade — win rate, profit factor, expectancy, and total profit, sliced to "
+        "that bucket only. Reports each dimension independently rather than the full cross "
+        "product, so a bot's edge (or lack of one) in a specific market condition doesn't get "
+        "averaged away by every other condition it also traded through. Trades with no `skill` "
+        "or whose regime tag is missing (journaled before Phase 6, or the entry timeframe had "
+        "no candles to classify) are excluded rather than fabricating an 'unknown' bucket. Use "
+        "this to answer 'is this bot's edge (or a scalp's cost burden) regime-dependent', "
+        "alongside `GET .../analytics/bots` for the bot's overall numbers."
+    ),
+)
+async def get_regime_analytics(
+    account: AccountRuntimeDep,
+    open_from: int | None = Query(
+        default=None, description="Only trades opened at/after this epoch-seconds UTC."
+    ),
+    open_to: int | None = Query(
+        default=None, description="Only trades opened at/before this epoch-seconds UTC."
+    ),
+) -> list[RegimeAnalyticsOut]:
+    analytics = await _service(account).get_regime_analytics(
+        open_from=open_from, open_to=open_to
+    )
+    return [_regime_analytics_out(a) for a in analytics]

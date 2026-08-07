@@ -23,6 +23,11 @@ def _decision(
     bot: str = "normal/xauusd/breakout_v1",
     account_id: str = "default",
     checks: tuple[DecisionCheck, ...] = (),
+    regime_volatility: str | None = None,
+    regime_volatility_percentile: float | None = None,
+    regime_trend: str | None = None,
+    regime_adx: float | None = None,
+    regime_session: str | None = None,
 ) -> SignalDecision:
     return SignalDecision(
         signal_id=signal_id,
@@ -38,6 +43,11 @@ def _decision(
         reason="retest of demand",
         confidence=0.8,
         checks=checks,
+        regime_volatility=regime_volatility,
+        regime_volatility_percentile=regime_volatility_percentile,
+        regime_trend=regime_trend,
+        regime_adx=regime_adx,
+        regime_session=regime_session,
     )
 
 
@@ -47,6 +57,43 @@ def test_save_and_list_round_trips_every_field(repository):
     (loaded,) = repository.list_for_bot(bot="normal/xauusd/breakout_v1")
 
     assert loaded == _decision("a")
+
+
+def test_save_and_list_round_trips_regime_tag(repository):
+    """Regime tagging (OBSERVABILITY_PLAN.md Phase 6)."""
+    repository.save(
+        _decision(
+            "a",
+            regime_volatility="high",
+            regime_volatility_percentile=82.5,
+            regime_trend="trending",
+            regime_adx=27.3,
+            regime_session="london",
+        )
+    )
+
+    (loaded,) = repository.list_for_bot(bot="normal/xauusd/breakout_v1")
+
+    assert loaded == _decision(
+        "a",
+        regime_volatility="high",
+        regime_volatility_percentile=82.5,
+        regime_trend="trending",
+        regime_adx=27.3,
+        regime_session="london",
+    )
+
+
+def test_regime_fields_default_to_none(repository):
+    repository.save(_decision("a"))
+
+    (loaded,) = repository.list_for_bot(bot="normal/xauusd/breakout_v1")
+
+    assert loaded.regime_volatility is None
+    assert loaded.regime_volatility_percentile is None
+    assert loaded.regime_trend is None
+    assert loaded.regime_adx is None
+    assert loaded.regime_session is None
 
 
 def test_list_for_bot_is_oldest_first_and_scoped(repository):

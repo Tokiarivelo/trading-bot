@@ -61,3 +61,12 @@ class TradeRow(Base):
     broker_retcode: Mapped[int | None] = mapped_column(Integer, nullable=True)
     mfe: Mapped[float | None] = mapped_column(Float, nullable=True)
     mae: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # Regime tagging + transaction cost (OBSERVABILITY_PLAN.md Phase 6).
+    # Nullable throughout: every trade journaled before Phase 6 has no such
+    # measurement.
+    regime_volatility: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    regime_volatility_percentile: Mapped[float | None] = mapped_column(Float, nullable=True)
+    regime_trend: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    regime_adx: Mapped[float | None] = mapped_column(Float, nullable=True)
+    regime_session: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    transaction_cost: Mapped[float | None] = mapped_column(Float, nullable=True)

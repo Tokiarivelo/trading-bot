@@ -12,6 +12,7 @@ from src.alerting.domain.models import AlertEventFlags, AlertingConfig, SilenceC
 from src.broker.domain.account import AccountConfig
 from src.broker.domain.symbol_config import SymbolTradingConfig
 from src.engine.domain.models import RiskCaps
+from src.engine.domain.regime import RegimeConfig
 from src.engine.domain.volatility import VolatilityConfig
 from src.news.domain.models import ImpactLevel, NewsConfig, TrackedEvent
 from src.shared.config.maintenance import MaintenanceConfig
@@ -80,6 +81,22 @@ def load_volatility_config(configs_dir: Path) -> VolatilityConfig:
         extreme_profit_lock_r_mult=data.get("extreme_profit_lock_r_mult", 0.5),
         chandelier_atr_mult=data.get("chandelier_atr_mult", 2.0),
         chandelier_min_profit_r=data.get("chandelier_min_profit_r", 1.0),
+    )
+
+
+def load_regime_config(configs_dir: Path) -> RegimeConfig:
+    data = load_yaml_config("regime", configs_dir)
+    return RegimeConfig(
+        adx_period=data.get("adx_period", 14),
+        adx_trend_threshold=data.get("adx_trend_threshold", 20.0),
+        session_overlap_start_hour=data.get("session_overlap_start_hour", 12),
+        session_overlap_end_hour=data.get("session_overlap_end_hour", 16),
+        session_london_start_hour=data.get("session_london_start_hour", 7),
+        session_london_end_hour=data.get("session_london_end_hour", 16),
+        session_new_york_start_hour=data.get("session_new_york_start_hour", 16),
+        session_new_york_end_hour=data.get("session_new_york_end_hour", 21),
+        session_asian_start_hour=data.get("session_asian_start_hour", 22),
+        session_asian_end_hour=data.get("session_asian_end_hour", 7),
     )
 
 

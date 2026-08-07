@@ -35,9 +35,18 @@ class SignalDecisionSinkPort(Protocol):
         created_at: datetime,
         reason: str,
         confidence: float | None,
+        regime_volatility: str | None = None,
+        regime_volatility_percentile: float | None = None,
+        regime_trend: str | None = None,
+        regime_adx: float | None = None,
+        regime_session: str | None = None,
     ) -> None:
         """Records a freshly fired signal with no terminal outcome yet
-        (`outcome="skipped"`)."""
+        (`outcome="skipped"`). `regime_*` (OBSERVABILITY_PLAN.md Phase 6) is
+        the market-regime snapshot the engine computed at signal time
+        (`engine.domain.regime.compute_entry_regime`) — optional and
+        defaulted so every pre-Phase-6 caller keeps working unchanged;
+        `None` when the entry timeframe had no candles to classify."""
 
     async def record_outcome(
         self,
