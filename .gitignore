@@ -34,6 +34,7 @@ gateway/run/
 # Backtest outputs
 backend/src/backtest/reports/*
 !backend/src/backtest/reports/.gitkeep
+!backend/src/backtest/reports/*.py
 
 # OS / editors
 .DS_Store
